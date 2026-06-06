@@ -68,6 +68,9 @@ async function getPort() {
   await nextTick();
   await nextTick();
   await nextTick();
+  if (/Electron/i.test(navigator.userAgent)) {
+    isElectron.value = true;
+  }
   try {
     const res = await fetch("toonflow://getAppUrl");
     const data = await res.json();

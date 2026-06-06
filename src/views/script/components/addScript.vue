@@ -99,7 +99,7 @@ function triggerUpload(): void {
 // 读取文件内容
 async function readFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
-  if (file.type === "text/plain") {
+  if (file.type === "text/plain" || file.type === "text/markdown" || file.name.toLowerCase().endsWith(".md")) {
     return new TextDecoder().decode(buffer);
   }
   const result = await mammoth.extractRawText({ arrayBuffer: buffer });
@@ -113,14 +113,16 @@ async function handleBeforeUpload(file: UploadFile): Promise<boolean> {
     return false;
   }
 
-  const allowTypes = ["text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
+  const fileName = rawFile.name.toLowerCase();
+  const allowTypes = ["text/plain", "text/markdown", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
+  const allowExtensions = [".txt", ".md", ".docx"];
 
   if (rawFile.type === "application/msword") {
     window.$message.warning($t("workbench.script.add.msg.docNotSupported"));
     fileList.value = [];
     return false;
   }
-  if (!allowTypes.includes(rawFile.type)) {
+  if (!allowTypes.includes(rawFile.type) && !allowExtensions.some((ext) => fileName.endsWith(ext))) {
     window.$message.error($t("workbench.script.add.msg.unsupportedType"));
     fileList.value = [];
     return false;

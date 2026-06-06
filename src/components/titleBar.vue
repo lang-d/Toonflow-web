@@ -4,13 +4,13 @@
       <span class="titleBar-text">ToonFlow</span>
     </div>
     <div class="titleBar-controls">
-      <div class="titleBar-btn" @click="handleMinimize">
+      <div class="titleBar-btn" @mousedown.stop @click.stop="handleMinimize">
         <i-round theme="filled" size="13" fill="#febc2e" />
       </div>
-      <div class="titleBar-btn" @click="handleMaximize">
+      <div class="titleBar-btn" @mousedown.stop @click.stop="handleMaximize">
         <i-round theme="filled" size="13" fill="#28c840" />
       </div>
-      <div class="titleBar-btn" @click="handleClose">
+      <div class="titleBar-btn" @mousedown.stop @click.stop="handleClose">
         <i-round theme="filled" size="13" fill="#ff5f57" />
       </div>
     </div>
@@ -22,8 +22,9 @@ const isMaximized = ref(false);
 
 async function electronAction(action: string) {
   try {
-    const res = await fetch(`toonflow://${action}`);
-    return await res.json();
+    const res = await fetch(`toonflow://${action.toLowerCase()}`);
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
   } catch {
     // 非 Electron 环境或请求失败
   }
@@ -107,6 +108,7 @@ onUnmounted(() => {
   cursor: pointer;
   transition: opacity 0.15s;
   line-height: 0;
+  -webkit-app-region: no-drag;
 
   &:hover {
     opacity: 0.8;

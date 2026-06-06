@@ -941,7 +941,7 @@
         "scriptNamePh": "Please enter script name",
         "uploadFile": "Upload File",
         "dragUpload": "Drag and drop your script file here or click to upload",
-        "uploadHint": "Supports .txt, .docx. Recommended file size under 10MB",
+        "uploadHint": "Supports .txt, .md, .docx. Recommended file size under 10MB",
         "scriptContent": "Script Content",
         "scriptContentPh": "Please upload or enter script content...",
         "relatedAssets": "Related Assets",
@@ -951,7 +951,7 @@
         "confirm": "Confirm",
         "msg": {
           "fileReadFailed": "Failed to read file",
-          "docNotSupported": ".doc parsing is not supported. Please convert to .txt or .docx",
+          "docNotSupported": ".doc parsing is not supported. Please convert to .txt, .md, or .docx",
           "unsupportedType": "Unsupported file type",
           "fileTooLarge": "File exceeds 10MB. Please upload a smaller file",
           "parsing": "Parsing file...",
