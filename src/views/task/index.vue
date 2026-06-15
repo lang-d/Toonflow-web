@@ -5,12 +5,40 @@
         <span class="title">{{ $t("workbench.task.title") }}</span>
         <span class="sub">{{ $t("workbench.task.subtitle") }}</span>
       </div>
-      <t-button @click="getTaskList">
+      <t-tag v-if="dreaminaQueueVisible" theme="warning" variant="light" class="dreaminaQueueTag">
+        即梦队列：官方活动 {{ dreaminaQueueStats.active }} / 确认中 {{ dreaminaQueueStats.confirming }} / 本地等待
+        {{ dreaminaQueueStats.waiting }}
+      </t-tag>
+      <t-button @click="refreshAll">
         <template #icon>
           <i-redo :size="20" />
         </template>
         {{ $t("workbench.task.refresh") }}
       </t-button>
+    </div>
+    <div class="dreaminaQueuePanel">
+      <t-alert
+        v-if="dreaminaQueueStats.blocked > 0"
+        theme="warning"
+        message="部分即梦模型容量已满，任务将在后台自动等待，不会按生成失败处理。" />
+      <t-collapse v-if="dreaminaQueueStatus.tasks.length" class="dreaminaTaskCollapse">
+        <t-collapse-panel value="dreamina-active-tasks" :header="`即梦活动任务（${dreaminaQueueStatus.tasks.length}）`">
+          <div class="dreaminaTaskList">
+            <div v-for="task in dreaminaQueueStatus.tasks" :key="task.id" class="dreaminaTaskItem">
+              <div class="dreaminaTaskMain">
+                <strong>{{ task.model || task.providerModelKey }}</strong>
+                <span>{{ getDreaminaTaskStatusLabel(task) }}</span>
+              </div>
+              <span>{{ task.phase || "-" }}</span>
+              <span v-if="task.providerQueueIndex != null && task.providerQueueLength != null">
+                官方队列 {{ task.providerQueueIndex }} / {{ task.providerQueueLength }}
+              </span>
+              <span>已轮询 {{ task.pollCount || 0 }} 次</span>
+            </div>
+          </div>
+        </t-collapse-panel>
+      </t-collapse>
+      <div v-else class="dreaminaQueueEmpty">暂无活动任务</div>
     </div>
     <div class="list">
       <div class="search f">
@@ -59,6 +87,11 @@
 import dayjs from "dayjs";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
+import {
+  createEmptyDreaminaQueueStatus,
+  type DreaminaQueueStatusData,
+  type DreaminaQueueTask,
+} from "@/types/dreamina";
 
 const { project } = storeToRefs(projectStore());
 
@@ -99,11 +132,39 @@ const taskClass = ref("");
 const taskState = ref("");
 const projectId = ref("");
 const taskList = ref<TaskItem[]>([]);
+const dreaminaQueueStatus = ref<DreaminaQueueStatusData>(createEmptyDreaminaQueueStatus());
+const dreaminaQueueStats = computed(() => {
+  return dreaminaQueueStatus.value.summary.reduce(
+    (stats, item) => {
+      stats.active += item.knownActive || 0;
+      stats.confirming += item.confirming || 0;
+      stats.waiting += item.waiting || 0;
+      stats.blocked += item.capacityBlocked ? 1 : 0;
+      return stats;
+    },
+    { active: 0, confirming: 0, waiting: 0, blocked: 0 },
+  );
+});
+const dreaminaQueueVisible = computed(
+  () =>
+    dreaminaQueueStatus.value.summary.length > 0 ||
+    dreaminaQueueStatus.value.tasks.length > 0 ||
+    dreaminaQueueStats.value.blocked > 0,
+);
+let dreaminaQueueTimer: ReturnType<typeof setInterval> | null = null;
+let dreaminaQueueRequesting = false;
 
 onMounted(() => {
-  getTaskList();
-  getCategories();
-  getProject();
+  void refreshAll();
+  void getCategories();
+  void getProject();
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  startDreaminaQueuePolling();
+});
+
+onBeforeUnmount(() => {
+  stopDreaminaQueuePolling();
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
 });
 
 function onFilterChange() {
@@ -142,6 +203,64 @@ async function getTaskList() {
     pagination.value.loading = false;
   }
 }
+
+async function refreshAll() {
+  await Promise.all([getTaskList(), fetchDreaminaQueueStatus()]);
+}
+
+async function fetchDreaminaQueueStatus() {
+  if (dreaminaQueueRequesting) return;
+  dreaminaQueueRequesting = true;
+  try {
+    const { data } = await axios.post("/setting/dreamina/queueStatus");
+    dreaminaQueueStatus.value = {
+      summary: Array.isArray(data?.summary) ? data.summary : [],
+      tasks: Array.isArray(data?.tasks) ? data.tasks : [],
+    };
+  } catch {
+    dreaminaQueueStatus.value = createEmptyDreaminaQueueStatus();
+  } finally {
+    dreaminaQueueRequesting = false;
+  }
+}
+
+function getProviderQueueLabel(status?: number | null) {
+  if (status === 1) return "即梦排队中";
+  if (status === 2) return "即梦生成中";
+  if (status === 3) return "结果处理中";
+  return "已提交，等待即梦状态";
+}
+
+function getDreaminaTaskStatusLabel(task: DreaminaQueueTask) {
+  if (task.status === "queued") return "本地排队中";
+  if (task.status === "submitting") return "正在提交";
+  if (task.status === "confirming") return "正在确认官方任务";
+  if (task.status === "processing") return getProviderQueueLabel(task.providerQueueStatus);
+  return task.state || task.status;
+}
+
+function startDreaminaQueuePolling() {
+  stopDreaminaQueuePolling();
+  if (document.visibilityState !== "visible") return;
+  dreaminaQueueTimer = setInterval(() => {
+    void fetchDreaminaQueueStatus();
+  }, 20_000);
+}
+
+function stopDreaminaQueuePolling() {
+  if (!dreaminaQueueTimer) return;
+  clearInterval(dreaminaQueueTimer);
+  dreaminaQueueTimer = null;
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "visible") {
+    void fetchDreaminaQueueStatus();
+    startDreaminaQueuePolling();
+  } else {
+    stopDreaminaQueuePolling();
+  }
+}
 </script>
 
 <style lang="scss" scoped>
@@ -159,6 +278,64 @@ async function getTaskList() {
     .sub {
       opacity: 0.5;
     }
+    .dreaminaQueueTag {
+      margin-left: auto;
+      margin-right: 12px;
+    }
+  }
+  .dreaminaQueuePanel {
+    margin-bottom: 16px;
+    padding: 12px;
+    border: 1px solid var(--td-component-stroke, #e7e7e7);
+    border-radius: 6px;
+    background: var(--td-bg-color-container, #fff);
+  }
+  .dreaminaTaskCollapse {
+    margin-top: 10px;
+  }
+  .dreaminaTaskList {
+    display: flex;
+    flex-direction: column;
+  }
+  .dreaminaTaskItem {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(100px, auto) auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--td-component-stroke, #e7e7e7);
+    font-size: 12px;
+
+    &:last-child {
+      border-bottom: 0;
+    }
+
+    > span {
+      color: var(--td-text-color-secondary, #777);
+    }
+  }
+  .dreaminaTaskMain {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+
+    strong,
+    span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    span {
+      color: var(--td-brand-color, #0052d9);
+    }
+  }
+  .dreaminaQueueEmpty {
+    padding: 10px 0 2px;
+    color: var(--td-text-color-secondary, #777);
+    font-size: 12px;
+    text-align: center;
   }
   .stateText {
     font-weight: bold;
@@ -175,6 +352,12 @@ async function getTaskList() {
   }
   .paginationWrap {
     margin-top: 10px;
+  }
+
+  @media (max-width: 900px) {
+    .dreaminaTaskItem {
+      grid-template-columns: 1fr;
+    }
   }
 }
 </style>

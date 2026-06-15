@@ -115,6 +115,7 @@ import importNovel from "./components/importNovel.vue";
 import editNodel from "./components/editNodel.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
+import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
 
@@ -150,8 +151,12 @@ interface OriginalText {
   event: string;
   eventState?: number;
   errorReason?: string;
+  taskId?: string;
+  legacyTaskId?: number | string;
 }
 const formData = ref<OriginalText>({ id: -1, index: 0, reel: "", chapter: "", chapterData: "", event: "" });
+const taskCenter = useTaskCenterStore();
+const novelEventBindings = new Map<number, () => void>();
 const PREVIEW_MAX_LENGTH = 80;
 const previewVisible = ref(false);
 const previewTitle = ref("");
@@ -186,9 +191,6 @@ onMounted(() => {
   getNovel();
 });
 
-onUnmounted(() => {
-  stopPolling();
-});
 function onChange() {
   pagination.value.page = 1;
   getNovel();
@@ -206,6 +208,7 @@ function getNovel() {
     .then((res) => {
       tableData.value = res.data.data;
       pagination.value.total = res.data.total;
+      syncNovelEventTasks();
     })
     .finally(() => {
       loading.value = false;
@@ -281,68 +284,74 @@ function startEventAnalysis() {
           novelIds: selectedRowKeys.value,
           concurrentCount: otherSetting.value.assetsBatchGenereateSize,
         })
-        .then((res) => {
+        .then(({ data }) => {
+          const taskRows = Array.isArray(data) ? data : (data?.tasks ?? []);
+          selectedRowKeys.value.forEach((id) => {
+            const target = tableData.value.find((row) => row.id === id);
+            if (target) target.eventState = 0;
+          });
+          taskRows.forEach((task: { novelId?: number; id?: number; taskId?: string; legacyTaskId?: number }) => {
+            const target = tableData.value.find((row) => row.id === (task.novelId ?? task.id));
+            if (target) {
+              target.taskId = task.taskId;
+              target.legacyTaskId = task.legacyTaskId;
+            }
+          });
+          syncNovelEventTasks();
           selectedRowKeys.value.length = 0;
-          getNovel();
         });
     },
   });
 }
 
-const notCompultedData = computed(() => {
-  return tableData.value.filter((item) => !item.eventState);
-});
+function releaseNovelEventTask(id: number) {
+  novelEventBindings.get(id)?.();
+  novelEventBindings.delete(id);
+}
 
-// 轮询相关
-let pollingTimer: ReturnType<typeof setInterval> | null = null;
-
-async function pollEventState() {
-  if (notCompultedData.value.length === 0) return;
-  const ids = notCompultedData.value.map((item) => item.id);
-  try {
-    const { data } = await axios.post("/novel/getNovelEventState", { ids });
-    if (Array.isArray(data)) {
-      data.forEach((item: { id: number; eventState: number; event?: string; errorReason?: string }) => {
-        const target = tableData.value.find((row) => row.id === item.id);
-        if (target) {
-          target.eventState = item.eventState;
-          if (target.eventState == -1) target.errorReason = item.errorReason;
-          if (item.event !== undefined) target.event = item.event;
-        }
-      });
-    }
-  } catch (e) {
-    console.error("轮询事件状态失败:", e);
+function applyNovelEventTask(item: OriginalText, task: RuntimeTask) {
+  const record = (task.result ?? {}) as any;
+  item.eventState = task.status === "completed" ? 1 : task.status === "failed" || task.status === "cancelled" ? -1 : 0;
+  if (record.event !== undefined) item.event = record.event;
+  if (task.status === "failed" || task.status === "cancelled") item.errorReason = task.reason ?? record.errorReason;
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseNovelEventTask(item.id));
   }
 }
 
-function startPolling() {
-  if (pollingTimer) return;
-  pollingTimer = setInterval(async () => {
-    if (notCompultedData.value.length === 0) {
-      stopPolling();
-      return;
-    }
-    await pollEventState();
-  }, 3000);
+function syncNovelEventTasks() {
+  const activeIds = new Set<number>();
+  tableData.value.forEach((item) => {
+    if (item.eventState !== 0) return;
+    activeIds.add(item.id);
+    const key = createTaskKey("novelEvent", Number(project.value?.id), item.id, undefined, item.taskId);
+    const existing = taskCenter.getTask(key);
+    if (novelEventBindings.has(item.id) && (!item.taskId || existing?.unifiedTaskId === item.taskId)) return;
+    if (novelEventBindings.has(item.id)) releaseNovelEventTask(item.id);
+    novelEventBindings.set(
+      item.id,
+      taskCenter.registerTask(
+        {
+          key,
+          domain: "novelEvent",
+          unifiedTaskId: item.taskId,
+          legacyTaskId: item.legacyTaskId,
+          targetType: "novelEvent",
+          targetId: item.id,
+          projectId: Number(project.value?.id),
+          status: "processing",
+        },
+        (task) => applyNovelEventTask(item, task),
+      ),
+    );
+  });
+  Array.from(novelEventBindings.keys()).forEach((id) => {
+    if (!activeIds.has(id)) releaseNovelEventTask(id);
+  });
 }
-
-function stopPolling() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-  }
-}
-
-watch(notCompultedData, (val) => {
-  if (val.length > 0) {
-    startPolling();
-  } else {
-    stopPolling();
-  }
-});
 onUnmounted(() => {
-  stopPolling();
+  novelEventBindings.forEach((release) => release());
+  novelEventBindings.clear();
 });
 </script>
 

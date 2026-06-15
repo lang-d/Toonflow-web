@@ -1,5 +1,6 @@
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
+import { getMediaOriginalUrl, normalizeMediaRef } from "@/utils/mediaRef";
 
 /**
  * 图片列表缓存 Pinia Store
@@ -16,6 +17,7 @@ type CacheKey = string | number;
 type CachedUploadItem = Omit<UploadItem, "src"> & { src?: string };
 
 type ImageListCacheData = Record<CacheKey, Record<CacheKey, Record<CacheKey, CachedUploadItem[]>>>;
+const CACHE_STORAGE_KEY = "imageListCache";
 
 /** 用于向后端请求 URL 的标识信息 */
 interface ResolveUrlItem {
@@ -31,8 +33,8 @@ function makeUrlKey(id: number | null | undefined, sources: string | undefined):
 /** 从完整 URL 中提取路径部分（去掉 origin） */
 function extractPath(url: string | undefined): string {
   if (!url) return "";
-  // data: / blob: 等特殊协议直接保留
-  if (url.startsWith("data:") || url.startsWith("blob:")) return url;
+  // Temporary and inline URLs are deliberately not persisted.
+  if (url.startsWith("data:") || url.startsWith("blob:")) return "";
   try {
     const u = new URL(url);
     return u.pathname + u.search + u.hash;
@@ -44,19 +46,92 @@ function extractPath(url: string | undefined): string {
 
 /** 将 UploadItem[] 转为缓存格式（src 只保留路径） */
 function toCachedItems(items: (UploadItem | TrackMedia)[]): CachedUploadItem[] {
-  return items.map((item) => ({
-    ...JSON.parse(JSON.stringify(item)),
-    src: extractPath(item.src),
-  }));
+  return items.map((item) => {
+    const sourceRefs = "sourceRefs" in item && Array.isArray(item.sourceRefs)
+      ? item.sourceRefs.map((ref) => ({ id: ref.id, sources: ref.sources, order: ref.order }))
+      : undefined;
+    return {
+      id: item.id ?? null,
+      sources: item.sources as CachedUploadItem["sources"],
+      fileType: item.fileType,
+      media: item.media,
+      src: extractPath(item.media ? getMediaOriginalUrl(item.media) : item.src),
+      prompt: item.prompt,
+      name: item.name,
+      category: item.category,
+      parentName: item.parentName,
+      index: "index" in item ? item.index : undefined,
+      slotType: "slotType" in item ? item.slotType : undefined,
+      sourceRefs,
+    } as CachedUploadItem;
+  });
+}
+
+function mergeCachedItemsWithBackend(cached: CachedUploadItem[], backendItems: (UploadItem | TrackMedia)[]): CachedUploadItem[] {
+  const backend = toCachedItems(backendItems);
+  const backendByKey = new Map<string, CachedUploadItem>();
+  backend.forEach((item) => {
+    if (item.id == null) return;
+    backendByKey.set(makeUrlKey(item.id, item.sources), item);
+  });
+
+  const usedBackendKeys = new Set<string>();
+  const merged = cached.map((item) => {
+    if (item.id == null) return item;
+    const key = makeUrlKey(item.id, item.sources);
+    const fresh = backendByKey.get(key);
+    if (!fresh) return item;
+    usedBackendKeys.add(key);
+    return {
+      ...item,
+      ...fresh,
+      slotType: (item as any).slotType ?? (fresh as any).slotType,
+      sourceRefs: (fresh as any).sourceRefs ?? (item as any).sourceRefs,
+    };
+  });
+
+  backend.forEach((item) => {
+    if (item.id == null) return;
+    const key = makeUrlKey(item.id, item.sources);
+    if (!usedBackendKeys.has(key)) merged.push(item);
+  });
+  return merged;
+}
+
+function loadPersistedCache(): ImageListCacheData {
+  try {
+    const raw = localStorage.getItem(CACHE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed?.cacheData && typeof parsed.cacheData === "object" ? parsed.cacheData : {};
+  } catch {
+    return {};
+  }
 }
 
 export default defineStore(
   "imageListCache",
   () => {
-    const cacheData = ref<ImageListCacheData>({});
+    const cacheData = ref<ImageListCacheData>(loadPersistedCache());
+    let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
     /** URL 解析缓存: "id:sources" -> 后端返回的完整 URL，避免重复请求 */
     const urlMap = ref<Record<string, string>>({});
+
+    function persistWhenIdle() {
+      if (persistTimer) clearTimeout(persistTimer);
+      persistTimer = setTimeout(() => {
+        const write = () => {
+          try {
+            localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify({ cacheData: cacheData.value }));
+          } catch (error) {
+            console.warn("[imageListCache] persist failed", error);
+          }
+        };
+        if ("requestIdleCallback" in window) window.requestIdleCallback(write, { timeout: 1_500 });
+        else setTimeout(write, 0);
+      }, 500);
+    }
 
     /**
      * 批量通过 id + sources 获取当前可用的完整 URL
@@ -79,26 +154,34 @@ export default defineStore(
       });
       if (needResolve.length) {
         try {
-          const { data } = await axios.post("/production/workbench/getFileUrl", {
+          const response = await axios.post("/production/workbench/getFileUrl", {
             items: needResolve.map((item) => ({ id: item.id, sources: item.sources })),
           });
           // axios 拦截器已返回 response.data，后端可能再包一层 { data: { ... } }
-          const rawData = data.data;
+          const rawData = (response as any)?.data?.data ?? (response as any)?.data ?? response;
 
           // 兼容多种后端响应格式
           const resolved: Record<string, string> = {};
           if (Array.isArray(rawData)) {
             // 格式: [{ id: 1, sources: "storyboard", url: "http://..." }, ...]
             rawData.forEach((item: any) => {
-              if (item.id != null && item.url) {
+              const media = normalizeMediaRef(item?.media ?? item, "image");
+              const url = media ? getMediaOriginalUrl(media) : item?.url || item?.src || item?.previewUrl;
+              if (item.id != null && url) {
                 const key = makeUrlKey(item.id, item.sources);
-                resolved[key] = item.url;
+                resolved[key] = url;
               }
             });
           } else if (rawData && typeof rawData === "object" && !Array.isArray(rawData)) {
             // 格式: { "id:sources": fullUrl } 或 { [compositeKey]: fullUrl }
-            Object.entries(rawData).forEach(([key, url]) => {
-              resolved[key] = url as string;
+            Object.entries(rawData).forEach(([key, value]) => {
+              if (typeof value === "string") {
+                resolved[key] = value;
+                return;
+              }
+              const media = normalizeMediaRef((value as any)?.media ?? value, "image");
+              const url = media ? getMediaOriginalUrl(media) : (value as any)?.url || (value as any)?.src || (value as any)?.previewUrl;
+              if (url) resolved[key] = url;
             });
           }
 
@@ -129,10 +212,14 @@ export default defineStore(
 
     /** 将缓存项还原为带完整 URL 的 UploadItem[]（同步版，需先调用 resolveUrls） */
     function toFullItems(items: CachedUploadItem[]): UploadItem[] {
-      return items.map((item) => ({
-        ...item,
-        src: resolveUrlSync(item.id, (item as any).sources, item.src),
-      })) as UploadItem[];
+      return items.map((item) => {
+        const media = normalizeMediaRef(item.media ?? item, item.fileType);
+        return {
+          ...item,
+          media,
+          src: media ? getMediaOriginalUrl(media) : resolveUrlSync(item.id, (item as any).sources, item.src),
+        };
+      }) as UploadItem[];
     }
 
     /**
@@ -192,6 +279,7 @@ export default defineStore(
         urlMap.value = { ...urlMap.value };
       }
       cacheData.value[projectId][scriptId][trackId] = toCachedItems(imageList);
+      persistWhenIdle();
     }
 
     /**
@@ -200,6 +288,7 @@ export default defineStore(
     function removeCache(projectId: CacheKey, scriptId: CacheKey, trackId: CacheKey): void {
       if (cacheData.value[projectId]?.[scriptId]) {
         delete cacheData.value[projectId][scriptId][trackId];
+        persistWhenIdle();
       }
     }
 
@@ -215,6 +304,7 @@ export default defineStore(
       Object.keys(scriptCache).forEach((trackId) => {
         scriptCache[trackId] = scriptCache[trackId].filter((item) => item.id !== imageId);
       });
+      persistWhenIdle();
     }
 
     /**
@@ -223,11 +313,13 @@ export default defineStore(
     function clearScriptCache(projectId: CacheKey, scriptId: CacheKey): void {
       if (cacheData.value[projectId]) {
         delete cacheData.value[projectId][scriptId];
+        persistWhenIdle();
       }
     }
     function clearProjectCache(projectId: CacheKey): void {
       if (cacheData.value && cacheData.value?.[projectId]) {
         delete cacheData.value[projectId];
+        persistWhenIdle();
       }
     }
     /**
@@ -237,11 +329,14 @@ export default defineStore(
     function initCacheFromTrackList(projectId: CacheKey, scriptId: CacheKey, trackList: TrackItem[]): void {
       trackList.forEach((track) => {
         if (track.id == null) return;
-        if (cacheData.value[projectId]?.[scriptId]?.[track.id]) return;
         if (!cacheData.value[projectId]) cacheData.value[projectId] = {};
         if (!cacheData.value[projectId][scriptId]) cacheData.value[projectId][scriptId] = {};
-        cacheData.value[projectId][scriptId][track.id] = toCachedItems(track.medias);
+        const current = cacheData.value[projectId][scriptId][track.id];
+        cacheData.value[projectId][scriptId][track.id] = current?.length
+          ? mergeCachedItemsWithBackend(current, track.medias)
+          : toCachedItems(track.medias);
       });
+      persistWhenIdle();
     }
 
     /**
@@ -257,6 +352,7 @@ export default defineStore(
         if (track.id == null) return;
         cacheData.value[projectId][scriptId][track.id] = toCachedItems(track.medias);
       });
+      persistWhenIdle();
     }
 
     /**
@@ -307,5 +403,4 @@ export default defineStore(
       clearProjectCache,
     };
   },
-  { persist: { pick: ["cacheData"] } },
 );

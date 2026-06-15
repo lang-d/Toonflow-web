@@ -8,15 +8,11 @@
       </t-button>
     </t-tooltip>
     <t-tooltip theme="primary" :content="$t('components.imageTools.preview')" :placement="placement">
-      <t-image-viewer v-model:visible="previewVisible" :images="[bigSrc]">
-        <template #trigger>
-          <t-button variant="outline" size="small" shape="square" @click.stop="handlePreview">
-            <template #icon>
-              <i-expand-text-input size="16" />
-            </template>
-          </t-button>
+      <t-button variant="outline" size="small" shape="square" @click.stop="handlePreview">
+        <template #icon>
+          <i-expand-text-input size="16" />
         </template>
-      </t-image-viewer>
+      </t-button>
     </t-tooltip>
     <t-tooltip theme="primary" :content="$t('components.imageTools.download')" :placement="placement">
       <t-button variant="outline" size="small" shape="square" @click.stop="handleDownload">
@@ -29,6 +25,9 @@
 </template>
 
 <script setup lang="ts">
+import { openImageLightbox } from "@/composables/useImageLightbox";
+import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
+
 const props = withDefaults(
   defineProps<{
     src: string;
@@ -47,10 +46,6 @@ const props = withDefaults(
 
 const placement = computed<any>(() => props.placement);
 
-const bigSrc = computed(() => {
-  return `${props.src.split("?") ?   props.src.split("?")[0] : props.src}`;
-});
-
 const positionStyle = computed<any>(() => {
   const map: Record<string, any> = {
     br: { position: "absolute", bottom: props.margin, right: props.margin },
@@ -62,10 +57,15 @@ const positionStyle = computed<any>(() => {
   return map[props.position];
 });
 
-const previewVisible = ref(false);
-
 function handlePreview() {
-  previewVisible.value = true;
+  openImageLightbox({
+    images: [
+      {
+        src: getThumbnailImageUrl(props.src),
+        originalSrc: getOriginalImageUrl(props.src),
+      },
+    ],
+  });
 }
 
 function triggerAnchorClick(href: string, filename: string, newTab = false) {
@@ -85,7 +85,7 @@ async function handleCopy() {
   try {
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.src = props.src;
+    img.src = getOriginalImageUrl(props.src);
     await new Promise<void>(function (resolve, reject) {
       img.onload = function () {
         resolve();
@@ -116,7 +116,7 @@ async function handleCopy() {
 }
 
 async function handleDownload() {
-  const url = bigSrc.value;
+  const url = getOriginalImageUrl(props.src);
   const filename = url.split("/").pop()?.split("?")[0] || "image";
   let objectUrl = "";
   try {

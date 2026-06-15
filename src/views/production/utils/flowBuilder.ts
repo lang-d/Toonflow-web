@@ -1,5 +1,6 @@
 import type { Ref } from "vue";
 import { computed } from "vue";
+import type { MediaRef } from "@/types/api";
 
 // ==================== 固定节点 ID ====================
 const NODE_IDS = {
@@ -22,6 +23,7 @@ export interface DeriveAsset {
   prompt: string;
   desc: string;
   src: string;
+  media?: MediaRef;
   flowId?: number;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   type: "role" | "tool" | "scene" | "clip";
@@ -34,6 +36,7 @@ export interface AssetItem {
   desc: string;
   prompt: string;
   src: string;
+  media?: MediaRef;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   type: "role" | "tool" | "scene" | "clip";
   flowId?: number;
@@ -46,13 +49,32 @@ export interface Storyboard {
   duration?: number;
   prompt: string;
   trackId?: number;
+  trackName?: string;
   associateAssetsIds?: number[];
+  referenceImages?: StoryboardReference[];
   src: string | null;
+  media?: MediaRef;
+  url?: string | null;
+  imageUrl?: string | null;
+  originalUrl?: string | null;
+  thumbnail?: string | null;
+  thumb?: string | null;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   flowId?: number;
   reason?: string;
   videoDesc: string;
   shouldGenerateImage: number;
+}
+
+export interface StoryboardReference {
+  id: string;
+  source: "local" | "storyboard";
+  sourceId?: number | string;
+  url: string;
+  previewUrl?: string;
+  media?: MediaRef;
+  name: string;
+  type?: "role" | "tool" | "scene" | "clip" | "image";
 }
 
 interface VideoList {
@@ -83,9 +105,8 @@ const edgeStyle = {
 };
 
 // ==================== 构建函数 ====================
-export function useFlowBuilder(flowData: Ref<FlowData>, nodePositions: Ref<NodePositions>) {
+export function useFlowBuilder(_flowData: Ref<FlowData>, nodePositions: Ref<NodePositions>) {
   const nodes = computed(() => {
-    const data = flowData.value;
     const positions = nodePositions.value;
     const ids = NODE_IDS;
 
@@ -97,7 +118,6 @@ export function useFlowBuilder(flowData: Ref<FlowData>, nodePositions: Ref<NodeP
         dragHandle: ".dragHandle",
         position: positions[ids.script] || { x: 0, y: 0 },
         data: {
-          script: data.script,
           handleIds: {
             assets: `${ids.script}-assets`,
             source: `${ids.script}-source`,
@@ -111,7 +131,6 @@ export function useFlowBuilder(flowData: Ref<FlowData>, nodePositions: Ref<NodeP
         dragHandle: ".dragHandle",
         position: positions[ids.scriptPlan] || { x: 0, y: 0 },
         data: {
-          scriptPlan: data.scriptPlan,
           handleIds: {
             target: `${ids.scriptPlan}-target`,
             source: `${ids.scriptPlan}-source`,
@@ -125,7 +144,6 @@ export function useFlowBuilder(flowData: Ref<FlowData>, nodePositions: Ref<NodeP
         dragHandle: ".dragHandle",
         position: positions[ids.assets] || { x: 0, y: 0 },
         data: {
-          assets: data.assets,
           handleIds: {
             target: `${ids.assets}-target`,
           },
@@ -138,7 +156,6 @@ export function useFlowBuilder(flowData: Ref<FlowData>, nodePositions: Ref<NodeP
         dragHandle: ".dragHandle",
         position: positions[ids.storyboardTable] || { x: 0, y: 0 },
         data: {
-          storyboardTable: data.storyboardTable,
           handleIds: {
             target: `${ids.storyboardTable}-target`,
             source: `${ids.storyboardTable}-source`,
@@ -152,7 +169,6 @@ export function useFlowBuilder(flowData: Ref<FlowData>, nodePositions: Ref<NodeP
         dragHandle: ".dragHandle",
         position: positions[ids.storyboard] || { x: 0, y: 0 },
         data: {
-          storyboard: data.storyboard,
           handleIds: {
             target: `${ids.storyboard}-target`,
             source: `${ids.storyboard}-source`,
@@ -166,7 +182,6 @@ export function useFlowBuilder(flowData: Ref<FlowData>, nodePositions: Ref<NodeP
         dragHandle: ".dragHandle",
         position: positions[ids.workbench] || { x: 0, y: 0 },
         data: {
-          ...data.workbench,
           handleIds: {
             target: `${ids.workbench}-target`,
             source: `${ids.workbench}-source`,

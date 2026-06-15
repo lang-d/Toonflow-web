@@ -3,59 +3,55 @@
     <template #actions>
       <t-button size="small" :loading="generating" @click="emit('generate')">{{ $t("workbench.generate.generate") }}</t-button>
     </template>
+
     <div class="history">
       <div class="titleBox f ac">
         <i-time />
-        <span class="title">{{ $t("workbench.generate.history") }}（{{ currentTrack?.videoList.length }}）</span>
+        <span class="title">{{ $t("workbench.generate.history") }}（{{ currentTrack?.videoList.length || 0 }}）</span>
       </div>
+
       <div class="historyItemBox">
         <div
-          class="historyItem"
-          :class="{ active: v.id === selectVideoId, generating: v.state === '生成中', failed: v.state === '生成失败' }"
           v-for="v in currentTrack?.videoList"
           :key="v.id"
+          class="historyItem"
+          :class="{ active: v.id === selectVideoId, generating: isVideoGenerating(v), failed: isVideoFailed(v) }"
           @click="previewVideo(v)">
           <template v-if="videoCoverMap[v.src]">
             <img :src="videoCoverMap[v.src]" class="videoCover" />
           </template>
-          <template v-else-if="v.state !== '生成中'">
+          <template v-else-if="!isVideoGenerating(v) && v.src">
             <video
               :key="v.src"
               :src="v.src"
               preload="metadata"
               muted
-              @loadedmetadata="
-                (e: Event) => {
-                  (e.target as HTMLVideoElement).currentTime = 0.5;
-                }
-              "
-              @seeked="
-                (e: Event) => {
-                  const el = e.target as HTMLVideoElement;
-                  captureVideoCover(v.src);
-                  el.style.display = 'none';
-                }
-              " />
+              @loadedmetadata="handlePreviewMetadata"
+              @seeked="(event) => handlePreviewSeeked(event, v.src)" />
           </template>
-          <div v-if="v.state === '生成中'" class="loadingOverlay c fc">
+
+          <div v-if="isVideoGenerating(v)" class="loadingOverlay c fc">
             <t-loading size="24px" />
             <span class="loadingText">{{ $t("workbench.generate.generating") }}</span>
+            <t-button v-if="isVideoQueued(v)" size="small" variant="base" @click.stop="cancelQueuedVideo(v)">取消排队</t-button>
           </div>
-          <t-tooltip v-if="v.state == '生成失败'" placement="top" :content="v?.errorReason! ?? ''" theme="light">
+
+          <t-tooltip v-if="isVideoFailed(v)" placement="top" :content="v?.errorReason || ''" theme="light">
             <t-tag class="stateTag" theme="danger" size="small">
               {{ $t("workbench.generate.generateFailed") }}
             </t-tag>
           </t-tooltip>
-          <div v-if="v.state !== '生成中'" class="selectBtn" @click.stop="selectVideo(v)">
+
+          <div v-if="canUseVideo(v)" class="selectBtn" @click.stop="selectVideo(v)">
             <i-check size="16" />
           </div>
           <div class="delBtn" @click.stop="handleDeleteVideo(v)">
             <i-delete size="16" />
           </div>
-          <div v-if="v.state !== '生成中' && v.state !== '生成失败'" class="download" @click.stop="downloadVideo(v)">
+          <div v-if="canUseVideo(v)" class="download" @click.stop="downloadVideo(v)">
             <i-to-bottom size="16" />
           </div>
-          <div v-if="v.state !== '生成中' && v.state !== '生成失败'" class="playBtn" @click.stop="openVideoPlayer(v)">
+          <div v-if="canUseVideo(v)" class="playBtn" @click.stop="openVideoPlayer(v)">
             <i-play size="16" />
           </div>
         </div>
@@ -63,7 +59,6 @@
     </div>
   </t-card>
 
-  <!-- 视频播放弹窗 -->
   <t-dialog
     v-model:visible="videoPlayerVisible"
     :header="$t('workbench.generate.previewVideo')"
@@ -81,14 +76,17 @@
 import type { Ref } from "vue";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus } from "@/stores/taskCenter";
 
-const props = defineProps<{
+defineProps<{
   activeTrackIndex: number;
   generating?: boolean;
 }>();
+
 const currentTrack = defineModel<TrackItem>("currentTrack", {
   default: () => {},
 });
+
 const emit = defineEmits<{
   generate: [];
   refresh: [];
@@ -96,21 +94,42 @@ const emit = defineEmits<{
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
+const taskCenter = useTaskCenterStore();
 
-const selectVideoId = ref();
+const selectVideoId = ref<number>();
 const videoCoverMap = ref<Record<string, string>>({});
 const videoPlayerVisible = ref(false);
 const playingVideoSrc = ref<string>();
+const downloadingSet = new Set<string>();
 
-/** 选中历史视频并同步到后端 */
-async function selectVideo(v: HistoryVideoItem) {
-  if (v.state === "生成中" || v.state === "生成失败") return;
+function getVideoStatus(video: VideoItem) {
+  return normalizeTaskStatus(video.status ?? video.state, "pending");
+}
+
+function isVideoQueued(video: VideoItem) {
+  return getVideoStatus(video) === "queued";
+}
+
+function isVideoGenerating(video: VideoItem) {
+  return ["queued", "submitting", "processing"].includes(getVideoStatus(video));
+}
+
+function isVideoFailed(video: VideoItem) {
+  return ["failed", "cancelled"].includes(getVideoStatus(video));
+}
+
+function canUseVideo(video: VideoItem) {
+  return !isVideoGenerating(video) && !isVideoFailed(video) && Boolean(video.src);
+}
+
+async function selectVideo(video: VideoItem) {
+  if (!canUseVideo(video)) return;
   try {
     await axios.post("/production/workbench/selectVideo", {
       projectId: project.value?.id,
       scriptId: episodesId.value ?? 0,
-      videoId: v.id,
-      trackId: currentTrack?.value.id,
+      videoId: video.id,
+      trackId: currentTrack.value.id,
     });
     window.$message.success($t("workbench.generate.selectVideoSuccess"));
     emit("refresh");
@@ -119,60 +138,61 @@ async function selectVideo(v: HistoryVideoItem) {
   }
 }
 
-/** 删除某条历史视频 */
-function handleDeleteVideo(value: HistoryVideoItem) {
+async function cancelQueuedVideo(video: VideoItem) {
+  if (!video.taskId) return window.$message.warning("缺少任务 ID，无法取消排队");
+  try {
+    await taskCenter.cancelTask(createTaskKey("video", Number(project.value?.id), video.id, undefined, video.taskId));
+    video.status = "cancelled";
+    video.state = "生成失败";
+    video.errorReason = "已取消排队";
+    window.$message.success("已取消本地排队");
+  } catch (error: any) {
+    window.$message.warning(error?.message || "当前任务无法取消");
+  }
+}
+
+function handleDeleteVideo(video: VideoItem) {
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.del"),
     body: $t("workbench.generate.delVideo"),
     onConfirm: () => {
-      axios.post("/production/workbench/delVideo", { id: value.id }).then(() => {
+      axios.post("/production/workbench/delVideo", { id: video.id }).then(() => {
         window.$message.success($t("workbench.generate.delSuccess"));
         emit("refresh");
         dlg.destroy();
-        currentTrack.value.videoList.filter((item) => item.id == value.id);
       });
     },
     onCancel: () => dlg.destroy(),
   });
 }
 
-/** 单个视频下载 */
-const downloadingSet = new Set<string>();
-
-async function downloadVideo(value: HistoryVideoItem) {
-  if (!value?.src) return;
-  if (downloadingSet.has(value.src)) {
+async function downloadVideo(video: VideoItem) {
+  if (!video?.src) return;
+  if (downloadingSet.has(video.src)) {
     window.$message.info("下载进行中，请稍候");
     return;
   }
-  downloadingSet.add(value.src);
+  downloadingSet.add(video.src);
   try {
-    const response = await fetch(value.src);
+    const response = await fetch(video.src);
     if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = objectUrl;
-    // 使用时间戳保证文件名唯一，避免浏览器提示覆盖
     link.download = `视频_${Date.now()}.mp4`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    // 延迟撤销，确保浏览器有时间开始下载（避免立即 revoke 导致问题）
-    setTimeout(() => {
-      try {
-        URL.revokeObjectURL(objectUrl);
-      } catch {}
-    }, 60000);
-  } catch (err) {
-    console.error(err);
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch (error) {
+    console.error(error);
     window.$message.error("下载失败");
   } finally {
-    downloadingSet.delete(value.src);
+    downloadingSet.delete(video.src);
   }
 }
 
-/** 捕获视频封面（绘制 0.5s 帧到 canvas） */
 function captureVideoCover(src: string) {
   if (!src || videoCoverMap.value[src]) return;
   const video = document.createElement("video");
@@ -197,39 +217,40 @@ function captureVideoCover(src: string) {
     },
     { once: true },
   );
-  video.addEventListener(
-    "loadeddata",
-    () => {
-      video.currentTime = 0.5;
-    },
-    { once: true },
-  );
-  video.addEventListener(
-    "error",
-    () => {
-      video.src = "";
-    },
-    { once: true },
-  );
+  video.addEventListener("loadeddata", () => (video.currentTime = 0.5), { once: true });
+  video.addEventListener("error", () => (video.src = ""), { once: true });
   video.load();
 }
 
-/** 打开视频播放弹窗 */
-function openVideoPlayer(v: HistoryVideoItem) {
-  if (!v.src) return;
-  playingVideoSrc.value = v.src;
+function handlePreviewMetadata(event: Event) {
+  (event.target as HTMLVideoElement).currentTime = 0.5;
+}
+
+function handlePreviewSeeked(event: Event, src: string) {
+  const el = event.target as HTMLVideoElement;
+  captureVideoCover(src);
+  el.style.display = "none";
+}
+
+function openVideoPlayer(video: VideoItem) {
+  if (!video.src) return;
+  playingVideoSrc.value = video.src;
   videoPlayerVisible.value = true;
 }
 
-/** 关闭播放弹窗时清空 src，停止播放 */
 function handlePlayerClose() {
   playingVideoSrc.value = undefined;
 }
 
-/** 点击历史视频条目进行预览 */
-function previewVideo(v: HistoryVideoItem) {
-  if (v.state === "生成中" || v.state === "生成失败") return;
+function previewVideo(video: VideoItem) {
+  if (!canUseVideo(video)) return;
 }
+
+watch(
+  () => currentTrack.value?.videoList?.map((video) => video.src).filter(Boolean),
+  (sources) => sources?.forEach((src) => captureVideoCover(src)),
+  { immediate: true },
+);
 </script>
 
 <style lang="scss" scoped>
@@ -260,17 +281,11 @@ function previewVideo(v: HistoryVideoItem) {
       &.active {
         border-color: var(--td-brand-color);
       }
-      &.generating {
-        cursor: default;
-      }
+      &.generating,
       &.failed {
         cursor: default;
       }
-      .videoCover {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-      }
+      .videoCover,
       video {
         width: 100%;
         height: 100%;
@@ -352,6 +367,7 @@ function previewVideo(v: HistoryVideoItem) {
     outline: none;
   }
 }
+
 :deep(.t-card__body) {
   overflow: auto;
   height: calc(100% - 48px);

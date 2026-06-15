@@ -1,102 +1,95 @@
 <template>
   <div class="generatedNode">
     <Handle type="target" :position="Position.Left" />
-    <div class="data" @click="selectedFn">
-      <div class="title ac">
-        <i-pic theme="outline" size="16" fill="#000000" />
-        <span class="titleText">{{ $t("workbench.production.editImage.imageGeneration") }}</span>
-      </div>
-      <div class="image">
-        <div v-if="generating" class="imageLoading">
-          <div class="loadingSpinner"></div>
-          <span class="loadingText">{{ $t("workbench.production.editImage.generating") }}</span>
-        </div>
-        <div v-else class="imageWrapper">
-          <t-image class="image" :src="data.generatedImage" fit="contain" :class="['nodeImage', { selected }]">
-            <template #overlayContent>
-              <div class="imageToolsWrap">
-                <ImageTools :src="data.generatedImage ?? ''" position="br" />
-              </div>
-            </template>
-          </t-image>
-        </div>
-        <t-dropdown :options="options" @click="clickHandler">
-          <div class="upload ac">
-            <i-upload theme="outline" size="18" fill="#fff" />
-            <span style="margin-left: 5px; color: #fff">{{ $t("workbench.production.editImage.upload") }}</span>
-          </div>
-        </t-dropdown>
-        <t-tooltip theme="primary" :content="$t('workbench.production.editImage.deleteNode')">
-          <div class="remove ac" @click="removeNodes(props.id)">
-            <i-delete theme="outline" size="18" fill="#fff" />
-          </div>
-        </t-tooltip>
-      </div>
-    </div>
-    <div v-show="selected" class="parameter" @wheel.stop @mousedown.stop>
-      <div class="imageRefs f w">
-        <div v-for="(item, index) in data.references" :key="index" class="refThumb">
-          <t-image :src="item.image" fit="cover" class="refImg" />
-        </div>
-      </div>
-      <div class="text w">
-        <PromptEditor v-model="data.prompt" :references="references" :placeholder="$t('workbench.production.editImage.promptPlaceholder')" />
-      </div>
-      <div class="operate ac jb">
-        <div class="ac">
-          <modelSelect v-model="data.model" type="image" size="small" />
-          <t-select v-model="data.ratio" class="paramSelect ml-5" size="small" :placeholder="$t('workbench.production.editImage.ratio')">
-            <t-option value="16:9" label="16:9" />
-            <t-option value="9:16" label="9:16" />
-            <t-option value="1:1" label="1:1" />
-          </t-select>
-          <t-select v-model="data.quality" class="paramSelect ml-5" size="small" :placeholder="$t('workbench.production.editImage.quality')">
-            <t-option value="1K" label="1K" />
-            <t-option value="2K" label="2K" />
-            <t-option value="4K" label="4K" />
-          </t-select>
-        </div>
-
-        <div class="f" style="gap: 5px; margin-left: 5px">
-          <t-popup :content="$t('workbench.production.editImage.generateBtn')">
-            <t-button theme="primary" size="small" class="generateBtn" :disabled="generating" :loading="generating" @click="handleGenerate">
-              <template #icon><i-arrow-up /></template>
-            </t-button>
-          </t-popup>
-          <t-popup :content="$t('workbench.production.save')">
-            <t-button theme="primary" size="small" class="keepBtn" :disabled="generating" :loading="generating" @click="handleKeep">
-              <template #icon><i-save /></template>
-            </t-button>
-          </t-popup>
-        </div>
-      </div>
-    </div>
+    <GeneratedResultPanel
+      :data="data"
+      :generating="generating"
+      :selected="selected"
+      :options="options"
+      @toggle-selected="selectedFn"
+      @upload-option="clickHandler"
+      @remove="removeNodes(props.id)" />
+    <GenerateControls
+      :data="data"
+      :selected="selected"
+      :generating="generating"
+      :target-ready="targetReady"
+      :reference-images="referenceImages"
+      :references="references"
+      @generate="handleGenerate"
+      @open-history="openHistory"
+      @keep="handleKeep" />
     <Handle type="source" :position="Position.Right" style="z-index: 999999" />
+    <GenerationHistoryDialog
+      v-model:visible="historyVisible"
+      :history-loading="historyLoading"
+      :history-items="historyItems"
+      :selected-history-id="selectedHistoryId"
+      @select-history="selectHistory" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { Handle, useVueFlow, Position } from "@vue-flow/core";
 import type { Ref } from "vue";
-import modelSelect from "@/components/modelSelect.vue";
-import PromptEditor from "@/components/promptEditor.vue";
 import axios from "@/utils/axios";
-import { type GeneratedNodeData } from "../../utils/editImageType";
+import {
+  ACTIVE_IMAGE_TASK_STATUSES,
+  isActiveImageTask,
+  normalizeGeneratedNodeData,
+  type GeneratedNodeData,
+} from "../../utils/editImageType";
 import type { DropdownOption } from "tdesign-vue-next/es/dropdown";
 import type { Storyboard } from "../../utils/flowBuilder";
 import openAssetsSelector from "@/utils/assetsCheck";
 import { useFileDialog } from "@vueuse/core";
 import projectStore from "@/stores/project";
+import GeneratedResultPanel from "./generatedNode/GeneratedResultPanel.vue";
+import GenerateControls from "./generatedNode/GenerateControls.vue";
+import GenerationHistoryDialog from "./generatedNode/GenerationHistoryDialog.vue";
+import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
+import { getMediaOriginalUrl, getMediaPathForGeneration, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import type { MediaRef } from "@/types/api";
+
+interface ImageHistoryItem {
+  id: number;
+  url: string;
+  media?: MediaRef;
+  prompt?: string;
+  model?: string;
+  ratio?: string;
+  quality?: string;
+  createTime?: string;
+}
+
+const props = defineProps<{
+  id: string;
+  data: GeneratedNodeData;
+  projectId: number;
+  flowId: number | null;
+  saveFlow: () => Promise<number | null>;
+  targetType?: "deriveAsset" | "storyboard";
+  targetId?: number | null;
+}>();
+
+const emit = defineEmits<{
+  keep: [imageUrl: string, nodeId: string];
+  selectImage: [imageUrl: string, nodeId: string];
+}>();
 const { project } = storeToRefs(projectStore());
 const openStoryboardCheck = inject<() => Promise<Storyboard[]>>("openStoryboardCheck")!;
-const { open, onChange, onCancel } = useFileDialog({ multiple: false, reset: true, accept: ".png,.jpg,.jpeg" });
+const episodesId = inject<Ref<number>>("episodesId")!;
+const { open, onChange, onCancel } = useFileDialog({ multiple: false, reset: true, accept: ".png,.jpg,.jpeg,.webp" });
+const { removeNodes } = useVueFlow("editImage");
 
 const selected = ref(true);
-const generating = ref(false);
-const episodesId = inject<Ref<number>>("episodesId")!;
-
-const emit = defineEmits(["keep"]);
-const { removeNodes } = useVueFlow("editImage");
+const historyVisible = ref(false);
+const historyLoading = ref(false);
+const historyItems = ref<ImageHistoryItem[]>([]);
+const selectedHistoryId = ref<number | null>(null);
+const taskCenter = useTaskCenterStore();
+let releaseTaskListener: (() => void) | null = null;
+let lastAppliedTaskUpdate = 0;
 
 const options = [
   { content: $t("workbench.production.editImage.uploadImage"), value: 1 },
@@ -104,104 +97,302 @@ const options = [
   { content: $t("workbench.production.generatedNode.localUpload"), value: 3 },
 ];
 
+const targetReady = computed(() => Boolean(props.flowId && props.targetType && props.targetId));
+const generating = computed(() => Boolean(props.data.taskRequestPending || isActiveImageTask(props.data)));
+const referenceImages = computed(() => props.data.references ?? []);
 const references = computed(() => {
-  return props.data.references.map((i) => ({ type: "image" as const, src: i.image })).filter(Boolean);
+  return referenceImages.value.map((i) => ({ type: "image" as const, src: i.previewImage || i.image, label: i.label })).filter((i) => i.src);
 });
-
-const props = defineProps<{
-  id: string;
-  data: GeneratedNodeData;
-  projectId: number;
-}>();
 
 function selectedFn() {
   selected.value = !selected.value;
 }
+
 function clickHandler(data: DropdownOption) {
   if (data.value == 1) {
     uploadFn();
   } else if (data.value == 2) {
     getStoryboardImage();
   } else if (data.value == 3) {
-    lensImage();
+    localUpload();
   }
 }
-async function lensImage() {
+
+async function localUpload() {
   const files = await new Promise<FileList | null>((resolve) => {
     open();
     onChange((f) => resolve(f));
     onCancel(() => resolve(null));
   });
-
   if (!files?.length) return;
-
-  const file = files[0];
-  //转成base64显示
   const reader = new FileReader();
   reader.onload = async () => {
-    const base64 = reader.result as string;
     try {
       const { data } = await axios.post("/production/editImage/uploadImage", {
-        base64Data: base64,
+        base64Data: reader.result as string,
         projectId: props.projectId,
         scriptId: episodesId.value,
       });
-      props.data.generatedImage = data;
+      const media = normalizeMediaRef(data?.media ?? data, "image");
+      const url = media ? getMediaOriginalUrl(media) : data;
+      props.data.resultMedia = media;
+      props.data.generatedImage = media ? getMediaPreviewUrl(media) : url;
+      props.data.selectedResult = { url, media, prompt: props.data.prompt };
+      await saveManualChange();
     } catch (e) {
-      return window.$message.error((e as any)?.message || $t("workbench.production.editImage.uploadFailed"));
+      window.$message.error((e as any)?.message || $t("workbench.production.editImage.uploadFailed"));
     }
   };
-  reader.readAsDataURL(file);
-  // mockStoryboard.value.id = -1; // 新上传的图片没有id，使用-1标识，后端根据filePath处理这种情况
+  reader.readAsDataURL(files[0]);
 }
+
 async function uploadFn() {
   const selectedAssets = await openAssetsSelector({
     multiple: false,
     title: $t("workbench.production.editImage.selectImage"),
   });
   if (selectedAssets.length > 0) {
-    const filePath = selectedAssets[0].src!;
-    props.data.generatedImage = filePath;
+    const media = normalizeMediaRef((selectedAssets[0] as any).media ?? selectedAssets[0], "image");
+    const filePath = media ? getMediaOriginalUrl(media) : selectedAssets[0].src!;
+    props.data.resultMedia = media;
+    props.data.generatedImage = media ? getMediaPreviewUrl(media) : filePath;
+    props.data.selectedResult = { url: filePath, media, prompt: props.data.prompt };
+    await saveManualChange();
   }
 }
+
 async function getStoryboardImage() {
   const rows = await openStoryboardCheck();
   if (rows.length > 0) {
-    const filePath = rows[0].src!;
-    props.data.generatedImage = filePath;
+    const media = normalizeMediaRef((rows[0] as any).media ?? rows[0], "image");
+    const filePath = media ? getMediaOriginalUrl(media) : rows[0].src!;
+    props.data.resultMedia = media;
+    props.data.generatedImage = media ? getMediaPreviewUrl(media) : filePath;
+    props.data.selectedResult = { url: filePath, media, prompt: props.data.prompt };
+    await saveManualChange();
   }
 }
-// 生成
+
+async function saveManualChange() {
+  Object.assign(props.data, normalizeGeneratedNodeData(props.data));
+  try {
+    await props.saveFlow();
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
+  }
+}
+
 async function handleGenerate() {
   if (!props.data.model) return window.$message.error($t("workbench.production.editImage.selectModel"));
   if (!props.data.quality) return window.$message.error($t("workbench.production.editImage.selectQuality"));
   if (!props.data.ratio) return window.$message.error($t("workbench.production.editImage.selectRatio"));
-  generating.value = true;
+  if (!targetReady.value) return window.$message.error($t("workbench.production.editImage.targetMissing"));
   try {
-    const { data } = await axios.post("/production/editImage/generateFlowImage", {
-      references: props.data.references.map((i) => i.image).filter(Boolean),
+    props.data.taskRequestPending = true;
+    const flowId = await props.saveFlow();
+    if (!flowId) throw new Error($t("workbench.production.editImage.saveFailed"));
+    props.data.reason = "";
+    const { data } = await axios.post("/production/editImage/generateFlowImageTask", {
+      referenceMediaPaths: referenceImages.value
+        .map((i) => getMediaPathForGeneration(i.media ?? normalizeMediaRef(i, "image")))
+        .filter(Boolean),
       model: props.data.model,
       quality: props.data.quality,
       ratio: props.data.ratio,
       prompt: props.data.prompt,
       projectId: props.projectId,
+      scriptId: episodesId.value,
+      flowId,
+      nodeId: props.id,
+      targetType: props.targetType,
+      targetId: props.targetId,
     });
-    props.data.generatedImage = data.url;
+    const legacyTaskId = data?.legacyTaskId ?? (data?.unifiedTaskId ? data?.taskId : data?.taskId ?? data?.id);
+    const unifiedTaskId = data?.unifiedTaskId ?? (typeof data?.taskId === "string" && !/^\d+$/.test(data.taskId) ? data.taskId : undefined);
+    const taskId = unifiedTaskId ?? legacyTaskId;
+    if (taskId) {
+      props.data.taskId = taskId;
+      props.data.unifiedTaskId = unifiedTaskId ?? null;
+      props.data.legacyTaskId = legacyTaskId ?? null;
+      props.data.status = data?.status ?? "processing";
+      props.data.state = "generating";
+      bindTask({ unifiedTaskId, legacyTaskId, status: props.data.status });
+      return;
+    }
+    if (data?.media || data?.url || data?.src) {
+      applyTaskResult(data);
+      const media = normalizeMediaRef(data?.media ?? data, "image");
+      emit("selectImage", media ? getMediaOriginalUrl(media) : data.url ?? data.src, props.id);
+      return;
+    }
+    throw new Error($t("workbench.production.editImage.taskCreateFailed"));
   } catch (e) {
-    return window.$message.error((e as any)?.message || $t("workbench.production.editImage.generateFailed"));
+    props.data.status = "failed";
+    props.data.state = "failed";
+    props.data.reason = (e as any)?.message || "";
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.generateFailed"));
   } finally {
-    generating.value = false;
+    props.data.taskRequestPending = false;
   }
 }
 
 function handleKeep() {
-  if (!props.data.generatedImage) return window.$message.error($t("workbench.production.editImage.generateFirst"));
-  emit("keep", props.data.generatedImage);
+  const imageUrl = props.data.resultMedia ? getMediaOriginalUrl(props.data.resultMedia) : props.data.selectedResult?.url || props.data.generatedImage;
+  if (!imageUrl) return window.$message.error($t("workbench.production.editImage.generateFirst"));
+  emit("keep", imageUrl, props.id);
 }
+
+function applyTaskResult(data: any) {
+  const media = normalizeMediaRef(data?.media ?? data, "image");
+  const url = media ? getMediaOriginalUrl(media) : data?.url ?? data?.src;
+  if (url) {
+    props.data.resultMedia = media;
+    props.data.generatedImage = media ? getMediaPreviewUrl(media) : url;
+    props.data.selectedResult = {
+      id: data?.historyId ?? data?.id ?? null,
+      url,
+      media,
+      prompt: props.data.prompt,
+      model: props.data.model,
+      ratio: props.data.ratio,
+      quality: props.data.quality,
+      createTime: data?.createTime,
+    };
+  }
+  props.data.historyId = data?.historyId ?? props.data.selectedResult?.id ?? null;
+  props.data.status = "completed";
+  props.data.state = "success";
+  props.data.taskId = null;
+  props.data.unifiedTaskId = null;
+  props.data.legacyTaskId = null;
+  props.data.reason = "";
+}
+
+function getTaskKey() {
+  return createTaskKey("flowImage", props.projectId, props.targetId ?? props.flowId ?? props.id, props.id);
+}
+
+function applyRuntimeTask(task: RuntimeTask) {
+  if (task.updatedAt < lastAppliedTaskUpdate) return;
+  lastAppliedTaskUpdate = task.updatedAt;
+  const data = (task.result ?? {}) as any;
+  if (task.status === "completed") {
+    applyTaskResult(data);
+    const media = normalizeMediaRef(data?.media ?? data, "image");
+    const url = media ? getMediaOriginalUrl(media) : data?.url ?? data?.src;
+    if (url) emit("selectImage", url, props.id);
+    return;
+  }
+  if (task.status === "failed" || task.status === "cancelled") {
+    props.data.taskId = null;
+    props.data.unifiedTaskId = null;
+    props.data.legacyTaskId = null;
+    if (props.data.generatedImage || props.data.selectedResult?.url) {
+      props.data.status = "completed";
+      props.data.state = "success";
+      props.data.reason = "";
+    } else {
+      props.data.status = task.status;
+      props.data.state = "failed";
+      props.data.reason = task.reason || $t("workbench.production.editImage.generateFailed");
+    }
+    return;
+  }
+  if (ACTIVE_IMAGE_TASK_STATUSES.includes(task.status)) {
+    props.data.taskId = task.unifiedTaskId ?? task.legacyTaskId ?? task.taskId;
+    props.data.unifiedTaskId = task.unifiedTaskId ?? null;
+    props.data.legacyTaskId = task.legacyTaskId ?? null;
+    props.data.status = task.status;
+    props.data.state = "generating";
+    props.data.reason = task.reason ?? "";
+  }
+}
+
+function bindTask(task: { unifiedTaskId?: string | null; legacyTaskId?: string | number | null; status?: GeneratedNodeData["status"] }) {
+  releaseTaskListener?.();
+  const taskId = task.unifiedTaskId ?? task.legacyTaskId ?? props.data.taskId;
+  releaseTaskListener = taskCenter.registerTask(
+    {
+      key: getTaskKey(),
+      domain: "flowImage",
+      taskId: taskId ?? undefined,
+      unifiedTaskId: task.unifiedTaskId ?? undefined,
+      legacyTaskId: task.legacyTaskId ?? undefined,
+      targetType: props.targetType,
+      targetId: props.targetId ?? props.flowId ?? props.id,
+      projectId: props.projectId,
+      scriptId: episodesId.value,
+      nodeId: props.id,
+      status: task.status && ACTIVE_IMAGE_TASK_STATUSES.includes(task.status) ? task.status : "processing",
+    },
+    applyRuntimeTask,
+  );
+}
+
+async function openHistory() {
+  if (!targetReady.value) return;
+  historyVisible.value = true;
+  historyLoading.value = true;
+  selectedHistoryId.value = props.data.historyId ?? null;
+  try {
+    const { data } = await axios.post("/production/editImage/getImageHistory", {
+      projectId: props.projectId,
+      scriptId: episodesId.value,
+      targetType: props.targetType,
+      targetId: props.targetId,
+    });
+    historyItems.value = (data ?? [])
+      .map((item: any) => {
+        const media = normalizeMediaRef(item.media ?? item, "image");
+        return {
+        id: item.id,
+        url: media ? getMediaOriginalUrl(media) : item.url ?? item.src,
+        media,
+        prompt: item.prompt,
+        model: item.model,
+        ratio: item.ratio,
+        quality: item.quality,
+        createTime: item.createTime,
+      };
+      })
+      .filter((item: ImageHistoryItem) => item.url);
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.historyLoadFailed"));
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+function selectHistory(item: ImageHistoryItem) {
+  selectedHistoryId.value = item.id;
+  props.data.resultMedia = item.media;
+  props.data.generatedImage = item.media ? getMediaPreviewUrl(item.media) : item.url;
+  props.data.historyId = item.id;
+  props.data.selectedResult = item;
+  props.data.status = "completed";
+  props.data.state = "success";
+  props.data.taskId = null;
+  props.data.unifiedTaskId = null;
+  props.data.legacyTaskId = null;
+  props.data.reason = "";
+  taskCenter.updateTask(getTaskKey(), { status: "completed", result: { media: item.media, historyId: item.id }, reason: "" });
+  historyVisible.value = false;
+  emit("selectImage", item.url, props.id);
+}
+
 onMounted(() => {
-  props.data.model = project.value?.imageModel ?? "";
-  props.data.quality = project.value?.imageQuality ?? "";
-  props.data.ratio = project.value?.videoRatio ?? "16:9";
+  props.data.model ||= project.value?.imageModel ?? "";
+  props.data.quality ||= project.value?.imageQuality ?? "";
+  props.data.ratio ||= project.value?.videoRatio ?? "16:9";
+  Object.assign(props.data, normalizeGeneratedNodeData(props.data));
+  if (isActiveImageTask(props.data)) {
+    bindTask({ unifiedTaskId: props.data.unifiedTaskId, legacyTaskId: props.data.legacyTaskId ?? props.data.taskId, status: props.data.status });
+  }
+});
+
+onBeforeUnmount(() => {
+  releaseTaskListener?.();
+  releaseTaskListener = null;
 });
 </script>
 
@@ -323,17 +514,45 @@ onMounted(() => {
     border-radius: 10px;
     z-index: 9999;
 
-    .imageRefs {
-      overflow: auto;
+    :deep(.image-refs),
+    :deep(.imageRefs) {
+      display: flex !important;
+      align-items: center;
+      height: 66px;
+      max-height: 66px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      gap: 8px;
       padding: 10px;
-      .refThumb {
-        margin-left: 8px;
-        .refImg {
-          width: 45px;
-          height: 45px;
-          border-radius: 10px;
-        }
-      }
+      box-sizing: border-box;
+    }
+
+    :deep(.ref-thumb),
+    :deep(.refThumb) {
+      flex: 0 0 45px !important;
+      width: 45px !important;
+      height: 45px !important;
+      min-width: 45px !important;
+      max-width: 45px !important;
+      min-height: 45px !important;
+      max-height: 45px !important;
+      overflow: hidden;
+      border-radius: 10px;
+      background: var(--td-bg-color-container-hover);
+    }
+
+    :deep(.ref-img),
+    :deep(.refImg),
+    :deep(.ref-img img),
+    :deep(.refImg img) {
+      display: block;
+      width: 45px !important;
+      height: 45px !important;
+      min-width: 45px !important;
+      max-width: 45px !important;
+      min-height: 45px !important;
+      max-height: 45px !important;
+      object-fit: cover !important;
     }
 
     .text {

@@ -400,6 +400,7 @@ type UploadItem = UploadItemStoryboard | UploadItemAssets | UploadItemSlot;
 type ReferenceType = "videoReference" | "imageReference" | "audioReference" | "textReference";
 type Type = "imageReference" | "startImage" | "endImage" | "videoReference" | "audioReference";
 type VideoMode = "singleImage" | "startEndRequired" | "endFrameOptional" | "startFrameOptional" | "text" | ReferenceType[];
+type ModeItem = VideoMode;
 type ImportVideoItem = { trackId: number; videoId: number; src: string; duration: number };
 
 // 常量映射表
@@ -647,7 +648,7 @@ const modeList = computed(() => {
     textReference: "文本",
   };
   return modeOptions.value.mode
-    ? modeOptions.value.mode.map((mode) =>
+    ? modeOptions.value.mode.map((mode: ModeItem) =>
         Array.isArray(mode)
           ? { value: JSON.stringify(mode), label: mode.map((m) => modeLabelMap[m] || m).join(" + ") + "参考" }
           : { value: mode, label: modeLabelMap[mode] || mode },
@@ -951,7 +952,7 @@ function pickStoryboard(sb: StoryboardItem) {
   }
   const item = uploadBox.value[pendingIndex.value];
   if (!item) return;
-  uploadBox.value[pendingIndex.value] = { ...item, sources: "storyboard", src: sb.src, id: sb.id, prompt: sb.prompt ?? undefined, index: sb.index };
+  uploadBox.value[pendingIndex.value] = { ...item, sources: "storyboard", src: sb.src, id: sb.id, prompt: sb.prompt ?? undefined, index: sb.index ?? undefined };
   saveUploadBoxToCache();
 }
 
@@ -1047,22 +1048,20 @@ const promptText = computed({
 });
 
 /** uploadBox 作为 promptEditor 的引用预览 */
-const references = computed(() =>{
+const references = computed(() => {
   function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" {
-  const ext = src?.split(".").pop()?.toLowerCase() ?? "";
-  if (["mp4", "webm", "mov", "avi", "mkv"].includes(ext)) return "video";
-  if (["mp3", "wav", "ogg", "aac", "flac", "m4a"].includes(ext)) return "audio";
-  return "image";
-}
- return uploadBox.value
+    const ext = src?.split(".").pop()?.toLowerCase() ?? "";
+    if (["mp4", "webm", "mov", "avi", "mkv"].includes(ext)) return "video";
+    if (["mp3", "wav", "ogg", "aac", "flac", "m4a"].includes(ext)) return "audio";
+    return "image";
+  }
+  return uploadBox.value
     .filter((item) => item.src)
     .map((item) => ({
       type: getFileTypeByExt(item.src) as "image" | "video" | "audio" | "text",
       src: item.src ?? "",
-    })),
-}
-
-);
+    }));
+});
 
 /** 提示词失焦时保存到后端 */
 function handlePromptBlur() {

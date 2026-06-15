@@ -6,7 +6,7 @@
       <Handle :id="props.handleIds.source" type="source" :position="Position.Right" style="right: calc(-1 * var(--td-comp-paddingLR-xl))" />
     </div>
     <div class="content">
-      <MdPreview v-model="script" :theme="themeSetting.mode" />
+      <MdPreview v-model="script" :theme="mdTheme" />
     </div>
     <Handle :id="props.handleIds.assets" type="source" :position="Position.Bottom" />
   </t-card>
@@ -25,7 +25,7 @@
     attach="body">
     <MdEditor
       v-model="editContent"
-      :theme="themeSetting.mode"
+      :theme="mdTheme"
       :toolbars="toolbars"
       :footers="[]"
       style="height: 72vh"
@@ -43,6 +43,7 @@ import type { ToolbarNames } from "md-editor-v3";
 import settingStore from "@/stores/setting";
 import productionAgentStore from "@/stores/productionAgent";
 const { themeSetting } = storeToRefs(settingStore());
+const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
 
 const props = defineProps<{
   id: string;

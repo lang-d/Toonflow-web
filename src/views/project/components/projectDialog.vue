@@ -186,11 +186,11 @@
             <div class="promptEditorWrapper">
               <div class="promptEditorHeader">
                 <div class="aiExtractInline">
-                  <t-tabs :value="visualManualTabValue" size="medium" @change="(v) => (visualManualTabValue = v)">
+                  <t-tabs :value="visualManualTabValue" size="medium" @change="(v: string | number) => (visualManualTabValue = String(v))">
                     <t-tab-panel v-for="tab in visualManualTabData" :key="tab.value" :value="tab.value" :label="tab.label">
                       <MdEditor
                         v-model="tab.data"
-                        :theme="themeSetting.mode"
+                        :theme="mdTheme"
                         :toolbars="promptToolbars"
                         :footers="[]"
                         :placeholder="$t('workbench.project.dialog.promptPlaceholder')"
@@ -257,11 +257,11 @@
             <div class="promptEditorWrapper">
               <div class="promptEditorHeader">
                 <div class="aiExtractInline">
-                  <t-tabs :value="directorManualTabValue" size="medium" @change="(v) => (directorManualTabValue = v)">
+                  <t-tabs :value="directorManualTabValue" size="medium" @change="(v: string | number) => (directorManualTabValue = String(v))">
                     <t-tab-panel v-for="tab in directorManualTabData" :key="tab.value" :value="tab.value" :label="tab.label">
                       <MdEditor
                         v-model="tab.data"
-                        :theme="themeSetting.mode"
+                        :theme="mdTheme"
                         :toolbars="promptToolbars"
                         :footers="[]"
                         :placeholder="$t('workbench.project.dialog.promptPlaceholder')"
@@ -286,6 +286,7 @@ import axios from "@/utils/axios";
 import { MdEditor } from "md-editor-v3";
 import settingStore from "@/stores/setting";
 const { themeSetting } = storeToRefs(settingStore());
+const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
 import type { ToolbarNames } from "md-editor-v3";
 import modelSelect from "@/components/modelSelect.vue";
 import type { TabValue } from "tdesign-vue-next";

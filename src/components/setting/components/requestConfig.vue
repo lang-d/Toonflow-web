@@ -55,7 +55,7 @@ function handleSubmit() {
 }
 
 function handleReset() {
-  formData.value.baseUrl = "http://localhost:10588";
+  formData.value.baseUrl = "http://127.0.0.1:10588/api";
   baseUrl.value = formData.value.baseUrl;
   window.$message.success($t("settings.request.msg.reset"));
 }
@@ -64,8 +64,8 @@ async function refreshAPI() {
   try {
     const res = await fetch("toonflow://getAppUrl");
     const data = await res.json();
-    if (data?.port) {
-      baseUrl.value = data.url;
+    if (data?.url) {
+      baseUrl.value = normalizeApiBaseUrl(data.url);
       isElectron.value = true;
       window.$message.success($t("settings.request.msg.refreshSuccess"));
     }
@@ -77,6 +77,11 @@ async function refreshAPI() {
 onMounted(() => {
   loadSettings();
 });
+
+function normalizeApiBaseUrl(url: string) {
+  const trimmed = url.replace(/\/+$/, "");
+  return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+}
 </script>
 
 <style lang="scss" scoped></style>

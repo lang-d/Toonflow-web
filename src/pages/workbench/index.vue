@@ -63,7 +63,18 @@
         </div>
       </div>
       <div class="viewBox">
-        <router-view v-slot="{ Component }">
+        <div v-if="pageError" class="pageErrorState c">
+          <div class="pageErrorCard">
+            <h3>页面加载失败</h3>
+            <p>{{ pageError.message }}</p>
+            <div class="errorMeta">当前路由：{{ route.fullPath }}</div>
+            <div class="errorActions f ac">
+              <t-button theme="primary" @click="reloadCurrentPage">重新加载</t-button>
+              <t-button variant="outline" @click="backToProjectList">返回项目列表</t-button>
+            </div>
+          </div>
+        </div>
+        <router-view v-else v-slot="{ Component }">
           <component :is="Component" :key="$route.fullPath" />
         </router-view>
       </div>
@@ -71,17 +82,24 @@
   </div>
   <hello />
   <setting />
+  <WorkspaceSetupWizard />
+  <WorkspaceMaintenanceOverlay />
 </template>
 
 <script setup lang="ts">
 import axios from "@/utils/axios";
 import setting from "@/components/setting/index.vue";
 import hello from "@/components/hello.vue";
+import WorkspaceSetupWizard from "@/components/workspace/WorkspaceSetupWizard.vue";
+import WorkspaceMaintenanceOverlay from "@/components/workspace/WorkspaceMaintenanceOverlay.vue";
 import projectStore from "@/stores/project";
+import useWorkspaceStore from "@/stores/workspace";
+import { handleDynamicImportFailure } from "@/utils/moduleRecovery";
 const { project } = storeToRefs(projectStore());
 import settingStore from "@/stores/setting";
 import { NotifyPlugin } from "tdesign-vue-next";
-const { showSetting, isElectron, needUpdate } = storeToRefs(settingStore());
+const { showSetting, isElectron, needUpdate, apiReady } = storeToRefs(settingStore());
+const workspace = useWorkspaceStore();
 const menuList = ref([
   { type: "btn", path: "/project", labelKey: "workbench.menu.myProject", icon: "i-folder-close" },
   { type: "btn", path: "/task", labelKey: "workbench.menu.taskCenter", icon: "i-view-list" },
@@ -89,30 +107,78 @@ const menuList = ref([
 ]);
 
 const rightBtnList = ref([
-  { type: "btn", path: "/novel", labelKey: "workbench.menu.novel", icon: "i-notebook", nodelOnly: true },
-  { type: "btn", path: "/scriptAgent", labelKey: "workbench.menu.scriptAgent", icon: "i-color-filter", nodelOnly: true },
-  { type: "btn", path: "/script", labelKey: "workbench.menu.scriptManage", icon: "i-document-folder" },
-  { type: "btn", path: "/cornerScape", labelKey: "workbench.menu.cornerScape", icon: "i-peoples-two" },
-  { type: "btn", path: "/production", labelKey: "workbench.menu.production", icon: "i-carousel-video" },
+  { type: "btn", path: "/novel", labelKey: "workbench.menu.novel", icon: "i-notebook", nodelOnly: true, needProject: true },
+  { type: "btn", path: "/scriptAgent", labelKey: "workbench.menu.scriptAgent", icon: "i-color-filter", nodelOnly: true, needProject: true },
+  { type: "btn", path: "/script", labelKey: "workbench.menu.scriptManage", icon: "i-document-folder", needProject: true },
+  { type: "btn", path: "/cornerScape", labelKey: "workbench.menu.cornerScape", icon: "i-peoples-two", needProject: true },
+  { type: "btn", path: "/production", labelKey: "workbench.menu.production", icon: "i-carousel-video", needProject: true },
   { type: "divider" },
-  { type: "btn", path: "/assets", labelKey: "workbench.menu.assetCenter", icon: "i-receive" },
+  { type: "btn", path: "/assets", labelKey: "workbench.menu.assetCenter", icon: "i-receive", needProject: true },
 ]);
 
 const router = useRouter();
 const route = useRoute();
 const activeMenu = ref(route.path);
+const pageError = ref<{ message: string } | null>(null);
+
+onErrorCaptured((error) => {
+  const message = error instanceof Error ? error.message : String(error || "未知错误");
+  pageError.value = { message };
+  console.error("[workbench] route component error", error);
+  return false;
+});
 
 watch(
   () => route.path,
   (newPath) => {
     activeMenu.value = newPath;
+    pageError.value = null;
   },
 );
 
-function handleClick(menu: any) {
-  if (menu.needProject && !project.value) return;
-  router.push(menu.path);
-  activeMenu.value = menu.path;
+async function handleClick(menu: any) {
+  if (menu.needProject && !project.value?.id) {
+    window.$message.warning("请先选择项目");
+    void router.replace("/project");
+    activeMenu.value = "/project";
+    return;
+  }
+  if (isElectron.value && workspace.selectionRequired) {
+    window.$message.warning($t("workspace.maintenanceNavigationBlocked"));
+    return;
+  }
+  logWorkbenchNavigation(menu.path);
+  try {
+    await router.push(menu.path);
+    activeMenu.value = menu.path;
+  } catch (error) {
+    if (!handleDynamicImportFailure(error, menu.path)) {
+      window.$message.error((error as Error)?.message || "Page failed to load");
+    }
+  }
+}
+
+function logWorkbenchNavigation(path: string) {
+  if (!import.meta.env.DEV) return;
+  console.info("[workbench-navigation]", {
+    path,
+    isElectron: isElectron.value,
+    selectionRequired: workspace.selectionRequired,
+    maintenanceBlocking: workspace.maintenanceBlocking,
+    restartRequired: workspace.restartRequired,
+    migrationActive: workspace.migrationActive,
+    activeProjectId: project.value?.id,
+  });
+}
+
+function reloadCurrentPage() {
+  pageError.value = null;
+  window.location.reload();
+}
+
+function backToProjectList() {
+  pageError.value = null;
+  void router.replace("/project");
 }
 
 async function jumpGithub() {
@@ -191,6 +257,15 @@ watch(needUpdate, (val) => {
 onMounted(() => {
   startVersionCheck();
 });
+
+watch(
+  apiReady,
+  (ready) => {
+    if (!ready || !isElectron.value || !localStorage.getItem("token")) return;
+    void workspace.initialize().catch(() => {});
+  },
+  { immediate: true },
+);
 
 onUnmounted(() => {
   stopVersionCheck();
@@ -299,6 +374,35 @@ onUnmounted(() => {
     .viewBox {
       width: 100%;
       height: calc(100% - 6vh);
+      .pageErrorState {
+        width: 100%;
+        height: 100%;
+        .pageErrorCard {
+          width: min(460px, 90%);
+          padding: 24px;
+          border: 1px solid var(--td-border-level-1-color);
+          border-radius: 8px;
+          background: var(--td-bg-color-container);
+          box-shadow: var(--td-shadow-2);
+          h3 {
+            margin: 0 0 12px;
+          }
+          p {
+            margin: 0 0 12px;
+            color: var(--td-text-color-secondary);
+            line-height: 1.6;
+            word-break: break-word;
+          }
+          .errorMeta {
+            margin-bottom: 16px;
+            color: var(--td-text-color-placeholder);
+            font-size: 12px;
+          }
+          .errorActions {
+            gap: 8px;
+          }
+        }
+      }
     }
   }
 }

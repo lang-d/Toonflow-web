@@ -1,12 +1,51 @@
 <template>
   <div class="imageUploadBox ac">
     <!-- 单图模式 -->
-    <template v-if="mode == 'singleImage' || Array.isArray(parseMode(mode as string))">
-      <div class="uploadBtn c fc" v-for="(item, index) in mode == 'singleImage' ? imageList.slice(0, 1) : imageList" :key="index">
+    <template v-if="mode == 'singleImage' || isMultiReferenceMode">
+      <VueDraggable v-if="isMultiReferenceMode" v-model="imageList" class="referenceDragList" :animation="150" handle=".dragHandle">
+        <div class="uploadBtn c fc" v-for="(item, index) in imageList" :key="`${item.sources}-${item.id ?? index}-${index}`">
+          <div class="dragHandle">
+            <i-drag />
+          </div>
+          <template v-if="item.src">
+            <div v-if="item.fileType == 'image'" class="imagePreviewTrigger" @click.stop="openImagePreview(item)">
+              <t-image :src="getReferenceThumbnail(item)" fit="contain" class="uploadPreview">
+                <template #overlayContent></template>
+              </t-image>
+            </div>
+            <t-tooltip theme="primary" v-else-if="item.fileType == 'audio'" :content="item?.prompt || ''">
+              <div class="mediaPreview audioPreview">
+                <i-acoustic size="20" />
+                <span class="mediaLabel">闊抽</span>
+              </div>
+            </t-tooltip>
+            <div v-else-if="item.fileType == 'video'" class="mediaPreview videoPreview">
+              <video class="uploadPreview" :src="item.src" preload="metadata" muted />
+            </div>
+          </template>
+          <template v-else>
+            <t-tooltip theme="primary" :content="item?.prompt ? '音频内容：' + item.prompt : ''">
+              <span style="font-size: 20px">文</span>
+            </t-tooltip>
+          </template>
+          <div class="imageToolsWrap" v-if="item.sources == 'storyboard' && item.index != null">
+            {{ `P${item.index + 1}` }}
+          </div>
+          <div class="clearBtn" @click="splitImage(index)">
+            <i-close size="12" />
+          </div>
+          <div class="source">
+            <t-tag size="small">{{ getSourceLabel(item) }}</t-tag>
+          </div>
+        </div>
+      </VueDraggable>
+      <div class="uploadBtn c fc" v-else v-for="(item, index) in imageList.slice(0, 1)" :key="index">
         <template v-if="item.src">
-          <t-image v-if="item.fileType == 'image'" :src="item.src" fit="contain" class="uploadPreview">
-            <template #overlayContent></template>
-          </t-image>
+          <div v-if="item.fileType == 'image'" class="imagePreviewTrigger" @click.stop="openImagePreview(item)">
+            <t-image :src="getReferenceThumbnail(item)" fit="contain" class="uploadPreview">
+              <template #overlayContent></template>
+            </t-image>
+          </div>
           <t-tooltip theme="primary" v-else-if="item.fileType == 'audio'" :content="item?.prompt || ''">
             <div class="mediaPreview audioPreview">
               <i-acoustic size="20" />
@@ -29,9 +68,7 @@
           <i-close size="12" />
         </div>
         <div class="source">
-          <t-tag size="small">
-            {{ item.sources == "storyboard" ? $t("workbench.generate.storyboard") : $t("workbench.generate.assets") }}
-          </t-tag>
+          <t-tag size="small">{{ getSourceLabel(item) }}</t-tag>
         </div>
       </div>
     </template>
@@ -39,9 +76,14 @@
       <div class="uploadBtn c fc" v-for="(item, index) in buildLabel" :key="item.value" @click="handleMixedAdd(item.value as 'start' | 'end')">
         <div v-if="!isEmptySlot(imageList?.[index])" style="flex: 1; width: 100%" class="ac">
           <template v-if="imageList?.[index]?.src">
-            <t-image v-if="imageList?.[index]?.fileType == 'image'" :src="imageList?.[index]!.src" fit="contain" class="uploadPreview">
-              <template #overlayContent></template>
-            </t-image>
+            <div
+              v-if="imageList?.[index]?.fileType == 'image'"
+              class="imagePreviewTrigger"
+              @click.stop="openImagePreview(imageList?.[index])">
+              <t-image :src="getReferenceThumbnail(imageList?.[index])" fit="contain" class="uploadPreview">
+                <template #overlayContent></template>
+              </t-image>
+            </div>
             <div v-else-if="imageList?.[index]?.fileType == 'audio'" class="mediaPreview audioPreview">
               <i-acoustic size="20" />
               <span class="mediaLabel">音频</span>
@@ -62,9 +104,7 @@
             <i-close size="12" />
           </div>
           <div class="source">
-            <t-tag size="small">
-              {{ imageList?.[index]?.sources == "storyboard" ? $t("workbench.generate.storyboard") : $t("workbench.generate.assets") }}
-            </t-tag>
+            <t-tag size="small">{{ getSourceLabel(imageList?.[index]) }}</t-tag>
           </div>
         </div>
         <template v-else>
@@ -104,9 +144,13 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
+import { VueDraggable } from "vue-draggable-plus";
 import "@/views/production/components/workbench/type/type";
-import assetsCheck, { type AssetType, type ClipMediaType } from "@/utils/assetsCheck";
+import assetsCheck, { type ClipMediaType } from "@/utils/assetsCheck";
 import axios from "@/utils/axios";
+import { openImageLightbox } from "@/composables/useImageLightbox";
+import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
+import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 
 const props = defineProps<{
   mode: VideoMode;
@@ -117,6 +161,26 @@ const imageList = defineModel<UploadItem[]>({
 });
 //分镜选择弹窗
 const storyboardDialogVisible = ref(false);
+
+function getReferenceThumbnail(item?: UploadItem) {
+  if (!item) return "";
+  if (item.media) return getMediaPreviewUrl(item.media);
+  return getThumbnailImageUrl(item.thumbnail || item.thumb || item.src || "");
+}
+
+function openImagePreview(item?: UploadItem) {
+  if (!item?.src) return;
+  const previewItems = imageList.value.filter((candidate) => candidate.fileType === "image" && candidate.src);
+  const previewIndex = Math.max(0, previewItems.indexOf(item));
+  openImageLightbox({
+    images: previewItems.map((candidate) => ({
+      src: getReferenceThumbnail(candidate),
+      originalSrc: candidate.media ? getMediaOriginalUrl(candidate.media) : getOriginalImageUrl(candidate.originalUrl || candidate.imageUrl || candidate.src || ""),
+      title: candidate.name,
+    })),
+    index: previewIndex,
+  });
+}
 
 /** 空占位项，用于首尾帧模式中未设置的槽位 */
 const EMPTY_SLOT: UploadItem = { fileType: "image", id: null, src: "" } as any;
@@ -159,6 +223,21 @@ function parseMode(value: string): VideoMode | null {
   return value as Exclude<VideoMode, ReferenceType[]>;
 }
 
+const parsedMode = computed(() => parseMode(props.mode as string));
+const isMultiReferenceMode = computed(() => Array.isArray(parsedMode.value));
+
+function normalizeCategory(type: string | undefined): UploadCategory {
+  if (type === "role" || type === "scene" || type === "tool" || type === "clip" || type === "audio") return type;
+  return "other";
+}
+
+function getSourceLabel(item?: UploadItem) {
+  if (!item) return "";
+  if (item.sources == "storyboard") return $t("workbench.generate.storyboard");
+  if (item.sources == "merged") return "合图";
+  return $t("workbench.generate.assets");
+}
+
 //判断是否显示添加参考图
 const isShowAddImage = computed(() => {
   const mode = props.mode;
@@ -175,14 +254,15 @@ const isShowAddImage = computed(() => {
 
 /** 根据文件扩展名推断媒体类型 */
 function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" {
-  const ext = src?.split(".").pop()?.toLowerCase() ?? "";
+  const cleanSrc = src?.split(/[?#]/)[0] ?? "";
+  const ext = cleanSrc.split(".").pop()?.toLowerCase() ?? "";
   if (["mp4", "webm", "mov", "avi", "mkv"].includes(ext)) return "video";
   if (["mp3", "wav", "ogg", "aac", "flac", "m4a"].includes(ext)) return "audio";
   return "image";
 }
 /** 根据混合模式推导当前允许的 clip 媒体类型 */
 const mixedClipMediaTypes = computed<ClipMediaType[]>(() => {
-  const mode = props.mode;
+  const mode = parsedMode.value;
   if (!Array.isArray(mode)) return [];
   const map: Record<string, ClipMediaType> = { audioReference: "audio", imageReference: "image", videoReference: "video" };
   return mode.filter((m) => m in map).map((m) => map[m]);
@@ -205,24 +285,42 @@ function handleMixedAdd(slot: "start" | "end" | "" = "") {
       const newItems: UploadItem[] = assets.flatMap((asset) => {
         if (asset.type === "audio" && asset?.sonAssets?.length) {
           return asset.sonAssets.map((sub: any) => {
-            const fileType = getFileTypeByExt(sub.src);
+            const media = normalizeMediaRef(sub.media ?? sub, sub.type === "audio" ? "audio" : "image");
+            const fileType = (media?.type === "image" || media?.type === "video" || media?.type === "audio" ? media.type : getFileTypeByExt(sub.src)) as "image" | "video" | "audio";
             return {
               fileType,
               sources: "assets",
-              src: sub.src,
+              src: media ? getMediaPreviewUrl(media) || getMediaOriginalUrl(media) : sub.src,
+              media,
+              originalUrl: sub.originalUrl,
+              imageUrl: sub.imageUrl,
+              thumbnail: sub.thumbnail,
+              thumb: sub.thumb,
               id: sub.id,
               prompt: sub.prompt,
+              name: sub.name,
+              parentName: sub.parentName,
+              category: normalizeCategory(sub.parentType || sub.type),
             } as UploadItem;
           });
         }
-        const fileType = getFileTypeByExt(asset.src);
+        const media = normalizeMediaRef((asset as any).media ?? asset, asset.type === "audio" ? "audio" : "image");
+        const fileType = (media?.type === "image" || media?.type === "video" || media?.type === "audio" ? media.type : getFileTypeByExt(asset.src)) as "image" | "video" | "audio";
         return [
           {
             fileType,
             sources: "assets",
-            src: asset.src,
+            src: media ? getMediaPreviewUrl(media) || getMediaOriginalUrl(media) : asset.src,
+            media,
+            originalUrl: (asset as any).originalUrl,
+            imageUrl: (asset as any).imageUrl,
+            thumbnail: (asset as any).thumbnail,
+            thumb: (asset as any).thumb,
             id: asset.id,
             prompt: asset.prompt,
+            name: asset.name,
+            parentName: (asset as any).parentName,
+            category: normalizeCategory((asset as any).parentType || asset.type),
           } as UploadItem,
         ];
       });
@@ -253,12 +351,19 @@ function clearImage(index: number) {
 function pickStoryboard(sb: StoryboardItem) {
   storyboardDialogVisible.value = false;
   const fileType = "image";
+  const media = normalizeMediaRef((sb as any).media ?? sb, "image");
   const newItem = {
     fileType,
     sources: "storyboard",
-    src: sb.src,
+    src: media ? getMediaPreviewUrl(media) : sb.src,
+    media,
+    originalUrl: sb.originalUrl ?? undefined,
+    imageUrl: sb.imageUrl ?? undefined,
+    thumbnail: sb.thumbnail ?? undefined,
+    thumb: sb.thumb ?? undefined,
     id: sb.id,
     prompt: sb.videoDesc ?? undefined,
+    name: `P${sb.index + 1}`,
     index: sb.index,
   } as UploadItem;
 
@@ -292,6 +397,11 @@ function splitImage(index: number) {
     background-color: var(--td-bg-color-secondarycontainer);
     border-radius: 4px;
   }
+  .referenceDragList {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
   .imageToolsWrap {
     z-index: 99999;
     position: absolute;
@@ -319,12 +429,36 @@ function splitImage(index: number) {
       border-color: var(--td-text-color);
       cursor: pointer;
     }
+    .dragHandle {
+      position: absolute;
+      left: 2px;
+      bottom: 2px;
+      z-index: 3;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.55);
+      color: #fff;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+      font-size: 12px;
+    }
+    &:hover .dragHandle {
+      display: flex;
+    }
 
     .uploadPreview {
       width: 100%;
       height: 100%;
       object-fit: cover;
       border-radius: 8px;
+    }
+    .imagePreviewTrigger {
+      width: 100%;
+      height: 100%;
+      cursor: zoom-in;
     }
     .mediaPreview {
       width: 100%;

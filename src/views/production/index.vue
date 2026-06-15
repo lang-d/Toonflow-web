@@ -1,5 +1,6 @@
 <template>
   <VueFlow
+    v-if="hasProject"
     class="flowMain"
     :class="{ 'is-interacting': isInteracting && otherSetting.interacting, 'space-dragging': isSpacePressed }"
     id="mainFlowBox"
@@ -96,7 +97,23 @@
     </div>
     <t-guide v-model="current" :steps="steps" @finish="() => (current = -1)" />
     <t-tag variant="outline" class="fps" v-if="!openShowVisible">{{ fps }}</t-tag>
+    <div v-if="showPerfPanel" class="taskPerfPanel">
+      <strong>Task Center</strong>
+      <span>active {{ activeTaskCount }}</span>
+      <span>requests {{ inFlightRequests }}</span>
+      <span>transport {{ activeTransport }}</span>
+      <span>polls {{ totalPollCount }}</span>
+      <span>listeners {{ registeredListenerCount }}</span>
+      <span>long task {{ lastLongTask }}ms</span>
+    </div>
   </VueFlow>
+  <div v-else class="productionEmptyState c">
+    <div class="emptyCard">
+      <h3>未选择项目</h3>
+      <p>生产台需要先选择一个项目。请返回项目列表后重新进入。</p>
+      <t-button theme="primary" @click="goProjectList">返回项目列表</t-button>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -120,8 +137,11 @@ import { useLayout } from "./utils/dagre";
 import { useFlowBuilder } from "./utils/flowBuilder";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
+import useTaskCenterStore from "@/stores/taskCenter";
 
 const { project } = storeToRefs(projectStore());
+const hasProject = computed(() => Boolean(project.value?.id));
+const router = useRouter();
 import settingStore from "@/stores/setting";
 const { canvasWheelEvent, otherSetting } = storeToRefs(settingStore());
 const openShowVisible = ref(true);
@@ -158,6 +178,7 @@ function onSpaceMouseMove(e: MouseEvent) {
 }
 function onSpaceMouseUp() {
   document.removeEventListener("mousemove", onSpaceMouseMove);
+  saveCurrentCanvasMemory();
 }
 
 useEventListener(document, "keydown", (e: KeyboardEvent) => {
@@ -177,25 +198,88 @@ let interactionTimer: ReturnType<typeof setTimeout> | null = null;
 function startInteracting() {
   if (interactionTimer) clearTimeout(interactionTimer);
   isInteracting.value = true;
+  taskCenter.beginInteraction();
 }
 function stopInteracting() {
   // 延迟恢复，避免频繁切换
   if (interactionTimer) clearTimeout(interactionTimer);
   interactionTimer = setTimeout(() => {
     isInteracting.value = false;
+    taskCenter.endInteraction();
   }, 150);
 }
 
 onNodeDragStart(() => startInteracting());
 onMoveStart(() => startInteracting());
-onMoveEnd(() => stopInteracting());
+onMoveEnd(() => {
+  stopInteracting();
+  saveCurrentCanvasMemory();
+});
 const { layout } = useLayout("mainFlowBox");
 
 import productionAgentStore from "@/stores/productionAgent";
-const { episodesId, flowData, status } = storeToRefs(productionAgentStore());
+const agentStore = productionAgentStore();
+const taskCenter = useTaskCenterStore();
+const { episodesId, flowData, status } = storeToRefs(agentStore);
+const { activeTaskCount, inFlightRequests, activeTransport, lastLongTask, pollCount, registeredListenerCount } = storeToRefs(taskCenter);
+const totalPollCount = computed(() => Object.values(pollCount.value).reduce((sum, count) => sum + count, 0));
+const showPerfPanel = import.meta.env.DEV;
 provide("episodesId", episodesId);
 
 const loading = ref(false);
+
+function goProjectList() {
+  void router.replace("/project");
+}
+
+interface ProductionCanvasMemory {
+  episodesId?: number;
+  viewport?: {
+    x: number;
+    y: number;
+    zoom: number;
+  };
+}
+
+const isBootstrapping = ref(true);
+const canvasMemoryKey = computed(() => `productionCanvasMemory:${project.value?.id ?? "unknown"}`);
+
+function readCanvasMemory(): ProductionCanvasMemory | null {
+  try {
+    const raw = localStorage.getItem(canvasMemoryKey.value);
+    return raw ? (JSON.parse(raw) as ProductionCanvasMemory) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCanvasMemory(memory: ProductionCanvasMemory) {
+  try {
+    localStorage.setItem(canvasMemoryKey.value, JSON.stringify(memory));
+  } catch {}
+}
+
+function saveCurrentCanvasMemory() {
+  if (!project.value?.id || !episodesId.value) return;
+  const viewport = getViewport();
+  writeCanvasMemory({
+    episodesId: episodesId.value,
+    viewport: {
+      x: viewport.x,
+      y: viewport.y,
+      zoom: viewport.zoom,
+    },
+  });
+}
+
+async function restoreSavedViewport(memory: ProductionCanvasMemory | null) {
+  if (!memory?.viewport || memory.episodesId !== episodesId.value) return false;
+  const nodesReady = await waitForNodesReady();
+  if (!nodesReady) return false;
+  await nextTick();
+  setViewport(memory.viewport);
+  return true;
+}
 
 // 节点位置
 const nodePositions = ref<Record<string, { x: number; y: number }>>({
@@ -218,17 +302,6 @@ onNodeDragStop(async ({ nodes: draggedNodes }) => {
   }
 });
 
-// flowData 变化时，将 VueFlow 中节点的当前实际位置同步到 nodePositions，防止位置回跳
-watch(
-  flowData,
-  () => {
-    for (const node of getNodes.value) {
-      nodePositions.value[node.id] = { x: node.position.x, y: node.position.y };
-    }
-  },
-  { deep: true },
-);
-
 async function waitForNodesReady(maxRetries = 60, delay = 100) {
   while (maxRetries-- > 0) {
     const nodes = getNodes.value;
@@ -243,13 +316,18 @@ async function waitForNodesReady(maxRetries = 60, delay = 100) {
 }
 
 onMounted(async () => {
-  await getScriptData();
-  if (!episodesId.value) return;
-
-  const nodesReady = await waitForNodesReady();
-  if (nodesReady) {
-    await layoutGraph();
+  if (!hasProject.value) {
+    isBootstrapping.value = false;
+    void router.replace("/project");
+    return;
   }
+  await getScriptData();
+  if (!episodesId.value) {
+    isBootstrapping.value = false;
+    return;
+  }
+  await loadEpisodeFlow({ restoreViewport: true });
+  isBootstrapping.value = false;
 });
 
 const episodesOptions = ref<{ label: string; value: number }[]>([]);
@@ -290,11 +368,11 @@ function handleEpisodesChange(value: unknown) {
     if (!(await confirmEpisodesSwitch())) return;
 
     episodesId.value = nextEpisodesId;
-    await productionAgentStore().getFlowData();
   })();
 }
 
 async function getScriptData() {
+  if (!project.value?.id) return;
   //获取剧本
   const { data: scriptRes } = await axios.post("/script/getScrptApi", {
     projectId: project.value?.id,
@@ -305,11 +383,9 @@ async function getScriptData() {
     value: ep.id,
   }));
   if (episodesOptions.value.length) {
-    episodesId.value = episodesOptions.value[0].value;
-  }
-  if (status.value !== "pending" && status.value !== "streaming") {
-    episodesId.value && (await productionAgentStore().getFlowData());
-    await productionAgentStore().getHistory();
+    const memory = readCanvasMemory();
+    const savedEpisode = episodesOptions.value.find((option) => option.value === memory?.episodesId);
+    episodesId.value = savedEpisode?.value ?? episodesOptions.value[0].value;
   }
 }
 
@@ -449,15 +525,30 @@ watch(
   () => episodesId.value,
   async (newVal) => {
     if (!newVal || newVal < 0) return;
-    await refFlowData();
-    productionAgentStore().updateContext();
-    await productionAgentStore().getHistory();
+    if (isBootstrapping.value) return;
+    await loadEpisodeFlow({ restoreViewport: false });
   },
 );
 
 async function refFlowData() {
-  await productionAgentStore().getFlowData();
-  layoutGraph();
+  if (!hasProject.value) return;
+  await agentStore.getFlowData();
+  await layoutGraph();
+  saveCurrentCanvasMemory();
+}
+
+async function loadEpisodeFlow({ restoreViewport }: { restoreViewport: boolean }) {
+  if (!hasProject.value) return;
+  if (status.value !== "pending" && status.value !== "streaming") {
+    await agentStore.getFlowData();
+    agentStore.updateContext();
+    await agentStore.getHistory();
+  }
+  const restored = restoreViewport ? await restoreSavedViewport(readCanvasMemory()) : false;
+  if (!restored) {
+    await layoutGraph();
+  }
+  saveCurrentCanvasMemory();
 }
 
 const current = useLocalStorage("productionCurrent", 0);
@@ -509,6 +600,14 @@ watch(openShowVisible, (val) => {
   if (!val) {
     animate();
   }
+});
+
+onBeforeUnmount(() => {
+  if (interactionTimer) clearTimeout(interactionTimer);
+  document.removeEventListener("mousemove", onSpaceMouseMove);
+  taskCenter.endInteraction();
+  agentStore.disposeSession();
+  agentStore.$dispose();
 });
 </script>
 <style lang="scss" scoped>
@@ -566,7 +665,47 @@ watch(openShowVisible, (val) => {
     transform: translateX(100%);
   }
 }
+
+.taskPerfPanel {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 4px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--td-border-level-1-color);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--td-bg-color-container) 92%, transparent);
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  pointer-events: none;
+}
 // 拖拽/平移时优化渲染性能
+.productionEmptyState {
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  .emptyCard {
+    width: min(420px, 90%);
+    padding: 24px;
+    border: 1px solid var(--td-border-level-1-color);
+    border-radius: 8px;
+    background: var(--td-bg-color-container);
+    box-shadow: var(--td-shadow-2);
+    text-align: center;
+    h3 {
+      margin: 0 0 12px;
+    }
+    p {
+      margin: 0 0 18px;
+      color: var(--td-text-color-secondary);
+      line-height: 1.6;
+    }
+  }
+}
+
 .flowMain.is-interacting {
   :deep(.vue-flow__node) {
     will-change: transform;

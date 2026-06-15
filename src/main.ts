@@ -20,10 +20,19 @@ import "splitpanes/dist/splitpanes.css";
 
 import "./assets/main.scss";
 
-import { imageOptimizer } from '@/utils/imageOptimizer'
+import { imageOptimizer } from "@/utils/imageOptimizer";
+import { handleDynamicImportFailure, hasModuleLoadError } from "@/utils/moduleRecovery";
+
+window.addEventListener("vite:preloadError", (event) => {
+  event.preventDefault();
+  const preloadEvent = event as Event & { payload?: unknown };
+  if (handleDynamicImportFailure(preloadEvent.payload) && hasModuleLoadError()) {
+    void router.replace({ name: "module-load-error" });
+  }
+});
 
 const app = createApp(App);
-app.use(imageOptimizer)
+app.use(imageOptimizer);
 install(app, "i");
 app.use(createPinia().use(piniaPluginPersistedstate));
 app.use(router);

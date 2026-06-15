@@ -18,6 +18,19 @@ interface ImportMetaEnv {
 
 interface ImportMeta {
   readonly env: ImportMetaEnv;
+  glob<T = unknown>(
+    pattern: string | string[],
+    options?: {
+      eager?: boolean;
+      query?: string | Record<string, string | number | boolean>;
+      import?: string;
+      as?: string;
+    },
+  ): Record<string, T>;
+}
+
+interface Window {
+  $electron?: unknown;
 }
 
 /**

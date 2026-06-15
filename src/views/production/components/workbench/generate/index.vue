@@ -1,12 +1,28 @@
 <template>
   <div class="index fc">
     <div class="referenceImage">
+      <div class="referenceToolbar f ac jb">
+        <div class="referenceActions f ac">
+          <t-button size="small" variant="outline" :loading="cacheRefreshing" @click="confirmRefreshReferenceCache">刷新缓存</t-button>
+          <t-button size="small" variant="outline" :loading="mergeLoading === 'storyboard'" :disabled="!canMergeStoryboard" @click="mergeReferences('storyboard')">
+            合并分镜图
+          </t-button>
+          <t-button size="small" variant="outline" :loading="mergeLoading === 'assets'" :disabled="!canMergeAssets" @click="mergeReferences('assets')">
+            合并图片资产
+          </t-button>
+        </div>
+        <span class="referenceHint">拖动引用可调整生成顺序</span>
+      </div>
       <div class="uploadBtn">
         <imageSelect :mode="modelParmas.mode as VideoMode" v-model="imageList" :storyboard-list="storyboardList" />
       </div>
     </div>
     <div class="modelSelect">
       <modeMenu v-model="modelParmas" :modeOptions="modeOptions" :trackId="currentTrack?.id" :modeList="modeList" @modeChange="modeChange" />
+    </div>
+    <div class="globalPromptAffix">
+      <t-input v-model="promptPrefix" size="small" placeholder="前置提示词" clearable />
+      <t-input v-model="promptSuffix" size="small" placeholder="后置提示词" clearable />
     </div>
     <div class="generate ac">
       <div class="prompt" v-if="currentTrack">
@@ -40,6 +56,8 @@
         @change="trackChange"
         :modelParmas="modelParmas"
         :clampDuration="clampDuration"
+        :prompt-prefix="promptPrefix"
+        :prompt-suffix="promptSuffix"
         @getData="getGenerateData" />
     </div>
   </div>
@@ -56,13 +74,26 @@ import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import promptEditor from "@/components/promptEditor.vue";
 import imageListCacheStore from "@/stores/imageListCache";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
+import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
 const activeTrackIndex = ref(0);
 const cacheStore = imageListCacheStore();
-const { getCache, setCache, removeCache, initCacheFromTrackList, warmUpUrls } = cacheStore;
+const taskCenter = useTaskCenterStore();
+const { getCache, setCache, initCacheFromTrackList, forceInitCacheFromTrackList, warmUpUrls, clearUrlMap } = cacheStore;
 const { urlMap } = storeToRefs(cacheStore);
+const cacheRefreshing = ref(false);
+const mergeLoading = ref<"" | "storyboard" | "assets">("");
+const promptPrefix = ref("");
+const promptSuffix = ref("");
+const restoredLastTrack = ref(false);
+const videoTaskBindings = new Map<number, () => void>();
+const promptTaskBindings = new Map<number, () => void>();
+const reportedFailures = new Set<string>();
+const cacheWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let promptAffixWriteTimer: ReturnType<typeof setTimeout> | null = null;
 
 const modeOptions = ref<VideoModel>({
   name: "",
@@ -85,10 +116,32 @@ const modelParmas = ref<ModelSetting>({
 
 const storyboardList = ref<StoryboardItem[]>([]); // 分镜列表
 
-/** 排序优先级：assets有图=0，storyboard有图=1，无图=2 */
-function getImageItemPriority(item: UploadItem): number {
-  if (item.src) return item.sources === "assets" ? 0 : 1;
-  return 2;
+/** 当前剧集维度的本地操作状态 */
+function getScriptStorageKey(name: string) {
+  return `workbench:generate:${project.value?.id ?? "unknown"}:${episodesId.value ?? "unknown"}:${name}`;
+}
+
+function loadPromptAffixes() {
+  promptPrefix.value = localStorage.getItem(getScriptStorageKey("promptPrefix")) || "";
+  promptSuffix.value = localStorage.getItem(getScriptStorageKey("promptSuffix")) || "";
+}
+
+function composePrompt(prompt?: string) {
+  return [promptPrefix.value, prompt, promptSuffix.value].map((item) => item?.trim()).filter(Boolean).join("\n\n");
+}
+
+function restoreLastTrack() {
+  if (restoredLastTrack.value) return;
+  restoredLastTrack.value = true;
+  const lastTrackId = Number(localStorage.getItem(getScriptStorageKey("lastTrackId")));
+  if (!lastTrackId) return;
+  const index = trackList.value.findIndex((track) => track.id === lastTrackId);
+  if (index >= 0) activeTrackIndex.value = index;
+}
+
+function rememberCurrentTrack(trackId?: number) {
+  if (!trackId) return;
+  localStorage.setItem(getScriptStorageKey("lastTrackId"), String(trackId));
 }
 
 const imageList = computed({
@@ -99,20 +152,17 @@ const imageList = computed({
     const trackId = currentTrack.value?.id;
     const pid = project.value?.id;
     const sid = episodesId.value;
-    // 优先从缓存读取
+    const medias = currentTrack.value?.medias;
+    if (medias?.length) return medias as UploadItem[];
+    // 后端数据尚未装载到当前轨道时再从缓存恢复
     if (pid != null && sid != null && trackId != null) {
       const cached = getCache(pid, sid, trackId);
 
       if (cached?.length) {
-        cached.sort((a, b) => getImageItemPriority(a) - getImageItemPriority(b));
         return cached;
       }
     }
-    const medias = currentTrack.value?.medias;
-    if (!medias?.length) return [];
-    (medias as UploadItem[]).sort((a, b) => getImageItemPriority(a) - getImageItemPriority(b));
-
-    return medias as UploadItem[];
+    return [];
   },
   set(val: UploadItem[]) {
     if (currentTrack.value) {
@@ -122,7 +172,7 @@ const imageList = computed({
       const sid = episodesId.value;
       const trackId = currentTrack.value.id;
       if (pid != null && sid != null && trackId != null) {
-        setCache(pid, sid, trackId, val);
+        scheduleCacheWrite(pid, sid, trackId, val);
       }
     }
   },
@@ -185,6 +235,54 @@ const currentTrack = computed({
 });
 
 /** 将时长限制在模型支持的范围内 */
+watch(
+  () => [project.value?.id, episodesId.value],
+  () => {
+    restoredLastTrack.value = false;
+    loadPromptAffixes();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => currentTrack.value?.id,
+  (trackId) => rememberCurrentTrack(trackId),
+);
+
+watch([promptPrefix, promptSuffix], schedulePromptAffixWrite);
+
+function runWhenIdle(callback: () => void) {
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(callback, { timeout: 1_000 });
+  } else {
+    setTimeout(callback, 0);
+  }
+}
+
+function schedulePromptAffixWrite() {
+  if (promptAffixWriteTimer) clearTimeout(promptAffixWriteTimer);
+  promptAffixWriteTimer = setTimeout(() => {
+    runWhenIdle(() => {
+      localStorage.setItem(getScriptStorageKey("promptPrefix"), promptPrefix.value);
+      localStorage.setItem(getScriptStorageKey("promptSuffix"), promptSuffix.value);
+    });
+  }, 500);
+}
+
+function scheduleCacheWrite(projectId: string | number, scriptId: string | number, trackId: string | number, medias: UploadItem[]) {
+  const key = `${projectId}:${scriptId}:${trackId}`;
+  const currentTimer = cacheWriteTimers.get(key);
+  if (currentTimer) clearTimeout(currentTimer);
+  const snapshot = medias.slice();
+  cacheWriteTimers.set(
+    key,
+    setTimeout(() => {
+      cacheWriteTimers.delete(key);
+      runWhenIdle(() => setCache(projectId, scriptId, trackId, snapshot));
+    }, 500),
+  );
+}
+
 function clampDuration(trackDuration: number): number {
   const drMap = modeOptions.value?.durationResolutionMap;
   if (Array.isArray(drMap) && drMap.length > 0 && drMap[0].duration?.length) {
@@ -246,33 +344,50 @@ function parseMode(value: string): VideoMode | null {
 /** uploadBox 作为 promptEditor 的引用预览 */
 const references = computed(() => {
   function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" {
-    const ext = src?.split(".").pop()?.toLowerCase() ?? "";
+    const cleanSrc = src?.split(/[?#]/)[0] ?? "";
+    const ext = cleanSrc.split(".").pop()?.toLowerCase() ?? "";
     if (["mp4", "webm", "mov", "avi", "mkv"].includes(ext)) return "video";
     if (["mp3", "wav", "ogg", "aac", "flac", "m4a"].includes(ext)) return "audio";
     return "image";
   }
 
-  return imageList.value
+  return (imageList.value as any[])
     .filter((item) => item.src)
     .map((item) => ({
-      type: getFileTypeByExt(item.src) as "image" | "video" | "audio" | "text",
+      type: item.fileType || getFileTypeByExt(item.src),
       src: item.src ?? "",
     }));
 });
 
-async function getGenerateData() {
+async function getGenerateData(options: { forceCache?: boolean } = {}) {
   const { data } = await axios.post("/production/workbench/getGenerateData", {
     projectId: project.value?.id,
     scriptId: episodesId.value ?? 0,
   });
 
-  storyboardList.value = data.storyboardList;
+  storyboardList.value = (data.storyboardList ?? []).map((item: StoryboardItem) =>
+    attachLegacyMediaFields(item as any, normalizeMediaRef((item as any).media ?? item, "image")),
+  ) as StoryboardItem[];
+  data.trackList = (data.trackList ?? []).map((track: TrackItem) => ({
+    ...track,
+    status: normalizeTaskStatus((track as any).status ?? track.state, "pending"),
+    medias: (track.medias ?? []).map((media: TrackMedia) => attachLegacyMediaFields(media as any, normalizeMediaRef((media as any).media ?? media, media.fileType))),
+    videoList: (track.videoList ?? []).map((video: VideoItem) => ({
+      ...attachLegacyMediaFields(video as any, normalizeMediaRef((video as any).media ?? video, "video")),
+      status: normalizeTaskStatus((video as any).status ?? video.state, "pending"),
+    })),
+  }));
   // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
   const pid = project.value?.id;
   const sid = episodesId.value;
   if (pid != null && sid != null) {
     // 先将没有缓存的轨道写入缓存（保留已有本地编辑）
-    initCacheFromTrackList(pid, sid, data.trackList);
+    if (options.forceCache) {
+      clearUrlMap();
+      forceInitCacheFromTrackList(pid, sid, data.trackList);
+    } else {
+      initCacheFromTrackList(pid, sid, data.trackList);
+    }
     // 批量向后端请求文件路径对应的完整 URL
     await warmUpUrls(pid, sid);
     // 将本地缓存回写到 trackList，确保优先使用缓存数据（src 已解析为完整 URL）
@@ -285,11 +400,139 @@ async function getGenerateData() {
     });
     // 整体赋值触发响应式
     trackList.value = [...data.trackList];
+    if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(trackList.value.length - 1, 0);
+    restoreLastTrack();
+    syncWorkbenchTasks();
   }
 
   modelParmas.value.duration = clampDuration(data.trackList?.[activeTrackIndex.value]?.duration);
 }
 /** 提示词失焦时保存到后端 */
+function confirmRefreshReferenceCache() {
+  const dlg = DialogPlugin.confirm({
+    header: "刷新引用缓存",
+    body: "将用后端最新引用覆盖当前剧集本地引用缓存，未保存到后端的引用调整会丢失。",
+    confirmBtn: "刷新",
+    cancelBtn: $t("common.cancel"),
+    onConfirm: async () => {
+      dlg.destroy();
+      cacheRefreshing.value = true;
+      try {
+        await getGenerateData({ forceCache: true });
+        window.$message.success("引用缓存已刷新");
+      } catch (e) {
+        window.$message.error((e as any)?.message || "刷新引用缓存失败");
+      } finally {
+        cacheRefreshing.value = false;
+      }
+    },
+    onCancel: () => dlg.destroy(),
+  });
+}
+
+const isFlexibleReferenceMode = computed(() => Array.isArray(parseMode(modelParmas.value.mode)));
+const storyboardMergeCandidates = computed(() =>
+  imageList.value
+    .map((item, order) => ({ item, order }))
+    .filter(({ item }) => item.sources === "storyboard" && item.fileType === "image" && Boolean(item.src) && item.id != null),
+);
+const assetMergeCandidates = computed(() =>
+  imageList.value
+    .map((item, order) => ({ item, order }))
+    .filter(({ item }) => item.sources === "assets" && item.fileType === "image" && Boolean(item.src) && item.id != null),
+);
+const canMergeStoryboard = computed(() => isFlexibleReferenceMode.value && storyboardMergeCandidates.value.length >= 2);
+const canMergeAssets = computed(() => isFlexibleReferenceMode.value && assetMergeCandidates.value.length >= 2);
+
+function getRuntimeStatus(item: { status?: any; state?: any }, fallback: import("@/types/api").TaskStatus = "pending") {
+  return normalizeTaskStatus(item.status ?? item.state, fallback);
+}
+
+function isActiveRuntimeStatus(item: { status?: any; state?: any }) {
+  return ["queued", "submitting", "processing"].includes(getRuntimeStatus(item));
+}
+
+function getAssetMergeLabel(item: UploadItem) {
+  if (item.category === "role" && item.parentName && item.name && item.parentName !== item.name) return `${item.parentName}+${item.name}`;
+  return item.name || item.prompt || `资产${item.id}`;
+}
+function getAssetMergeCategory(item: UploadItem) {
+  const category = item.category;
+  return category === "role" || category === "scene" || category === "tool" || category === "clip" ? category : "other";
+}
+
+async function mergeReferences(type: "storyboard" | "assets") {
+  if (!currentTrack.value?.id) return;
+  const candidates = type === "storyboard" ? storyboardMergeCandidates.value : assetMergeCandidates.value;
+  if (candidates.length < 2) return window.$message.warning(type === "storyboard" ? "至少选择两张分镜图" : "至少选择两张图片资产");
+  mergeLoading.value = type;
+  try {
+    const refs = candidates.map(({ item, order }) => ({
+      id: Number(item.id),
+      sources: item.sources as "storyboard" | "assets",
+      src: item.src,
+      order,
+      label: item.sources === "storyboard" ? item.name || `P${(item as UploadItemStoryboard).index + 1}` : getAssetMergeLabel(item),
+      category: item.sources === "assets" ? getAssetMergeCategory(item) : undefined,
+      parentName: item.sources === "assets" ? item.parentName : undefined,
+      name: item.name,
+      index: item.sources === "storyboard" ? (item as UploadItemStoryboard).index : undefined,
+    }));
+    const response = await axios.post("/production/workbench/createMergedReference", {
+      projectId: project.value?.id,
+      scriptId: episodesId.value,
+      trackId: currentTrack.value.id,
+      mergeType: type,
+      refs,
+    });
+    const data = (response as any)?.data?.data ?? (response as any)?.data ?? response;
+    const media = normalizeMediaRef(data?.media ?? data, "image");
+    const mediaWithSource = media ? { ...media, source: media.source ?? "merged" } : undefined;
+    const mergedId = data?.id ?? data?.assetId ?? data?.asset?.id ?? mediaWithSource?.id;
+    if (mergedId == null || Number.isNaN(Number(mergedId))) {
+      throw new Error("后端未返回合图资产 ID");
+    }
+    const originalUrl =
+      (mediaWithSource ? getMediaOriginalUrl(mediaWithSource) : "") ||
+      data?.originalUrl ||
+      data?.imageUrl ||
+      data?.url ||
+      data?.src ||
+      "";
+    const previewUrl =
+      (mediaWithSource ? getMediaPreviewUrl(mediaWithSource) : "") ||
+      data?.thumbnail ||
+      data?.thumb ||
+      data?.previewUrl ||
+      data?.src ||
+      originalUrl;
+    const mergedItem: UploadItemMerged = {
+      fileType: "image",
+      sources: "merged",
+      id: Number(mergedId),
+      media: mediaWithSource,
+      src: previewUrl || originalUrl,
+      originalUrl,
+      imageUrl: data?.imageUrl || originalUrl,
+      thumbnail: data?.thumbnail || data?.previewUrl || previewUrl,
+      thumb: data?.thumb || previewUrl,
+      name: data?.name || data?.asset?.name || (type === "storyboard" ? "合并分镜图" : "合并资产图"),
+      prompt: data?.prompt || data?.asset?.prompt,
+      sourceRefs: refs.map(({ id, sources, order }) => ({ id, sources, order })),
+    };
+    const replaceIndexes = candidates.map(({ order }) => order).sort((a, b) => a - b);
+    const next = [...imageList.value];
+    for (let i = replaceIndexes.length - 1; i >= 0; i--) next.splice(replaceIndexes[i], 1);
+    next.splice(replaceIndexes[0], 0, mergedItem);
+    imageList.value = next;
+    window.$message.success("合图引用已创建");
+  } catch (e) {
+    window.$message.error((e as any)?.message || "创建合图引用失败");
+  } finally {
+    mergeLoading.value = "";
+  }
+}
+
 function handlePromptBlur() {
   const trackId = trackList.value[activeTrackIndex.value]?.id;
   if (trackId == null) return;
@@ -299,6 +542,7 @@ function handlePromptBlur() {
 /** 单个轨道生成提示词 */
 async function genText() {
   if (currentTrack.value.id == null) return;
+  taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), currentTrack.value.id));
   let info = [];
   const currentTrackId = currentTrack.value.id;
   const changeTrack = currentTrack.value;
@@ -322,6 +566,7 @@ async function genText() {
           })();
   }
   currentTrack.value.state = "生成中";
+  currentTrack.value.status = "processing";
   try {
     const { data } = await axios.post("/production/workbench/generateVideoPrompt", {
       projectId: project.value?.id,
@@ -329,11 +574,22 @@ async function genText() {
       info: info,
       model: modelParmas.value.model,
       mode: modelParmas.value.mode,
+      promptPrefix: promptPrefix.value,
+      promptSuffix: promptSuffix.value,
     });
-    changeTrack.prompt = data;
-    currentTrack.value.state = "已完成";
+    if (typeof data === "object" && data?.taskId) {
+      changeTrack.taskId = data.taskId;
+      changeTrack.state = "生成中";
+      changeTrack.status = normalizeTaskStatus(data.status, "queued");
+      syncPromptTasks();
+    } else {
+      changeTrack.prompt = data;
+      currentTrack.value.state = "已完成";
+      currentTrack.value.status = "completed";
+    }
   } catch (e) {
     currentTrack.value.state = "生成失败";
+    currentTrack.value.status = "failed";
     window.$message.error((e as Error)?.message ?? "提示词生成失败");
   } finally {
   }
@@ -345,7 +601,7 @@ function trackChange(prevIndex?: number) {
     const pid = project.value?.id;
     const sid = episodesId.value;
     if (pid != null && sid != null && prevTrack?.id != null) {
-      setCache(pid, sid, prevTrack.id, prevTrack.medias as unknown as UploadItem[]);
+      scheduleCacheWrite(pid, sid, prevTrack.id, prevTrack.medias as unknown as UploadItem[]);
     }
   }
   // 切换后：从缓存恢复当前轨道的 imageList
@@ -373,7 +629,7 @@ watch(
     const sid = episodesId.value;
     const trackId = currentTrack.value?.id;
     if (pid != null && sid != null && trackId != null) {
-      setCache(pid, sid, trackId, medias as unknown as UploadItem[]);
+      scheduleCacheWrite(pid, sid, trackId, medias as unknown as UploadItem[]);
     }
   },
   { deep: true },
@@ -382,10 +638,7 @@ watch(
 onMounted(() => {
   modelParmas.value.model = project.value?.videoModel || "";
   modelParmas.value.mode = project.value?.mode || "";
-  getGenerateData();
-  if (hasGenerateVideoIds.value && hasGenerateVideoIds.value.length) {
-    startPoll();
-  }
+  void getGenerateData();
 });
 /** 单个轨道生成视频 */
 async function generateVideo() {
@@ -413,7 +666,7 @@ async function generateVideo() {
                   if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
                   return filtered;
                 })(),
-          prompt: currentTrack.value.prompt,
+          prompt: composePrompt(currentTrack.value.prompt),
           model: modelParmas.value.model,
           mode: modelParmas.value.mode,
           resolution: modelParmas.value.resolution,
@@ -422,11 +675,17 @@ async function generateVideo() {
           trackId: currentTrack.value.id,
         });
         window.$message.success($t("workbench.generate.generateStarted"));
+        const videoId = typeof data === "object" ? data.videoId : data;
+        const taskId = typeof data === "object" ? data.taskId : undefined;
         currentTrack.value.videoList.push({
-          id: data,
+          id: videoId,
           state: "生成中",
+          status: normalizeTaskStatus(typeof data === "object" ? data.status : undefined, "queued"),
           src: "",
+          taskId,
+          queueTaskId: typeof data === "object" ? data.queueTaskId : undefined,
         });
+        syncVideoTasks();
       } catch (e) {
         window.$message.error((e as any)?.message ?? "视频发起生成请求失败");
       } finally {
@@ -435,106 +694,155 @@ async function generateVideo() {
     onCancel: () => dlg.destroy(),
   });
 }
-let pollTimer: NodeJS.Timeout | null = null;
-let promptPollTimer: NodeJS.Timeout | null = null;
-function startPoll() {
-  if (pollTimer !== null) return;
-  pollTimer = setInterval(() => getVideoList(), 3000);
-}
-
-function stopPoll() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-}
 const hasGenerateVideoIds = computed(() => {
   return trackList.value
     .map((track) => {
-      return track.videoList.filter((i) => i.state == "生成中").map((i) => i.id);
+      return track.videoList.filter((i) => isActiveRuntimeStatus(i)).map((i) => i.id);
     })
     .flatMap((i) => i);
 });
 const hasGeneratePromptIds = computed(() => {
-  const trackIds = trackList.value.filter((t) => t.state == "生成中").map((t) => t.id);
+  const trackIds = trackList.value.filter((t) => isActiveRuntimeStatus(t)).map((t) => t.id);
   return trackIds;
 });
-/** 查询所有视频列表，并检测生成完成/失败状态 */
-async function getVideoList() {
-  const { data } = await axios.post("/production/workbench/checkVideoStateList", {
-    projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
-    videoIds: hasGenerateVideoIds.value,
-  });
-  if (data && data.length) {
-    data.forEach((item: { id: number; state: "生成中" | "未生成" | "已完成" | "生成失败"; src?: string; errorReason?: string }) => {
-      for (const track of trackList.value) {
-        const findData = track.videoList.find((i) => i.id == item.id);
-        if (findData) {
-          findData.state = item.state;
-          findData.src = item?.src ?? "";
-          findData.errorReason = item?.errorReason ?? "";
-          break;
-        }
-      }
-    });
-  }
-}
-function startPromptPoll() {
-  if (promptPollTimer !== null) return;
-  promptPollTimer = setInterval(() => getTrackPromptList(), 3000);
+
+function releaseVideoTask(id: number) {
+  videoTaskBindings.get(id)?.();
+  videoTaskBindings.delete(id);
 }
 
-function stopPromptPoll() {
-  if (promptPollTimer) {
-    clearInterval(promptPollTimer);
-    promptPollTimer = null;
+function releasePromptTask(id: number) {
+  promptTaskBindings.get(id)?.();
+  promptTaskBindings.delete(id);
+}
+
+function applyVideoTask(video: VideoItem, task: RuntimeTask) {
+  const record = (task.result ?? {}) as any;
+  video.status = task.status;
+  video.state =
+    task.status === "completed"
+      ? "已完成"
+      : task.status === "failed" || task.status === "cancelled"
+        ? "生成失败"
+        : "生成中";
+  const media = normalizeMediaRef(record.media ?? record, "video");
+  if (media) {
+    video.media = media;
+    video.src = getMediaOriginalUrl(media);
+  }
+  video.errorReason = task.reason ?? "";
+  if (task.status === "failed" && !reportedFailures.has(task.key)) {
+    reportedFailures.add(task.key);
+    window.$message.error(task.reason || "视频生成失败");
+  }
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseVideoTask(video.id));
   }
 }
-/** 查询所有视频列表，并检测生成完成/失败状态 */
-async function getTrackPromptList() {
-  const { data } = await axios.post("/production/workbench/checkVideoPrompt", {
-    projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
-    trackIds: hasGeneratePromptIds.value,
-  });
-  if (data && data.length) {
-    data.forEach((item: { id: number; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string }) => {
-      const findData = trackList.value.find((t) => t.id == item.id);
-      if (findData) {
-        findData.state = item.state;
-        findData.prompt = item?.prompt ?? "";
-        findData.reason = item?.reason ?? "";
-        if (item.state === "生成失败") {
-          window.$message.error(`提示词生成失败，${item.reason ?? "未知原因"}`);
-        }
-      }
+
+function applyPromptTask(track: TrackItem, task: RuntimeTask) {
+  const record = (task.result ?? {}) as any;
+  track.status = task.status;
+  track.state =
+    task.status === "completed"
+      ? "已完成"
+      : task.status === "failed" || task.status === "cancelled"
+        ? "生成失败"
+        : "生成中";
+  if (record.prompt !== undefined) track.prompt = record.prompt;
+  track.reason = task.reason ?? "";
+  if (task.status === "failed" && !reportedFailures.has(task.key)) {
+    reportedFailures.add(task.key);
+    window.$message.error(`提示词生成失败，${task.reason || "未知原因"}`);
+  }
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releasePromptTask(track.id));
+  }
+}
+
+function syncVideoTasks() {
+  const projectId = Number(project.value?.id);
+  if (!projectId) return;
+  const activeIds = new Set<number>();
+  trackList.value.forEach((track) => {
+    track.videoList.forEach((video) => {
+      if (!isActiveRuntimeStatus(video)) return;
+      activeIds.add(video.id);
+      const existingTask = taskCenter.getTask(createTaskKey("video", projectId, video.id, undefined, video.taskId));
+      if (videoTaskBindings.has(video.id) && (!video.taskId || existingTask?.unifiedTaskId === video.taskId)) return;
+      if (videoTaskBindings.has(video.id)) releaseVideoTask(video.id);
+      const release = taskCenter.registerTask(
+        {
+          key: createTaskKey("video", projectId, video.id, undefined, video.taskId),
+          domain: "video",
+          unifiedTaskId: video.taskId,
+          targetId: video.id,
+          targetType: "video",
+          projectId,
+          scriptId: episodesId.value,
+          status: getRuntimeStatus(video, "processing"),
+        },
+        (task) => applyVideoTask(video, task),
+      );
+      videoTaskBindings.set(video.id, release);
     });
-  }
+  });
+  Array.from(videoTaskBindings.keys()).forEach((id) => {
+    if (!activeIds.has(id)) releaseVideoTask(id);
+  });
 }
+
+function syncPromptTasks() {
+  const projectId = Number(project.value?.id);
+  if (!projectId) return;
+  const activeIds = new Set<number>();
+  trackList.value.forEach((track) => {
+    if (!isActiveRuntimeStatus(track)) return;
+    activeIds.add(track.id);
+    const existingTask = taskCenter.getTask(createTaskKey("videoPrompt", projectId, track.id, undefined, track.taskId));
+    if (promptTaskBindings.has(track.id) && (!track.taskId || existingTask?.unifiedTaskId === track.taskId)) return;
+    if (promptTaskBindings.has(track.id)) releasePromptTask(track.id);
+    const release = taskCenter.registerTask(
+      {
+        key: createTaskKey("videoPrompt", projectId, track.id),
+        domain: "videoPrompt",
+        unifiedTaskId: track.taskId,
+        targetType: "videoPrompt",
+        targetId: track.id,
+        projectId,
+        scriptId: episodesId.value,
+        status: getRuntimeStatus(track, "processing"),
+      },
+      (task) => applyPromptTask(track, task),
+    );
+    promptTaskBindings.set(track.id, release);
+  });
+  Array.from(promptTaskBindings.keys()).forEach((id) => {
+    if (!activeIds.has(id)) releasePromptTask(id);
+  });
+}
+
+function syncWorkbenchTasks() {
+  syncVideoTasks();
+  syncPromptTasks();
+}
+
 watch(
   () => hasGenerateVideoIds.value,
-  (newVal) => {
-    if (newVal && newVal.length > 0) {
-      startPoll();
-    } else {
-      stopPoll();
-    }
-  },
+  syncVideoTasks,
 );
 watch(
   () => hasGeneratePromptIds.value,
-  (newVal) => {
-    if (newVal && newVal.length > 0) {
-      startPromptPoll();
-    } else {
-      stopPromptPoll();
-    }
-  },
+  syncPromptTasks,
 );
 onUnmounted(() => {
-  stopPoll();
-  stopPromptPoll();
+  videoTaskBindings.forEach((release) => release());
+  promptTaskBindings.forEach((release) => release());
+  videoTaskBindings.clear();
+  promptTaskBindings.clear();
+  cacheWriteTimers.forEach((timer) => clearTimeout(timer));
+  cacheWriteTimers.clear();
+  if (promptAffixWriteTimer) clearTimeout(promptAffixWriteTimer);
 });
 </script>
 
@@ -544,8 +852,23 @@ onUnmounted(() => {
   gap: 16px;
   overflow-y: auto;
   .referenceImage {
+    .referenceToolbar {
+      margin-bottom: 8px;
+      .referenceActions {
+        gap: 8px;
+      }
+      .referenceHint {
+        color: var(--td-text-color-placeholder);
+        font-size: 12px;
+      }
+    }
   }
   .modelSelect {
+  }
+  .globalPromptAffix {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
   }
   .generate {
     flex: 1;

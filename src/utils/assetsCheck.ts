@@ -1,15 +1,19 @@
 import { h, ref, render, nextTick } from "vue";
 import { Dialog as TDialog } from "tdesign-vue-next";
 import AssetsView from "@/views/assets/index.vue";
+import type { MediaRef } from "@/types/api";
 
 interface Asset {
   id: number;
   assetsId: number | null;
+  parentName?: string;
+  parentType?: Asset["type"];
   name: string;
   prompt: string;
   describe: string;
   remark: string;
   src: string;
+  media?: MediaRef;
   type: "role" | "tool" | "scene" | "clip" | "audio";
   imageId: number | null;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
@@ -75,7 +79,13 @@ export default function openAssetsSelector(options: AssetsSelectOptions = {}): P
             const selectedSubs: Asset[] = [];
             data.forEach((item) => {
               item.sonAssets?.forEach((sub: any) => {
-                if (selectedSubKeys.includes(sub.id)) selectedSubs.push(sub);
+                if (selectedSubKeys.includes(sub.id)) {
+                  selectedSubs.push({
+                    ...sub,
+                    parentName: item.name,
+                    parentType: item.type,
+                  });
+                }
               });
             });
             finish([...selectedParents, ...selectedSubs] as any[]);

@@ -36,12 +36,13 @@
             <span class="author">@{{ currentVendor.author }}</span>
           </div>
           <t-alert
-            v-if="needsUpdate(currentVendor)"
+            v-if="!isDreaminaVendor && needsUpdate(currentVendor)"
             theme="warning"
             :message="$t('settings.vendor.msg.vendorNeedsUpdate')"
             style="margin-bottom: 12px" />
+          <DreaminaCliPanel v-if="isDreaminaVendor" :models="vendorModels" @refreshed="getVendorList" />
           <t-form-item>
-            <MdPreview v-model="currentVendor.description" :theme="themeSetting.mode" />
+            <MdPreview v-model="currentVendor.description" :theme="mdTheme" />
           </t-form-item>
           <t-form-item v-for="input in requiredInputs" :key="input.key" :name="input.key">
             <template #label>
@@ -80,7 +81,7 @@
 
           <div class="jb ac">
             <h4 class="sectionTitle">{{ $t("settings.vendor.modelSettings") }}</h4>
-            <t-button variant="outline" size="small" @click="handleAddModel">
+            <t-button v-if="!isDreaminaVendor" variant="outline" size="small" @click="handleAddModel">
               <template #icon><i-plus theme="outline" /></template>
               {{ $t("settings.vendor.addManually") }}
             </t-button>
@@ -96,17 +97,18 @@
                   <template #icon><i-lightning theme="outline" /></template>
                   {{ $t("settings.vendor.testModel") }}
                 </t-button>
-                <t-button variant="text" size="small" @click="handleEditModel(item)">
+                <t-button v-if="!isDreaminaVendor" variant="text" size="small" @click="handleEditModel(item)">
                   <template #icon><i-pencil theme="outline" /></template>
                   {{ $t("settings.vendor.edit") }}
                 </t-button>
-                <t-button variant="text" size="small" theme="danger" @click="handleDeleteModel(item.modelName)">
+                <t-button v-if="!isDreaminaVendor" variant="text" size="small" theme="danger" @click="handleDeleteModel(item.modelName)">
                   <template #icon><i-delete theme="outline" /></template>
                   {{ $t("settings.vendor.delete") }}
                 </t-button>
               </div>
             </div>
             <div class="tags">
+              <t-tag variant="light">{{ item.modelName }}</t-tag>
               <t-tag theme="primary">{{ $t(getTypeLabel(item.type)) }}</t-tag>
               <t-tag v-if="item.type === 'text' && (item as any).think" variant="light">{{ $t("settings.vendor.think") }}</t-tag>
               <template v-for="(mode, mIdx) in (item as any).mode" :key="mIdx">
@@ -115,10 +117,13 @@
                   {{ getModeLabel(m, item.type) }}
                 </t-tag>
               </template>
+              <t-tooltip v-if="(item as any).associationSkills" :content="(item as any).associationSkills">
+                <t-tag theme="warning" variant="light">模型说明</t-tag>
+              </t-tooltip>
             </div>
           </t-card>
         </t-form>
-        <div class="updateAction">
+        <div v-if="!isDreaminaVendor" class="updateAction">
           <t-button theme="danger" :loading="updating" @click="handleDeleteVendor">{{ $t("settings.vendor.deleteVendor") }}</t-button>
           <t-button theme="default" :loading="updating" @click="handleEditVendorCode">{{ $t("settings.vendor.editCode") }}</t-button>
           <!-- <t-button theme="primary" :loading="updating" @click="handleUpdateVendor">{{ $t("settings.vendor.updateConfig") }}</t-button> -->
@@ -350,7 +355,10 @@ import settingStore from "@/stores/setting";
 import TextModelTest from "./vendorTest/TextModelTest.vue";
 import ImageModelTest from "./vendorTest/ImageModelTest.vue";
 import VideoModelTest from "./vendorTest/VideoModelTest.vue";
+import DreaminaCliPanel from "./DreaminaCliPanel.vue";
+import type { DreaminaQueueConfig } from "@/types/dreamina";
 const { themeSetting } = storeToRefs(settingStore());
+const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
 
 // ── 类型 ──
 interface TextModel {
@@ -381,6 +389,7 @@ interface VideoModel {
   )[];
   audio: "optional" | false | true;
   durationResolutionMap: { duration: number[]; resolution: string[] }[];
+  queueConfig?: DreaminaQueueConfig;
 }
 
 type VendorModel = TextModel | ImageModel | VideoModel;
@@ -522,6 +531,7 @@ onMounted(() => {
 const activeVendorId = ref<string>();
 const currentVendor = computed(() => vendorList.value.find((v) => v.id === activeVendorId.value));
 const vendorModels = computed(() => currentVendor.value?.models || currentVendor.value?.model || []);
+const isDreaminaVendor = computed(() => currentVendor.value?.id === "dreamina");
 const requiredInputs = computed(() => currentVendor.value?.inputs?.filter((input) => input.required) || []);
 const optionalInputs = computed(() => currentVendor.value?.inputs?.filter((input) => !input.required) || []);
 

@@ -3,7 +3,7 @@ const iconModules = import.meta.glob<string>("@/assets/providers/*.{webp,png}", 
   eager: true,
   query: "?url",
   import: "default",
-});
+}) as Record<string, string>;
 
 /** 从本地 assets/providers 获取图标 URL */
 function icon(id: string): string {

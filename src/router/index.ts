@@ -1,4 +1,8 @@
 import { createRouter, createWebHashHistory } from "vue-router";
+import ModuleLoadError from "@/pages/error/moduleLoad.vue";
+import { clearModuleRecovery, handleDynamicImportFailure, hasModuleLoadError } from "@/utils/moduleRecovery";
+import projectStore from "@/stores/project";
+
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
@@ -33,26 +37,32 @@ const router = createRouter({
         // },
         {
           path: "/novel",
+          meta: { requiresProject: true },
           component: () => import("@/views/novel/index.vue"),
         },
         {
           path: "/script",
+          meta: { requiresProject: true },
           component: () => import("@/views/script/index.vue"),
         },
         {
           path: "/scriptAgent",
+          meta: { requiresProject: true },
           component: () => import("@/views/scriptAgent/index.vue"),
         },
         {
           path: "/cornerScape",
+          meta: { requiresProject: true },
           component: () => import("@/views/cornerScape/index.vue"),
         },
         {
           path: "/production",
+          meta: { requiresProject: true },
           component: () => import("@/views/production/index.vue"),
         },
         {
           path: "/assets",
+          meta: { requiresProject: true },
           component: () => import("@/views/assets/index.vue"),
         },
         {
@@ -60,6 +70,11 @@ const router = createRouter({
           component: () => import("@/views/test/index.vue"),
         },
       ],
+    },
+    {
+      path: "/module-load-error",
+      name: "module-load-error",
+      component: ModuleLoadError,
     },
     {
       path: "/login",
@@ -72,10 +87,36 @@ router.beforeEach((to, from, next) => {
     next();
   } else {
     if (localStorage.getItem("token")) {
+      const activeProject = projectStore().project;
+      if (to.meta.requiresProject && !activeProject?.id) {
+        if (import.meta.env.DEV) {
+          console.warn("[router] blocked project route without active project", {
+            to: to.fullPath,
+            from: from.fullPath,
+            activeProjectId: activeProject?.id,
+          });
+        }
+        next("/project");
+        return;
+      }
       next();
     } else {
       next("/login");
     }
   }
 });
+
+router.onError((error, to) => {
+  if (!handleDynamicImportFailure(error, to.fullPath)) return;
+  if (hasModuleLoadError()) {
+    void router.replace({ name: "module-load-error" });
+  }
+});
+
+router.afterEach((to, _from, failure) => {
+  if (!failure && to.name !== "module-load-error") {
+    clearModuleRecovery(to.fullPath);
+  }
+});
+
 export default router;

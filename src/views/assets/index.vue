@@ -442,6 +442,9 @@ import addAudioAssets from "./components/addAudioAssets.vue";
 import generateImage from "./components/generateImage.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
+import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import type { MediaRef } from "@/types/api";
 const { otherSetting } = storeToRefs(settingStore());
 
 const props = withDefaults(
@@ -473,8 +476,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  stopPolling();
-  stopImagePolling();
+  releaseAllAssetTasks();
 });
 
 const { project } = storeToRefs(projectStore());
@@ -543,8 +545,14 @@ interface Asset {
   imageId: number;
   promptState: string;
   filePath: string;
+  taskId?: string;
+  legacyTaskId?: number | string;
+  media?: MediaRef;
 }
 const tableData = ref<Asset[]>([]);
+const taskCenter = useTaskCenterStore();
+const assetImageBindings = new Map<number, () => void>();
+const assetPromptBindings = new Map<number, () => void>();
 // 分页配置
 const pagination = ref({
   page: 1,
@@ -567,7 +575,15 @@ async function getFilteredData(type: string) {
       limit: pagination.value.pageSize,
     });
 
-    tableData.value = data.data || [];
+    tableData.value = (data.data || []).map((item: Asset) =>
+      attachLegacyMediaFields(
+        {
+          ...item,
+          sonAssets: item.sonAssets?.map((sub) => attachLegacyMediaFields(sub, normalizeMediaRef((sub as any).media ?? sub, "image"))),
+        },
+        normalizeMediaRef((item as any).media ?? item, "image"),
+      ),
+    );
     // 当 clip 类型且指定了 clipMediaTypes 时，进行二次过滤
     if (type === "clip" && props.clipMediaTypes?.length) {
       tableData.value = tableData.value.filter((item) => {
@@ -576,6 +592,7 @@ async function getFilteredData(type: string) {
       });
     }
     pagination.value.total = data.total || 0;
+    syncAssetRuntimeTasks();
     return tableData.value;
   } catch (error) {
     console.error("加载资产数据失败:", error);
@@ -715,7 +732,7 @@ async function handleBatchGeneratePrompt() {
   selectedSubRowKeys.value = selectedSubRowKeys.value.filter((key) => !selectedSubAssets.some((a) => a.id === key));
   batchGenerationShow.value = false;
   try {
-    await axios.post("/assetsGenerate/batchPolishAssetsPrompt", {
+    const { data } = await axios.post("/assetsGenerate/batchPolishAssetsPrompt", {
       projectId: project.value?.id,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
       items: selectedAssets.map((item: { id: number; name: string; type: string; describe: string }) => ({
@@ -725,6 +742,15 @@ async function handleBatchGeneratePrompt() {
         describe: item.describe ? item.describe : $t("workbench.assets.noDescription"),
       })),
     });
+    const taskRows = Array.isArray(data) ? data : data?.tasks ?? [];
+    taskRows.forEach((item: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number }) => {
+      const target = findAssetById(item.assetId ?? item.assetsId ?? item.id ?? 0);
+      if (target) {
+        target.taskId = item.taskId;
+        target.legacyTaskId = item.legacyTaskId;
+      }
+    });
+    syncAssetRuntimeTasks();
   } catch (e: any) {
     window.$message.error(e?.message ?? $t("workbench.assets.promptGenFail"));
   }
@@ -775,7 +801,7 @@ async function handleBatchGenerateImage() {
   batchGenerationShow.value = false;
 
   try {
-    await axios.post("/assetsGenerate/batchGenerateImageAssets", {
+    const { data } = await axios.post("/assetsGenerate/batchGenerateImageAssets", {
       projectId: project.value?.id,
       model: selectValue.value,
       resolution: resolution.value,
@@ -787,6 +813,16 @@ async function handleBatchGenerateImage() {
         prompt: item.prompt || item.describe,
       })),
     });
+    const rows = Array.isArray(data) ? data : (data?.tasks ?? (data ? [data] : []));
+    rows.forEach((item: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number; imageId?: number }) => {
+      const target = findAssetById(item.assetId ?? item.assetsId ?? item.id ?? 0);
+      if (target) {
+        target.taskId = item.taskId;
+        target.legacyTaskId = item.legacyTaskId;
+        if (item.imageId) target.imageId = item.imageId;
+      }
+    });
+    syncAssetRuntimeTasks();
   } catch (e: any) {
     window.$message.error($t("workbench.assets.imageGenFail", { name: "", error: e.message ?? "" }));
     validAssets.forEach((asset) => {
@@ -1187,7 +1223,6 @@ function closeMediaPreview() {
   mediaPreviewShow.value = false;
   mediaPreviewSrc.value = "";
 }
-//轮询
 // 获取所有资产（包含父资产和子资产）的扁平列表
 function getAllAssetsFlat(): Asset[] {
   const all: Asset[] = [];
@@ -1208,111 +1243,111 @@ function findAssetById(id: number): Asset | undefined {
   }
   return undefined;
 }
-const notCompultedData = computed(() => {
-  return getAllAssetsFlat().filter((item) => item.promptState == "生成中");
-});
-const generatingData = computed(() => {
-  return getAllAssetsFlat().filter((item) => item.state === "生成中");
-});
-// 轮询相关
-let pollingTimer: ReturnType<typeof setInterval> | null = null;
-let imagePollingTimer: ReturnType<typeof setInterval> | null = null;
-//轮询提示词生成
-async function pollingPromptAssets() {
-  if (notCompultedData.value.length === 0) return;
-  const ids = notCompultedData.value.map((item) => item.id);
-  try {
-    const { data } = await axios.post("/assets/pollingPromptAssets", { ids });
-    if (Array.isArray(data) && data.length) {
-      data.forEach((item: { id: number; promptState: string; prompt: string }) => {
-        const target = findAssetById(item.id);
-        if (target) {
-          target.promptState = item.promptState;
-          if (item.prompt !== undefined) target.prompt = item.prompt;
-        }
-      });
-      getFilteredData(assetOptions.value);
+
+function releaseAssetPromptTask(id: number) {
+  assetPromptBindings.get(id)?.();
+  assetPromptBindings.delete(id);
+}
+
+function releaseAssetImageTask(id: number) {
+  assetImageBindings.get(id)?.();
+  assetImageBindings.delete(id);
+}
+
+function releaseAllAssetTasks() {
+  assetPromptBindings.forEach((release) => release());
+  assetImageBindings.forEach((release) => release());
+  assetPromptBindings.clear();
+  assetImageBindings.clear();
+}
+
+function applyAssetPromptTask(item: Asset, task: RuntimeTask) {
+  const record = (task.result ?? {}) as any;
+  item.promptState = task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中";
+  if (record.prompt !== undefined) item.prompt = record.prompt;
+  if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || "提示词生成失败");
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseAssetPromptTask(item.id));
+    if (task.status === "completed") queueMicrotask(() => getFilteredData(assetOptions.value));
+  }
+}
+
+function applyAssetImageTask(item: Asset, task: RuntimeTask) {
+  const record = (task.result ?? {}) as any;
+  item.state = task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中";
+  const media = normalizeMediaRef(record.media ?? record, "image");
+  if (media) {
+    item.media = media;
+    item.src = getMediaPreviewUrl(media);
+    item.filePath = item.src;
+  }
+  if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || "图片生成失败");
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseAssetImageTask(item.id));
+    if (task.status === "completed") queueMicrotask(() => getFilteredData(assetOptions.value));
+  }
+}
+
+function syncAssetRuntimeTasks() {
+  const activePromptIds = new Set<number>();
+  const activeImageIds = new Set<number>();
+  getAllAssetsFlat().forEach((item) => {
+    if (item.promptState === "生成中") {
+      activePromptIds.add(item.id);
+      const key = createTaskKey("assetPrompt", Number(project.value?.id), item.id, undefined, item.taskId);
+      const existing = taskCenter.getTask(key);
+      if (!assetPromptBindings.has(item.id) || (item.taskId && existing?.unifiedTaskId !== item.taskId)) {
+        releaseAssetPromptTask(item.id);
+        assetPromptBindings.set(
+          item.id,
+          taskCenter.registerTask(
+            {
+              key,
+              domain: "assetPrompt",
+              unifiedTaskId: item.taskId,
+              legacyTaskId: item.legacyTaskId,
+              targetType: "assetPrompt",
+              targetId: item.id,
+              projectId: Number(project.value?.id),
+              status: "processing",
+            },
+            (task) => applyAssetPromptTask(item, task),
+          ),
+        );
+      }
     }
-  } catch (e) {
-    console.error("轮询提示词状态失败:", e);
-  }
-}
-//轮询图片生成
-async function pollingImageAssets() {
-  if (generatingData.value.length === 0) return;
-  const ids = generatingData.value.map((item) => item.id);
-  try {
-    const { data } = await axios.post("/assets/pollingImageAssets", { ids });
-    if (Array.isArray(data) && data.length) {
-      data.forEach((item: { id: number; state: string; filePath: string; src?: string }) => {
-        const target = findAssetById(item.id);
-        if (target) {
-          target.state = item.state;
-          if (item.filePath !== undefined) target.filePath = item.filePath;
-          if (item.src !== undefined) target.src = item.src;
-          // filePath 存在时也作为 src 使用，确保图片立即显示
-          if (!item.src && item.filePath && item.state !== "生成中") {
-            target.src = item.filePath;
-          }
-        }
-      });
-      getFilteredData(assetOptions.value);
+    if (item.state === "生成中") {
+      activeImageIds.add(item.id);
+      const key = createTaskKey("assetImage", Number(project.value?.id), item.id, undefined, item.taskId);
+      const existing = taskCenter.getTask(key);
+      if (!assetImageBindings.has(item.id) || (item.taskId && existing?.unifiedTaskId !== item.taskId)) {
+        releaseAssetImageTask(item.id);
+        assetImageBindings.set(
+          item.id,
+          taskCenter.registerTask(
+            {
+              key,
+              domain: "assetImage",
+              unifiedTaskId: item.taskId,
+              legacyTaskId: item.legacyTaskId,
+              targetType: "asset",
+              targetId: item.id,
+              projectId: Number(project.value?.id),
+              status: "processing",
+            },
+            (task) => applyAssetImageTask(item, task),
+          ),
+        );
+      }
     }
-  } catch (e) {
-    console.error("轮询图片生成状态失败:", e);
-  }
+  });
+  Array.from(assetPromptBindings.keys()).forEach((id) => {
+    if (!activePromptIds.has(id)) releaseAssetPromptTask(id);
+  });
+  Array.from(assetImageBindings.keys()).forEach((id) => {
+    if (!activeImageIds.has(id)) releaseAssetImageTask(id);
+  });
 }
-function startPolling() {
-  if (pollingTimer) return;
-  pollingTimer = setInterval(async () => {
-    if (notCompultedData.value.length === 0) {
-      stopPolling();
-      return;
-    }
-    await pollingPromptAssets();
-  }, 3000);
-}
-
-function stopPolling() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-  }
-}
-
-function startImagePolling() {
-  if (imagePollingTimer) return;
-  imagePollingTimer = setInterval(async () => {
-    if (generatingData.value.length === 0) {
-      stopImagePolling();
-      return;
-    }
-    await pollingImageAssets();
-  }, 3000);
-}
-
-function stopImagePolling() {
-  if (imagePollingTimer) {
-    clearInterval(imagePollingTimer);
-    imagePollingTimer = null;
-  }
-}
-
-watch(notCompultedData, (val) => {
-  if (val.length > 0) {
-    startPolling();
-  } else {
-    stopPolling();
-  }
-});
-
-watch(generatingData, (val) => {
-  if (val.length > 0) {
-    startImagePolling();
-  } else {
-    stopImagePolling();
-  }
-});
 
 async function getBigImageUrl(row: Asset, fn: Function) {
   const { data } = await axios.post("/common/getBigImage", {

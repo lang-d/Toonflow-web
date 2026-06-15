@@ -250,6 +250,9 @@ import projectStore from "@/stores/project";
 import modelSelect from "@/components/modelSelect.vue";
 import settingStore from "@/stores/setting";
 import openAssetsSelector from "@/utils/assetsCheck";
+import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
+import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import type { MediaRef } from "@/types/api";
 
 const { otherSetting } = storeToRefs(settingStore());
 interface Image {
@@ -273,6 +276,11 @@ interface DataItem {
   promptErrorReason: string;
   relepedAudio: { id: number; name: string }[];
   audioBindState: string;
+  taskId?: string;
+  legacyTaskId?: number | string;
+  promptTaskId?: string;
+  audioTaskId?: string;
+  media?: MediaRef;
 }
 
 const checkboxValue = ref<string[]>([]);
@@ -299,6 +307,10 @@ const translatedOptions = computed(() =>
 );
 const dataList = ref<DataItem[]>([]);
 const loading = ref(false);
+const taskCenter = useTaskCenterStore();
+const imageTaskBindings = new Map<number, () => void>();
+const promptTaskBindings = new Map<number, () => void>();
+const audioTaskBindings = new Map<number, () => void>();
 
 // 用于取消进行中的生成请求
 let abortController: AbortController | null = null;
@@ -318,13 +330,7 @@ onUnmounted(() => {
     abortController.abort();
     abortController = null;
   }
-  stopPolling();
-  stopImagePolling();
-  stopAudioPolling();
-  // 将所有"生成中"的项重置为空状态
-  dataList.value.forEach((item) => {
-    if (item.state === "生成中") item.state = "";
-  });
+  releaseAllRuntimeTasks();
 });
 function onChangeFn() {
   getFilteredData();
@@ -336,8 +342,9 @@ async function getFilteredData() {
       projectId: project.value?.id,
       type: checkboxValue.value,
     });
-    dataList.value = data;
+    dataList.value = (data ?? []).map((item: DataItem) => attachLegacyMediaFields(item, normalizeMediaRef((item as any).media ?? item, "image")));
     syncSelectedIdsWithData();
+    syncRuntimeTasks();
   } catch (error) {
     console.error("加载资产数据失败:", error);
     dataList.value = [];
@@ -416,7 +423,7 @@ async function cancelGenerationFn(item: DataItem) {
           projectId: project.value?.id,
           type: checkboxValue.value,
         });
-        const freshItem = (data as DataItem[]).find((d) => d.id === item.id);
+      const freshItem = (data as DataItem[]).map((row) => attachLegacyMediaFields(row, normalizeMediaRef((row as any).media ?? row, "image"))).find((d) => d.id === item.id);
         if (!freshItem || !freshItem.imageId) {
           window.$message.warning($t("workbench.cornerScape.noGenerating"));
           return;
@@ -498,7 +505,7 @@ async function openDrawer(item: DataItem) {
       projectId: project.value?.id,
       type: checkboxValue.value,
     });
-    const freshItem = (data as DataItem[]).find((d) => d.id === item.id);
+    const freshItem = (data as DataItem[]).map((row) => attachLegacyMediaFields(row, normalizeMediaRef((row as any).media ?? row, "image"))).find((d) => d.id === item.id);
     if (freshItem) {
       // 更新 dataList 中对应项
       const idx = dataList.value.findIndex((d) => d.id === item.id);
@@ -553,9 +560,12 @@ function regenerateItem() {
       },
       { signal: controller.signal },
     )
-    .then(async () => {
+    .then(({ data }) => {
+      item.taskId = data?.taskId;
+      item.legacyTaskId = data?.legacyTaskId;
+      item.state = data?.status ? "生成中" : item.state;
       window.$message.success($t("workbench.cornerScape.msg.genSuccess", { name: item.name }));
-      await getFilteredData();
+      syncRuntimeTasks();
     })
     .catch((e: any) => {
       if (e.name === "CanceledError" || e.code === "ERR_CANCELED") return;
@@ -631,7 +641,7 @@ async function batchGenerationPrompt() {
   selectedIds.value = [];
 
   try {
-    await axios.post("/assetsGenerate/batchPolishAssetsPrompt", {
+    const { data } = await axios.post("/assetsGenerate/batchPolishAssetsPrompt", {
       projectId: project.value?.id,
       items: items.map((item) => ({
         assetsId: item.id,
@@ -642,6 +652,15 @@ async function batchGenerationPrompt() {
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
       otherTextPrompt: otherTextPrompt.value,
     });
+    const rows = Array.isArray(data) ? data : (data?.tasks ?? []);
+    rows.forEach((row: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number }) => {
+      const target = dataList.value.find((item) => item.id === (row.assetId ?? row.assetsId ?? row.id));
+      if (target) {
+        target.promptTaskId = row.taskId;
+        target.legacyTaskId = row.legacyTaskId;
+      }
+    });
+    syncRuntimeTasks();
   } catch (e: any) {
     window.$message.error(e?.message ?? $t("workbench.cornerScape.msg.promptGenFail"));
     // 生成失败时重置 promptState
@@ -669,11 +688,20 @@ async function batchSelectBindAudio() {
   selectedIds.value = [];
 
   try {
-    await axios.post("/cornerScape/batchBindAudio", {
+    const { data } = await axios.post("/cornerScape/batchBindAudio", {
       projectId: project.value?.id,
       assetsIds: items.map((item) => item.id),
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
     });
+    const rows = Array.isArray(data) ? data : (data?.tasks ?? []);
+    rows.forEach((row: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number }) => {
+      const target = dataList.value.find((item) => item.id === (row.assetId ?? row.assetsId ?? row.id));
+      if (target) {
+        target.audioTaskId = row.taskId;
+        target.legacyTaskId = row.legacyTaskId;
+      }
+    });
+    syncRuntimeTasks();
   } catch (e: any) {
     window.$message.error(e.message ?? $t("workbench.cornerScape.msg.promptGenFail"));
     // 生成失败时重置 audioBindState
@@ -719,7 +747,7 @@ async function batchGenerationImage() {
   );
 
   try {
-    await axios.post("/assetsGenerate/batchGenerateImageAssets", {
+    const { data } = await axios.post("/assetsGenerate/batchGenerateImageAssets", {
       projectId: project.value?.id,
       model: selectValue.value,
       resolution: resolution.value,
@@ -731,224 +759,186 @@ async function batchGenerationImage() {
         prompt: item.prompt,
       })),
     });
+    const rows = Array.isArray(data) ? data : (data?.tasks ?? (data ? [data] : []));
+    rows.forEach((row: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number; imageId?: number }) => {
+      const target = dataList.value.find((item) => item.id === (row.assetId ?? row.assetsId ?? row.id));
+      if (target) {
+        target.taskId = row.taskId;
+        target.legacyTaskId = row.legacyTaskId;
+        if (row.imageId) target.imageId = row.imageId;
+      }
+    });
+    syncRuntimeTasks();
     selectedIds.value = [];
   } catch (e: any) {
     if (e.name === "CanceledError" || e.code === "ERR_CANCELED") return;
     window.$message.error(e.message ?? $t("workbench.cornerScape.msg.batchFailed"));
   }
 }
-//轮询
-const notCompultedData = computed(() => {
-  return dataList.value.filter((item) => item.promptState == "生成中");
-});
-const generatingData = computed(() => {
-  return dataList.value.filter((item) => item.state === "生成中");
-});
-const audioBindData = computed(() => {
-  return dataList.value.filter((item) => item.audioBindState === "生成中");
-});
-// 轮询相关
-let pollingTimer: ReturnType<typeof setInterval> | null = null;
-let imagePollingTimer: ReturnType<typeof setInterval> | null = null;
-let audioBindPollingTimer: ReturnType<typeof setInterval> | null = null;
+function releaseImageTask(id: number) {
+  imageTaskBindings.get(id)?.();
+  imageTaskBindings.delete(id);
+}
 
-//轮询提示词生成
-async function pollingPromptAssets() {
-  if (notCompultedData.value.length === 0) return;
-  const ids = notCompultedData.value.map((item) => item.id);
-  try {
-    const { data } = await axios.post("/assets/pollingPromptAssets", { ids });
-    let hasCompleted = false;
-    if (Array.isArray(data) && data.length) {
-      data.forEach((item: { id: number; promptState: string; prompt: string }) => {
-        const target = dataList.value.find((row) => row.id === item.id);
-        if (target) {
-          if (target.promptState === "生成中" && item.promptState !== "生成中") hasCompleted = true;
-          target.promptState = item.promptState;
-          if (item.prompt !== undefined) target.prompt = item.prompt;
-        }
+function releasePromptTask(id: number) {
+  promptTaskBindings.get(id)?.();
+  promptTaskBindings.delete(id);
+}
+
+function releaseAudioTask(id: number) {
+  audioTaskBindings.get(id)?.();
+  audioTaskBindings.delete(id);
+}
+
+function releaseAllRuntimeTasks() {
+  imageTaskBindings.forEach((release) => release());
+  promptTaskBindings.forEach((release) => release());
+  audioTaskBindings.forEach((release) => release());
+  imageTaskBindings.clear();
+  promptTaskBindings.clear();
+  audioTaskBindings.clear();
+}
+
+function refreshFinishedItem(id: number, field: "historyImages" | "relepedAudio") {
+  queueMicrotask(async () => {
+    try {
+      const { data: freshData } = await axios.post("/cornerScape/getAllAssets", {
+        projectId: project.value?.id,
+        type: checkboxValue.value,
       });
+      const fresh = (freshData as DataItem[]).find((row) => row.id === id);
+      const target = dataList.value.find((row) => row.id === id);
+      if (fresh && target) (target as any)[field] = (fresh as any)[field];
+      if (fresh && currentItem.value?.id === id) (currentItem.value as any)[field] = (fresh as any)[field];
+    } catch (e) {
+      console.error("刷新任务结果失败:", e);
     }
-    // 有提示词生成完成时，重新获取完整数据以刷新 historyImages
-    if (hasCompleted) {
-      try {
-        const { data: freshData } = await axios.post("/cornerScape/getAllAssets", {
-          projectId: project.value?.id,
-          type: checkboxValue.value,
-        });
-        (freshData as DataItem[]).forEach((fresh) => {
-          const target = dataList.value.find((row) => row.id === fresh.id);
-          if (target) target.historyImages = fresh.historyImages;
-        });
-        // 同步更新抽屉中的当前项
-        if (currentItem.value) {
-          const freshCurrent = (freshData as DataItem[]).find((d) => d.id === currentItem.value!.id);
-          if (freshCurrent) currentItem.value.historyImages = freshCurrent.historyImages;
-        }
-      } catch (e) {
-        console.error("刷新历史图片失败:", e);
+  });
+}
+
+function applyPromptRuntimeTask(item: DataItem, task: RuntimeTask) {
+  const record = (task.result ?? {}) as any;
+  item.promptState = task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中";
+  if (record.prompt !== undefined) item.prompt = record.prompt;
+  if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || $t("workbench.cornerScape.msg.promptGenFail"));
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releasePromptTask(item.id));
+    if (task.status === "completed") refreshFinishedItem(item.id, "historyImages");
+  }
+}
+
+function applyImageRuntimeTask(item: DataItem, task: RuntimeTask) {
+  const record = (task.result ?? {}) as any;
+  item.state = task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中";
+  const media = normalizeMediaRef(record.media ?? record, "image");
+  if (media) {
+    item.media = media;
+    item.filePath = getMediaPreviewUrl(media);
+  }
+  if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || $t("workbench.cornerScape.msg.batchFailed"));
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseImageTask(item.id));
+    if (task.status === "completed") refreshFinishedItem(item.id, "historyImages");
+  }
+}
+
+function applyAudioRuntimeTask(item: DataItem, task: RuntimeTask) {
+  item.audioBindState = task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中";
+  if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || $t("workbench.cornerScape.msg.promptGenFail"));
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseAudioTask(item.id));
+    if (task.status === "completed") refreshFinishedItem(item.id, "relepedAudio");
+  }
+}
+
+function syncRuntimeTasks() {
+  const activeImageIds = new Set<number>();
+  const activePromptIds = new Set<number>();
+  const activeAudioIds = new Set<number>();
+  dataList.value.forEach((item) => {
+    if (item.state === "生成中") {
+      activeImageIds.add(item.id);
+      const key = createTaskKey("assetImage", Number(project.value?.id), item.id, undefined, item.taskId);
+      const existing = taskCenter.getTask(key);
+      if (!imageTaskBindings.has(item.id) || (item.taskId && existing?.unifiedTaskId !== item.taskId)) {
+        releaseImageTask(item.id);
+        imageTaskBindings.set(
+          item.id,
+          taskCenter.registerTask(
+            {
+              key,
+              domain: "assetImage",
+              unifiedTaskId: item.taskId,
+              legacyTaskId: item.legacyTaskId,
+              targetType: "asset",
+              targetId: item.id,
+              projectId: Number(project.value?.id),
+              status: "processing",
+            },
+            (task) => applyImageRuntimeTask(item, task),
+          ),
+        );
       }
     }
-  } catch (e) {
-    console.error("轮询提示词状态失败:", e);
-  }
-}
-//轮询图片生成
-async function pollingImageAssets() {
-  if (generatingData.value.length === 0) return;
-  const ids = generatingData.value.map((item) => item.id);
-  try {
-    const { data } = await axios.post("/assets/pollingImageAssets", { ids });
-    let hasCompleted = false;
-    if (Array.isArray(data) && data.length) {
-      data.forEach((item: { id: number; state: string; filePath: string }) => {
-        const target = dataList.value.find((row) => row.id === item.id);
-        if (target) {
-          if (target.state === "生成中" && item.state !== "生成中") hasCompleted = true;
-          target.state = item.state;
-          if (item.filePath !== undefined) target.filePath = item.filePath;
-        }
-      });
-    }
-    // 有图片生成完成时，重新获取完整数据以刷新 historyImages
-    if (hasCompleted) {
-      try {
-        const { data: freshData } = await axios.post("/cornerScape/getAllAssets", {
-          projectId: project.value?.id,
-          type: checkboxValue.value,
-        });
-        (freshData as DataItem[]).forEach((fresh) => {
-          const target = dataList.value.find((row) => row.id === fresh.id);
-          if (target) target.historyImages = fresh.historyImages;
-        });
-        // 同步更新抽屉中的当前项
-        if (currentItem.value) {
-          const freshCurrent = (freshData as DataItem[]).find((d) => d.id === currentItem.value!.id);
-          if (freshCurrent) currentItem.value.historyImages = freshCurrent.historyImages;
-        }
-      } catch (e) {
-        console.error("刷新历史图片失败:", e);
+    if (item.promptState === "生成中") {
+      activePromptIds.add(item.id);
+      const key = createTaskKey("assetPrompt", Number(project.value?.id), item.id, undefined, item.promptTaskId);
+      const existing = taskCenter.getTask(key);
+      if (!promptTaskBindings.has(item.id) || (item.promptTaskId && existing?.unifiedTaskId !== item.promptTaskId)) {
+        releasePromptTask(item.id);
+        promptTaskBindings.set(
+          item.id,
+          taskCenter.registerTask(
+            {
+              key,
+              domain: "assetPrompt",
+              unifiedTaskId: item.promptTaskId,
+              legacyTaskId: item.legacyTaskId,
+              targetType: "assetPrompt",
+              targetId: item.id,
+              projectId: Number(project.value?.id),
+              status: "processing",
+            },
+            (task) => applyPromptRuntimeTask(item, task),
+          ),
+        );
       }
     }
-  } catch (e) {
-    console.error("轮询图片生成状态失败:", e);
-  }
-}
-//轮询音频绑定生成
-async function pollingAudioBind() {
-  if (audioBindData.value.length === 0) return;
-  const ids = audioBindData.value.map((item) => item.id);
-  try {
-    const { data } = await axios.post("/cornerScape/pollingAudio", { ids });
-    let hasCompleted = false;
-    if (Array.isArray(data) && data.length) {
-      data.forEach((item: { id: number; audioBindState: string; filePath: string }) => {
-        const target = dataList.value.find((row) => row.id === item.id);
-        if (target) {
-          if (target.audioBindState === "生成中" && item.audioBindState !== "生成中") hasCompleted = true;
-          target.audioBindState = item.audioBindState;
-          if (item.filePath !== undefined) target.filePath = item.filePath;
-        }
-      });
-    }
-    if (hasCompleted) {
-      try {
-        const { data: freshData } = await axios.post("/cornerScape/getAllAssets", {
-          projectId: project.value?.id,
-          type: checkboxValue.value,
-        });
-        (freshData as DataItem[]).forEach((fresh) => {
-          const target = dataList.value.find((row) => row.id === fresh.id);
-          if (target) target.relepedAudio = fresh.relepedAudio;
-        });
-        // 同步更新抽屉中的当前项
-        if (currentItem.value) {
-          const freshCurrent = (freshData as DataItem[]).find((d) => d.id === currentItem.value!.id);
-          if (freshCurrent) currentItem.value.relepedAudio = freshCurrent.relepedAudio;
-        }
-      } catch (e) {
-        console.error("刷新历史图片失败:", e);
+    if (item.audioBindState === "生成中") {
+      activeAudioIds.add(item.id);
+      const key = createTaskKey("audioBind", Number(project.value?.id), item.id, undefined, item.audioTaskId);
+      const existing = taskCenter.getTask(key);
+      if (!audioTaskBindings.has(item.id) || (item.audioTaskId && existing?.unifiedTaskId !== item.audioTaskId)) {
+        releaseAudioTask(item.id);
+        audioTaskBindings.set(
+          item.id,
+          taskCenter.registerTask(
+            {
+              key,
+              domain: "audioBind",
+              unifiedTaskId: item.audioTaskId,
+              legacyTaskId: item.legacyTaskId,
+              targetType: "audioBind",
+              targetId: item.id,
+              projectId: Number(project.value?.id),
+              status: "processing",
+            },
+            (task) => applyAudioRuntimeTask(item, task),
+          ),
+        );
       }
     }
-  } catch (e) {
-    console.error("轮询音频绑定状态失败:", e);
-  }
+  });
+  Array.from(imageTaskBindings.keys()).forEach((id) => {
+    if (!activeImageIds.has(id)) releaseImageTask(id);
+  });
+  Array.from(promptTaskBindings.keys()).forEach((id) => {
+    if (!activePromptIds.has(id)) releasePromptTask(id);
+  });
+  Array.from(audioTaskBindings.keys()).forEach((id) => {
+    if (!activeAudioIds.has(id)) releaseAudioTask(id);
+  });
 }
-function startPolling() {
-  if (pollingTimer) return;
-  pollingTimer = setInterval(async () => {
-    if (notCompultedData.value.length === 0) {
-      stopPolling();
-      return;
-    }
-    await pollingPromptAssets();
-  }, 3000);
-}
-
-function stopPolling() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-  }
-}
-
-function startImagePolling() {
-  if (imagePollingTimer) return;
-  imagePollingTimer = setInterval(async () => {
-    if (generatingData.value.length === 0) {
-      stopImagePolling();
-      return;
-    }
-    await pollingImageAssets();
-  }, 3000);
-}
-
-function stopImagePolling() {
-  if (imagePollingTimer) {
-    clearInterval(imagePollingTimer);
-    imagePollingTimer = null;
-  }
-}
-function stopAudioPolling() {
-  if (imagePollingTimer) {
-    clearInterval(imagePollingTimer);
-    imagePollingTimer = null;
-  }
-}
-function startAudioPolling() {
-  if (audioBindPollingTimer) return;
-  audioBindPollingTimer = setInterval(async () => {
-    if (audioBindData.value.length === 0) {
-      stopAudioPolling();
-      return;
-    }
-    await pollingAudioBind();
-  }, 3000);
-}
-
-watch(notCompultedData, (val) => {
-  if (val.length > 0) {
-    startPolling();
-  } else {
-    stopPolling();
-  }
-});
-
-watch(generatingData, (val) => {
-  if (val.length > 0) {
-    startImagePolling();
-  } else {
-    stopImagePolling();
-  }
-});
-
-watch(audioBindData, (val) => {
-  if (val.length > 0) {
-    startAudioPolling();
-  } else {
-    stopAudioPolling();
-  }
-});
 async function removeAudio(id: number) {
   editForm.relepedAudio = editForm.relepedAudio.filter((a) => a.id !== id);
   await axios.post("/cornerScape/updateAssetsAudio", {

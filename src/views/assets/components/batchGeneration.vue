@@ -319,7 +319,7 @@ async function handleBatchGeneratePrompt() {
 async function generatePrompt(data: AssetItem) {
   rowPromptLoading.value[data.id] = true;
   try {
-    const res = await axios.post("/assets/polishAssetsPrompt", {
+    const res = await axios.post("/assetsGenerate/polishAssetsPrompt", {
       projectId: project.value?.id,
       assetsId: data.id,
       type: props.type ?? "props",
@@ -388,9 +388,11 @@ async function startGenerate(data: { id: number; prompt: string; name: string; t
   if (imageGenerateCancel.value) return;
   rowImageLoading.value[data.id] = true;
   try {
-    const res = await axios.post("/assets/generateAssets", {
+    const res = await axios.post("/assetsGenerate/generateAssets", {
       type: data.type,
       projectId: project.value?.id,
+      model: project.value?.imageModel,
+      resolution: project.value?.imageQuality,
       name: data.name,
       base64: undefined,
       prompt: data.prompt ?? "",

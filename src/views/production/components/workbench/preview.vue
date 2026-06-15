@@ -4,7 +4,7 @@
       <!-- 左侧预览区域 -->
       <div class="previewArea">
         <div class="videoWrapper">
-          <img v-if="currentShot?.filePath" :src="currentShot.filePath" :alt="currentShot.description" class="previewImage" />
+          <img v-if="currentShotImageUrl" :src="currentShotImageUrl" :alt="currentShot?.description" class="previewImage" />
           <div v-else class="placeholderImage">
             <i-pic theme="outline" size="48" fill="#999" />
             <span>{{ $t("workbench.production.preview.noImage") }}</span>
@@ -84,7 +84,11 @@
           </div>
           <div class="characterList">
             <div v-for="(char, index) in currentCharacters" :key="index" class="characterItem">
-              <t-image :src="char.avatar" fit="cover" class="characterAvatar" :style="{ width: '80px', height: '80px', borderRadius: '8px' }" />
+              <t-image
+                :src="getCharacterPreviewUrl(char)"
+                fit="cover"
+                class="characterAvatar"
+                :style="{ width: '80px', height: '80px', borderRadius: '8px' }" />
               <t-tag>
                 {{ char.name }}（{{
                   char.type == "role"
@@ -153,7 +157,7 @@
               @click="selectShot(index)">
               <t-checkbox v-model="shot.selected" class="shotCheckbox" @click.stop @mousedown.stop />
               <div class="shotImageWrapper">
-                <img v-if="shot.filePath" :src="shot.filePath" :alt="shot.description" class="shotImage" />
+                <img v-if="getShotPreviewUrl(shot)" :src="getShotPreviewUrl(shot)" :alt="shot.description" class="shotImage" />
                 <div v-else class="shotPlaceholder">
                   <i-pic theme="outline" size="24" fill="#999" />
                 </div>
@@ -174,11 +178,14 @@ import { VueDraggable } from "vue-draggable-plus";
 import { DialogPlugin } from "tdesign-vue-next";
 import axios from "@/utils/axios";
 import JSZip from "jszip";
+import type { MediaRef } from "@/types/api";
+import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 
 interface ShotCharacter {
   name: string;
   type: string;
-  avatar?: string;
+  media?: MediaRef;
+  previewUrl?: string;
 }
 
 interface Shot {
@@ -187,10 +194,11 @@ interface Shot {
   createTime?: number;
   description?: string;
   duration?: number;
-  filePath?: string;
+  imageUrl?: string;
+  media?: MediaRef;
   frameMode?: number;
-  mode: string;
-  model: string;
+  mode?: string;
+  model?: string;
   prompt?: string;
   resolution?: string;
   scriptId?: number;
@@ -203,18 +211,47 @@ const episodesId = inject<Ref<number>>("episodesId");
 
 // 模拟分镜数据
 const shotList = ref<Shot[]>([]);
-onMounted(() => {
-  getShotList();
-});
+const initialOrder = ref<string[]>([]);
+
+function normalizeCharacter(input: Record<string, any>): ShotCharacter {
+  const media = normalizeMediaRef(input.media ?? input.avatar ?? input, "image");
+  return {
+    name: String(input.name ?? ""),
+    type: String(input.type ?? ""),
+    media,
+    previewUrl: media ? getMediaPreviewUrl(media) : input.avatar,
+  };
+}
+
+function normalizeShot(input: Record<string, any>): Shot {
+  const media = normalizeMediaRef(input.media ?? input, "image");
+  return {
+    ...input,
+    id: String(input.id),
+    description: input.description ?? input.videoDesc ?? input.title,
+    media,
+    imageUrl: media ? getMediaOriginalUrl(media) : input.filePath,
+    characters: Array.isArray(input.characters) ? input.characters.map(normalizeCharacter) : [],
+  };
+}
+
+onMounted(getShotList);
 //查询分镜数据
 async function getShotList() {
   const { data } = await axios.post("/production/getStoryboardData", {
     scriptId: episodesId!.value,
   });
-  shotList.value = data;
+  shotList.value = Array.isArray(data) ? data.map(normalizeShot) : [];
+  initialOrder.value = shotList.value.map((shot) => shot.id);
+  currentShotIndex.value = Math.min(currentShotIndex.value, Math.max(shotList.value.length - 1, 0));
 }
 const currentShot = computed(() => shotList.value[currentShotIndex.value] || null);
 const currentCharacters = computed(() => currentShot.value?.characters || []);
+const currentShotImageUrl = computed(() => {
+  const shot = currentShot.value;
+  if (!shot) return "";
+  return shot.media ? getMediaOriginalUrl(shot.media) : shot.imageUrl || "";
+});
 const currentShotIndex = ref(0);
 const selectAll = ref(false);
 const shotListWrapperRef = ref<HTMLElement>();
@@ -226,8 +263,6 @@ const isPlaying = ref(false);
 const currentElapsed = ref(0);
 let playTimer: ReturnType<typeof setInterval> | null = null;
 const TICK_INTERVAL = 50;
-
-const initialOrder = shotList.value.map((shot) => shot.id);
 
 // ===== 计算属性 =====
 
@@ -249,6 +284,10 @@ const promptTips = computed(() => [
 ]);
 
 // ===== 工具函数 =====
+
+const getShotPreviewUrl = (shot: Shot) => (shot.media ? getMediaPreviewUrl(shot.media) : shot.imageUrl || "");
+const getCharacterPreviewUrl = (character: ShotCharacter) =>
+  character.media ? getMediaPreviewUrl(character.media) : character.previewUrl || "";
 
 const getDuration = (index: number) => shotList.value[index]?.duration ?? 3;
 
@@ -388,7 +427,7 @@ const confirmRestoreSort = () => {
     header: $t("workbench.production.preview.restoreSort"),
     body: $t("workbench.production.preview.restoreSortConfirm"),
     onConfirm: () => {
-      shotList.value.sort((a, b) => initialOrder.indexOf(a.id) - initialOrder.indexOf(b.id));
+      shotList.value.sort((a, b) => initialOrder.value.indexOf(a.id) - initialOrder.value.indexOf(b.id));
       dialog.destroy();
     },
     onClose: () => dialog.destroy(),
@@ -410,7 +449,7 @@ async function exportImage() {
     .filter((shot) => shot.selected)
     .map((shot) => ({
       id: shot.id,
-      filePath: shot.filePath?.split("?")[0] || shot.filePath,
+      imageUrl: shot.media ? getMediaOriginalUrl(shot.media) : shot.imageUrl,
     }));
   if (selectedShots.length === 0) {
     DialogPlugin.alert({
@@ -422,12 +461,12 @@ async function exportImage() {
   const zip = new JSZip();
   const downloadPromises = selectedShots.map(async (shot) => {
     try {
-      if (!shot.filePath) return;
-      const response = await fetch(shot.filePath);
+      if (!shot.imageUrl) return;
+      const response = await fetch(shot.imageUrl);
       const blob = await response.blob();
-      zip.file(`分镜${shot.id}.${getFileExtension(shot.filePath)}`, blob);
+      zip.file(`分镜${shot.id}.${getFileExtension(shot.imageUrl)}`, blob);
     } catch (error) {
-      console.error(`图片下载失败: ${shot.filePath}`, error);
+      console.error(`图片下载失败: ${shot.imageUrl}`, error);
     }
   });
 

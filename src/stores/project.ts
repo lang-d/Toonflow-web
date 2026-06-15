@@ -1,4 +1,6 @@
-interface Project {
+import axios from "@/utils/axios";
+
+export interface Project {
   id: string;
   name: string;
   intro: string;
@@ -22,7 +24,13 @@ export default defineStore(
 
     const project = ref<Project | null>(null);
 
-    return { allProject, project };
+    async function fetchProjects() {
+      const response = await axios.post("/project/getProject");
+      allProject.value = (response as any).data || [];
+      return allProject.value;
+    }
+
+    return { allProject, project, fetchProjects };
   },
   { persist: true },
 );

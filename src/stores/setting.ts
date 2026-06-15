@@ -6,7 +6,8 @@ export default defineStore(
     const canvasWheelEvent = ref("zoom");
     const activeMenu = ref("ui");
 
-    const baseUrl = ref<string>("http://localhost:10588/api");
+    const baseUrl = ref<string>("http://127.0.0.1:10588/api");
+    const apiReady = ref(false);
 
     const needUpdate = ref(false);
 
@@ -30,7 +31,7 @@ export default defineStore(
 
     const language = ref<string>("zh-CN");
 
-    return { showSetting, baseUrl, otherSetting, themeSetting, language, activeMenu, isElectron, canvasWheelEvent, needUpdate };
+    return { showSetting, baseUrl, apiReady, otherSetting, themeSetting, language, activeMenu, isElectron, canvasWheelEvent, needUpdate };
   },
-  { persist: { pick: ["baseUrl", "otherSetting", "themeSetting", "language"] } },
+  { persist: { pick: ["otherSetting", "themeSetting", "language"] } },
 );

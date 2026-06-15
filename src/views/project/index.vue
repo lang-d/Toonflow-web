@@ -5,18 +5,34 @@
         <span class="title">{{ $t("workbench.project.title") }}</span>
         <span class="sub">{{ $t("workbench.project.subtitle") }}</span>
       </div>
-      <t-button
-        class="addBtn"
-        @click="
-          editProjectData = null;
-          dialogShow = true;
-        ">
-        <template #icon><i-plus class="addIcon" :size="20" /></template>
-        {{ $t("workbench.project.newProject") }}
-      </t-button>
+      <div class="headerActions">
+        <t-button variant="outline" :disabled="!isElectron || workspace.maintenanceBlocking" :loading="importingProject" @click="handleImportProject">
+          {{ $t("workspace.importProject") }}
+        </t-button>
+        <t-button
+          class="addBtn"
+          @click="
+            editProjectData = null;
+            dialogShow = true;
+          ">
+          <template #icon><i-plus class="addIcon" :size="20" /></template>
+          {{ $t("workbench.project.newProject") }}
+        </t-button>
+      </div>
     </div>
+    <t-alert v-if="isElectron && workspace.legacyMode" class="legacyTip" theme="warning" :message="$t('workspace.legacyModeTip')">
+      <template #operation>
+        <t-button variant="text" @click="openWorkspaceSettings">{{ $t("workspace.openSettings") }}</t-button>
+      </template>
+    </t-alert>
     <div class="list">
-      <t-card hoverShadow class="card" v-for="project in allProject" :key="project.id" @click="openProject(project.id)">
+      <t-card
+        hoverShadow
+        class="card"
+        :class="{ opening: openingProjectId === project.id }"
+        v-for="project in allProject"
+        :key="project.id"
+        @click="openProject(project.id)">
         <div class="jb ac">
           <div class="title">
             {{ project.name }}
@@ -36,6 +52,12 @@
             <span>{{ dayjs(project?.createTime).format("YYYY-MM-DD HH:mm:ss") }}</span>
           </div>
           <div class="actionBtns f ac">
+            <t-tooltip :content="snapshotLabel(project.id)" destroyOnClose :showArrow="false">
+              <div class="copyBtn" @click.stop="handleProjectCopy(project.id)">
+                <t-loading v-if="isSnapshotRunning(project.id)" size="small" />
+                <i-download v-else :size="18" />
+              </div>
+            </t-tooltip>
             <div class="editBtn" @click.stop="openEdit(project)">
               <i-edit :size="18" />
             </div>
@@ -43,6 +65,9 @@
               <i-delete :size="18" />
             </div>
           </div>
+        </div>
+        <div v-if="openingProjectId === project.id" class="openingState">
+          <t-loading size="small" text="正在打开项目" />
         </div>
       </t-card>
     </div>
@@ -54,13 +79,21 @@
 import projectDialog from "./components/projectDialog.vue";
 import dayjs from "dayjs";
 import axios from "@/utils/axios";
-import projectStore from "@/stores/project";
+import projectStore, { type Project } from "@/stores/project";
 import imageListCacheStore from "@/stores/imageListCache";
+import { handleDynamicImportFailure } from "@/utils/moduleRecovery";
+import useWorkspaceStore from "@/stores/workspace";
+import settingStore from "@/stores/setting";
 
 const { clearProjectCache } = imageListCacheStore();
-const { allProject, project } = storeToRefs(projectStore());
+const projectState = projectStore();
+const { allProject, project } = storeToRefs(projectState);
+const workspace = useWorkspaceStore();
+const { showSetting, activeMenu, isElectron } = storeToRefs(settingStore());
 
 const dialogShow = ref(false);
+const openingProjectId = ref<string | null>(null);
+const importingProject = ref(false);
 const editProjectData = ref<{
   id: string;
   name: string;
@@ -77,9 +110,7 @@ const editProjectData = ref<{
 } | null>(null);
 
 async function getAllProject() {
-  axios.post("/project/getProject").then(({ data }) => {
-    allProject.value = data;
-  });
+  await projectState.fetchProjects();
 }
 
 onMounted(() => {
@@ -90,34 +121,135 @@ onMounted(() => {
 const router = useRouter();
 
 async function openProject(projectId: string | undefined) {
+  logProjectNavigation("click", { projectId });
+  if (!projectId || openingProjectId.value) return;
+  if (isElectron.value && workspace.selectionRequired) {
+    logProjectNavigation("blocked", { projectId, reason: "workspace-selection-required" });
+    window.$message.warning($t("workspace.maintenanceNavigationBlocked"));
+    return;
+  }
   const item = allProject.value.find((p) => p.id === projectId);
 
-  if (!item) return window.$message.error($t("workbench.project.msg.notFound"));
-
-  if (!item.imageModel || !item.videoModel) {
-    window.$message.warning($t("workbench.project.msg.modelProviderDisabled"));
-    return openEdit(item);
+  if (!item) {
+    logProjectNavigation("blocked", { projectId, reason: "project-not-found" });
+    return window.$message.error($t("workbench.project.msg.notFound"));
   }
+
+  openingProjectId.value = projectId;
+  project.value = item;
+  const target = getProjectEntryRoute(item);
+  logProjectNavigation("push", { projectId, target });
 
   try {
-    if (item.imageModel) {
-      await axios.post("/modelSelect/getModelDetail", {
-        modelId: item.imageModel,
-      });
+    await router.push(target);
+    logProjectNavigation("pushed", { projectId, target });
+    void validateProjectModels(item);
+  } catch (error) {
+    logProjectNavigation("failed", { projectId, target, error });
+    if (!handleDynamicImportFailure(error, target)) {
+      window.$message.error((error as Error)?.message || "项目页面加载失败");
     }
-    if (item.videoModel) {
-      await axios.post("/modelSelect/getModelDetail", {
-        modelId: item.videoModel,
-      });
-    }
-  } catch {
-    window.$message.warning($t("workbench.project.msg.modelProviderDisabled"));
-    return openEdit(item);
+  } finally {
+    openingProjectId.value = null;
   }
+}
 
-  project.value = item;
-  if (item.projectType === "novel") router.push(`/novel`);
-  else if (item.projectType === "script") router.push(`/script`);
+function getProjectEntryRoute(item: Pick<Project, "projectType" | "type">) {
+  const rawType = String(item.projectType || item.type || "").toLowerCase();
+  if (rawType === "novel" || rawType.includes("\u539f\u6587") || rawType.includes("\u5c0f\u8bf4")) return "/novel";
+  if (rawType === "novel" || rawType.includes("原文") || rawType.includes("novel")) return "/novel";
+  return "/script";
+}
+
+function logProjectNavigation(step: string, detail: Record<string, unknown> = {}) {
+  if (!import.meta.env.DEV) return;
+  console.info("[project-navigation]", step, {
+    ...detail,
+    isElectron: isElectron.value,
+    selectionRequired: workspace.selectionRequired,
+    maintenanceBlocking: workspace.maintenanceBlocking,
+    restartRequired: workspace.restartRequired,
+    migrationActive: workspace.migrationActive,
+    workspaceMaintenance: Boolean(workspace.status?.maintenance),
+    activeProjectId: project.value?.id,
+  });
+}
+
+async function validateProjectModels(item: {
+  imageModel: string;
+  videoModel: string;
+}) {
+  if (!item.imageModel || !item.videoModel) {
+    window.$message.warning($t("workbench.project.msg.modelProviderDisabled"));
+    return;
+  }
+  const checks = [item.imageModel, item.videoModel].map((modelId) => axios.post("/modelSelect/getModelDetail", { modelId }));
+  const results = await Promise.allSettled(checks);
+  if (results.some((result) => result.status === "rejected")) {
+    window.$message.warning($t("workbench.project.msg.modelProviderDisabled"));
+  }
+}
+
+function openWorkspaceSettings() {
+  activeMenu.value = "workspace";
+  showSetting.value = true;
+}
+
+function snapshotRuntime(projectId: string | undefined) {
+  return projectId ? workspace.getSnapshotRuntime(Number(projectId)) : null;
+}
+
+function isSnapshotRunning(projectId: string | undefined) {
+  const task = snapshotRuntime(projectId)?.task;
+  return task ? ["queued", "submitting", "processing"].includes(task.status) : false;
+}
+
+function snapshotLabel(projectId: string | undefined) {
+  const runtime = snapshotRuntime(projectId);
+  if (!runtime?.task) return $t("workspace.prepareProjectCopy");
+  if (runtime.task.status === "completed") return $t("workspace.openPreparedProject");
+  if (runtime.task.status === "failed") return $t("workspace.prepareFailedRetry");
+  return `${$t("workspace.preparingProject")} ${Math.round(runtime.task.progress || 0)}%`;
+}
+
+async function handleProjectCopy(projectId: string | undefined) {
+  if (!projectId) return;
+  if (!isElectron.value) {
+    window.$message.warning($t("workspace.desktopOnly"));
+    return;
+  }
+  const runtime = snapshotRuntime(projectId);
+  if (runtime?.task?.status === "completed" && runtime.operation.directory) {
+    try {
+      await workspace.openProjectSnapshotDirectory(Number(projectId));
+    } catch (error: any) {
+      window.$message.error(error?.message || $t("workspace.openDirectoryFailed"));
+    }
+    return;
+  }
+  if (isSnapshotRunning(projectId)) return;
+  try {
+    await workspace.prepareProjectCopy(Number(projectId));
+    window.$message.success($t("workspace.projectCopyStarted"));
+  } catch (error: any) {
+    window.$message.error(error?.message || $t("workspace.projectCopyFailed"));
+  }
+}
+
+async function handleImportProject() {
+  if (!isElectron.value) {
+    window.$message.warning($t("workspace.desktopOnly"));
+    return;
+  }
+  importingProject.value = true;
+  try {
+    const operation = await workspace.chooseAndImportProject();
+    if (operation) window.$message.success($t("workspace.importStarted"));
+  } catch (error: any) {
+    window.$message.error(error?.message || $t("workspace.importFailed"));
+  } finally {
+    importingProject.value = false;
+  }
 }
 
 function openEdit(item: {
@@ -231,11 +363,20 @@ function delProjcer(projectId: string | undefined) {
       color: var(--td-text-color-secondary);
     }
   }
+  .headerActions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .legacyTip {
+    margin-bottom: 18px;
+  }
   .list {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 10px;
     .card {
+      position: relative;
       width: 100%;
       height: 100%;
       cursor: pointer;
@@ -264,6 +405,12 @@ function delProjcer(projectId: string | undefined) {
         .actionBtns {
           gap: 12px;
         }
+        .copyBtn {
+          cursor: pointer;
+          &:hover {
+            color: var(--td-brand-color);
+          }
+        }
         .editBtn {
           cursor: pointer;
           &:hover {
@@ -276,6 +423,16 @@ function delProjcer(projectId: string | undefined) {
             color: red;
           }
         }
+      }
+      &.opening {
+        pointer-events: none;
+      }
+      .openingState {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: color-mix(in srgb, var(--td-bg-color-container) 82%, transparent);
       }
     }
   }

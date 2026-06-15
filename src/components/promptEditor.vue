@@ -23,7 +23,8 @@
           <i-video v-else-if="item.type === 'video'" class="ref-popup-icon" />
           <i-volume-mute v-else-if="item.type === 'audio'" class="ref-popup-icon" />
           <span v-else class="ref-popup-text">文</span>
-          <span class="reference-label">{{ $t("workbench.production.editImage.reference", { index: index + 1 }) }}</span>
+          <span class="reference-label">{{ item.label || $t("workbench.production.editImage.reference", { index: index + 1 }) }}</span>
+          <span v-if="item.group" class="reference-group">{{ item.group }}</span>
           <span class="ref-index-badge">#{{ index + 1 }}</span>
         </div>
         <div v-if="!references?.length" class="no-references">{{ $t("workbench.production.editImage.noReferences") }}</div>
@@ -39,8 +40,12 @@ import { Popup } from "tdesign-vue-next";
 import { Video, VolumeMute } from "@icon-park/vue-next";
 
 const props = defineProps<{
-  references?: { type: "image" | "video" | "audio" | "text"; src: string }[];
+  references?: { type: "image" | "video" | "audio" | "text"; src: string; label?: string; group?: string }[];
   placeholder?: String;
+}>();
+
+const emit = defineEmits<{
+  blur: [];
 }>();
 
 const prompt = defineModel<string>({ default: "" });
@@ -54,21 +59,86 @@ const editorContent = ref("");
 let savedRange: Range | null = null;
 let internalUpdate = false;
 
+const tagStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "4px",
+  maxWidth: "180px",
+  minHeight: "22px",
+  boxSizing: "border-box",
+  borderRadius: "5px",
+  border: "1px solid rgba(91, 204, 179, 0.5)",
+  background: "linear-gradient(135deg, #edfaf7 0%, #f0fdfb 100%)",
+  padding: "1px 6px 1px 3px",
+  cursor: "pointer",
+  verticalAlign: "middle",
+  lineHeight: "1",
+  fontSize: "12px",
+  fontWeight: "500",
+  color: "#2da68a",
+  userSelect: "none",
+  position: "relative",
+  top: "-1px",
+  marginLeft: "5px",
+  overflow: "hidden",
+} as const;
+
+const tagImageStyle = {
+  width: "18px",
+  height: "18px",
+  minWidth: "18px",
+  maxWidth: "18px",
+  minHeight: "18px",
+  maxHeight: "18px",
+  borderRadius: "3px",
+  objectFit: "cover",
+  flexShrink: "0",
+  border: "1px solid rgba(91, 204, 179, 0.2)",
+  display: "block",
+} as const;
+
+const tagLabelStyle = {
+  minWidth: "0",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+} as const;
+
+const tagGroupStyle = {
+  maxWidth: "48px",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "#5d8f83",
+  fontSize: "10px",
+  lineHeight: "1",
+} as const;
+
 // 创建引用标签元素
 function createRefTag(index: number): HTMLSpanElement {
   const ref = props.references?.[index];
   const refType = ref?.type ?? "image";
   const refSrc = ref?.src ?? "";
+  const refLabel = ref?.label || $t("workbench.production.editImage.reference", { index: index + 1 });
+  const refGroup = ref?.group || "";
   const container = document.createElement("span");
+  container.className = "prompt-ref-tag-host";
   container.contentEditable = "false";
   container.dataset.refIndex = String(index);
   container.dataset.imgSrc = refSrc;
+  container.style.display = "inline-block";
+  container.style.width = "auto";
+  container.style.height = "auto";
+  container.style.maxWidth = "190px";
+  container.style.maxHeight = "24px";
+  container.style.overflow = "hidden";
+  container.style.verticalAlign = "middle";
 
   const popupContent = () => {
     if (refType === "image") {
       return h("img", {
         src: refSrc,
-        style: { width: "200px", borderRadius: "8px", display: "block" },
+        style: { width: "220px", maxHeight: "260px", objectFit: "contain", borderRadius: "8px", display: "block" },
         alt: "",
       });
     }
@@ -80,7 +150,7 @@ function createRefTag(index: number): HTMLSpanElement {
 
   const tagContent = () => {
     if (refType === "image") {
-      return h("img", { src: refSrc, alt: "" });
+      return h("img", { src: refSrc, alt: "", style: tagImageStyle });
     }
     if (refType === "video") {
       return h(Video);
@@ -100,7 +170,11 @@ function createRefTag(index: number): HTMLSpanElement {
     },
     {
       default: () => [
-        h("div", { class: "tag" }, [tagContent(), h("span", null, $t("workbench.production.editImage.reference", { index: index + 1 }))]),
+        h("div", { class: "tag", style: tagStyle }, [
+          tagContent(),
+          h("span", { style: tagLabelStyle }, refLabel),
+          refGroup ? h("small", { style: tagGroupStyle }, refGroup) : null,
+        ]),
       ],
     },
   );
@@ -342,6 +416,7 @@ function syncPrompt() {
 }
 
 function handleBlur() {
+  emit("blur");
   setTimeout(() => {
     showReferences.value = false;
   }, 150);
@@ -390,6 +465,54 @@ function handlePaste(e: ClipboardEvent) {
     content: attr(data-placeholder);
     color: var(--td-text-color-placeholder);
     pointer-events: none;
+  }
+
+  :deep(.tag) {
+    max-width: 180px !important;
+    min-height: 22px !important;
+    overflow: hidden !important;
+  }
+
+  :deep(.tag img) {
+    width: 18px !important;
+    height: 18px !important;
+    min-width: 18px !important;
+    max-width: 18px !important;
+    min-height: 18px !important;
+    max-height: 18px !important;
+    object-fit: cover !important;
+    flex-shrink: 0 !important;
+  }
+
+  :deep(img) {
+    width: 18px !important;
+    height: 18px !important;
+    min-width: 18px !important;
+    max-width: 18px !important;
+    min-height: 18px !important;
+    max-height: 18px !important;
+    object-fit: cover !important;
+    vertical-align: middle !important;
+  }
+
+  :deep(.prompt-ref-tag-host) {
+    display: inline-block !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: 190px !important;
+    max-height: 24px !important;
+    overflow: hidden !important;
+    vertical-align: middle !important;
+  }
+
+  :deep(.prompt-ref-tag-host img) {
+    width: 18px !important;
+    height: 18px !important;
+    min-width: 18px !important;
+    max-width: 18px !important;
+    min-height: 18px !important;
+    max-height: 18px !important;
+    object-fit: cover !important;
   }
 }
 
@@ -473,6 +596,15 @@ function handlePaste(e: ClipboardEvent) {
       flex: 1;
     }
 
+    .reference-group {
+      max-width: 56px;
+      color: var(--td-text-color-secondary);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .ref-index-badge {
       font-size: 11px;
       color: var(--td-text-color-placeholder);
@@ -527,6 +659,12 @@ function handlePaste(e: ClipboardEvent) {
     object-fit: cover;
     flex-shrink: 0;
     border: 1px solid rgba(91, 204, 179, 0.2);
+  }
+
+  small {
+    color: #5d8f83;
+    font-size: 10px;
+    line-height: 1;
   }
 
   i {

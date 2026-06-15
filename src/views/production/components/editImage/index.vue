@@ -25,7 +25,28 @@
       </template>
 
       <template #node-generated="{ id, data }">
-        <generatedNode :id="id" :data="data" :projectId="+project!.id" @keep="sureNode" />
+        <generatedNode
+          :id="id"
+          :data="data"
+          :projectId="+project!.id"
+          :flowId="localFlowId"
+          :saveFlow="persistFlow"
+          :targetType="flowData.targetType"
+          :targetId="flowData.targetId"
+          @keep="sureNode"
+          @select-image="selectFinalImage" />
+      </template>
+      <template #node-directorStage="{ id, data }">
+        <directorStageNode
+          :id="id"
+          :data="data"
+          :projectId="+project!.id"
+          :scriptId="episodesId"
+          :flowId="localFlowId"
+          :saveFlow="persistFlow"
+          :targetType="flowData.targetType"
+          :targetId="flowData.targetId"
+          @change="onDirectorStageChange" />
       </template>
       <template #edge-removeLine="edgeProps">
         <removeLine v-bind="edgeProps" />
@@ -39,6 +60,7 @@
             :options="[
               { content: $t('workbench.production.editImage.upload'), value: 1 },
               { content: $t('workbench.production.editImage.generate'), value: 2 },
+              { content: '3D导演台', value: 3 },
             ]"
             @click="clickHandler">
             <t-button theme="primary" shape="circle">
@@ -66,6 +88,7 @@ import { Background } from "@vue-flow/background";
 import { Controls } from "@vue-flow/controls";
 import uploadNode from "./uploadNode.vue";
 import generatedNode from "./generatedNode.vue";
+import directorStageNode from "./directorStageNode.vue";
 import storyboardImageCheck from "@/components/storyboardImageCheck.vue";
 import type { Storyboard } from "../../utils/flowBuilder";
 
@@ -76,10 +99,28 @@ import removeLine from "./removeLine.vue";
 import projectStore from "@/stores/project";
 
 import axios from "@/utils/axios";
-import type { NodeType, UploadNodeData, GeneratedNodeData } from "../../utils/editImageType";
-import { DEFAULT_EDGE_OPTIONS, createGeneratedData, cleanNodes, cleanEdges } from "../../utils/editImageType";
+import type {
+  NodeType,
+  UploadNodeData,
+  GeneratedNodeData,
+  DirectorStageData,
+  ReferenceImage,
+  ImageFlowSavePayload,
+} from "../../utils/editImageType";
+import {
+  DEFAULT_EDGE_OPTIONS,
+  createGeneratedData,
+  createDirectorStageData,
+  cleanNodes,
+  cleanEdges,
+  isActiveImageTask,
+  normalizeGeneratedNodeData,
+  normalizeDirectorStageData,
+} from "../../utils/editImageType";
 import { useLayout } from "../../utils/dagre";
 import { v4 as uuid } from "uuid";
+import { getOriginalImageUrl } from "@/utils/imageUrl";
+import { getMediaOriginalUrl, getMediaPathForGeneration, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 
 const episodesId = inject<Ref<number>>("episodesId");
 const { project } = storeToRefs(projectStore());
@@ -97,8 +138,10 @@ const props = withDefaults(
   defineProps<{
     flowData: {
       flowId?: number | null;
+      targetType?: "deriveAsset" | "storyboard";
+      targetId?: number | null;
       resultImages: { src: string; prompt: string }[]; // 结果图 url 和提示词
-      referanceImages: string[]; // 参考图url
+      referanceImages: (string | ReferenceImage)[]; // 参考图url
     };
     type?: string;
   }>(),
@@ -110,16 +153,21 @@ const props = withDefaults(
   },
 );
 
-const emit = defineEmits(["save"]);
+const emit = defineEmits<{
+  save: [payload: ImageFlowSavePayload];
+}>();
 
 const visible = defineModel({
   type: Boolean,
   default: false,
 });
-const { addEdges, getNodes, getEdges, updateNodeData } = useVueFlow("editImage");
+const { addEdges, getEdges } = useVueFlow("editImage");
 
 const nodes = ref<NodeType[]>([]);
 const edges = ref<Edge<any, any, string>[]>([]);
+const localFlowId = ref<number | null>(props.flowData.flowId ?? null);
+const selectedImageUrl = ref("");
+let saveQueue: Promise<number | null> = Promise.resolve(localFlowId.value);
 
 // 防抖定时器
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -149,8 +197,8 @@ function syncReferences() {
 }
 
 function _doSyncReferences() {
-  const allNodes = getNodes.value;
-  const allEdges = getEdges.value;
+  const allNodes = nodes.value;
+  const allEdges = edges.value;
 
   // 用 Map 预索引节点，避免重复 find（O(n) → O(1)）
   const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
@@ -164,6 +212,26 @@ function _doSyncReferences() {
   }
 
   // 找出所有 generated 节点并同步 references
+  for (const directorNode of allNodes) {
+    if (directorNode.type !== "directorStage") continue;
+    const sourceIds = edgesByTarget.get(directorNode.id) ?? [];
+    const connectedRefs = sourceIds
+      .map((id) => nodeMap.get(id))
+      .filter((n): n is NonNullable<typeof n> => !!n)
+      .flatMap((n) => {
+        if (n.type === "upload") return [normalizeReferenceImage(n.data as UploadNodeData)];
+        if (n.type === "generated") return [normalizeGeneratedReference(n.data as GeneratedNodeData)];
+        if (n.type === "directorStage") return normalizeDirectorAssetReferences(n.data as DirectorStageData);
+        return [];
+      })
+      .filter((i) => i.image);
+    const data = directorNode.data as DirectorStageData;
+    if (!sameReferenceList(data.references ?? [], connectedRefs)) {
+      data.references = connectedRefs;
+      if (!data.background && connectedRefs.length) data.background = connectedRefs[0];
+    }
+  }
+
   for (const genNode of allNodes) {
     if (genNode.type !== "generated") continue;
 
@@ -171,21 +239,23 @@ function _doSyncReferences() {
     const connectedImages = sourceIds
       .map((id) => nodeMap.get(id))
       .filter((n): n is NonNullable<typeof n> => !!n)
-      .map((n) => {
+      .flatMap((n) => {
         if (n.type === "upload") {
-          return { image: (n.data as UploadNodeData).image || "" };
+          return [normalizeReferenceImage(n.data as UploadNodeData)];
         } else if (n.type === "generated") {
-          return { image: (n.data as GeneratedNodeData).generatedImage || "" };
+          return [normalizeGeneratedReference(n.data as GeneratedNodeData)];
+        } else if (n.type === "directorStage") {
+          return normalizeDirectorAssetReferences(n.data as DirectorStageData);
         }
-        return { image: "" };
+        return [];
       })
       .filter((i) => i.image);
 
     // 仅在数据变化时才更新，避免无效的响应式触发
-    const currentRefs: { image: string }[] = (genNode.data as GeneratedNodeData).references ?? [];
-    const isSame = currentRefs.length === connectedImages.length && connectedImages.every((img, idx) => currentRefs[idx]?.image === img.image);
+    const currentRefs: ReferenceImage[] = (genNode.data as GeneratedNodeData).references ?? [];
+    const isSame = sameReferenceList(currentRefs, connectedImages);
     if (!isSame) {
-      updateNodeData(genNode.id, { references: connectedImages });
+      (genNode.data as GeneratedNodeData).references = connectedImages;
     }
   }
 }
@@ -213,40 +283,236 @@ const onConnect = (params: any) => {
   nextTick(syncReferences);
 };
 function clickHandler(value: any) {
-  const type = value.value === 1 ? "upload" : "generated";
+  const type = value.value === 1 ? "upload" : value.value === 2 ? "generated" : "directorStage";
   addUploadNode(type);
 }
+
+function normalizeReferenceImage(input: string | ReferenceImage | UploadNodeData): ReferenceImage {
+  if (typeof input === "string") {
+    const media = normalizeMediaRef(input, "image");
+    return { image: media ? getMediaOriginalUrl(media) : input, previewImage: media ? getMediaPreviewUrl(media) : input, media };
+  }
+  const media = normalizeMediaRef(input.media ?? input, "image");
+  return {
+    image: media ? getMediaOriginalUrl(media) : input.image || "",
+    previewImage: media ? getMediaPreviewUrl(media) : input.previewImage || input.image || "",
+    media,
+    label: input.label,
+    source: input.source,
+    sourceId: input.sourceId,
+    group: input.group,
+    type: input.type,
+  };
+}
+
 // 添加新的上传节点
-const addUploadNode = (type: string, image: string = "", prompt: string = "") => {
+function normalizeGeneratedReference(data: GeneratedNodeData): ReferenceImage {
+  const media = normalizeMediaRef(data.resultMedia ?? data.selectedResult?.media ?? data.generatedImage, "image");
+  return {
+    image: media ? getMediaOriginalUrl(media) : data.selectedResult?.url || data.generatedImage || "",
+    previewImage: media ? getMediaPreviewUrl(media) : data.generatedImage || data.selectedResult?.url || "",
+    media,
+    label: data.selectedResult?.prompt || data.prompt || "生成图",
+    source: "generated",
+    sourceId: data.historyId ?? data.taskId ?? undefined,
+    type: "image",
+  };
+}
+
+function normalizeDirectorAssetReferences(data: DirectorStageData): ReferenceImage[] {
+  return (data.assets ?? []).map((asset) => ({
+    ...normalizeReferenceImage(asset),
+    source: "directorAsset",
+    group: "directorStage",
+    type: "image",
+  }));
+}
+
+function sameReferenceList(left: ReferenceImage[], right: ReferenceImage[]) {
+  return (
+    left.length === right.length &&
+    right.every(
+      (img, idx) =>
+        left[idx]?.image === img.image &&
+        left[idx]?.previewImage === img.previewImage &&
+        left[idx]?.label === img.label &&
+        left[idx]?.source === img.source &&
+        left[idx]?.sourceId === img.sourceId,
+    )
+  );
+}
+
+const addUploadNode = (type: "upload" | "generated" | "directorStage", image: string | ReferenceImage = "", prompt: string = "") => {
   const newNodeId = uuid();
   const lastNode = nodes.value.filter((n) => n.type === type).pop();
-  const newY = lastNode ? lastNode.position.y + 350 : 100;
-  const newX = type === "generated" ? 600 : 100;
+  const newY = lastNode ? lastNode.position.y + (type === "generated" ? 350 : 240) : 100;
+  const newX = type === "generated" ? 700 : type === "directorStage" ? 380 : 100;
+  const referenceImage = normalizeReferenceImage(image);
+
+  const data =
+    type === "generated"
+      ? {
+          ...createGeneratedData(referenceImage.image, prompt),
+          isPrimary: !nodes.value.some((node) => node.type === "generated"),
+        }
+      : type === "directorStage"
+        ? createDirectorStageData()
+      : referenceImage;
 
   nodes.value.push({
     id: newNodeId,
     type,
     position: { x: newX, y: newY },
-    data: type === "generated" ? createGeneratedData(image, prompt) : { image },
+    data,
   } as NodeType);
 
   return newNodeId;
 };
-//保存节点
-async function sureNode(imageUrl: string) {
-  try {
-    const payload = {
-      nodes: cleanNodes(getNodes.value as NodeType[]),
-      edges: cleanEdges(getEdges.value),
-    };
+function getFlowTarget() {
+  const projectId = Number(project.value?.id);
+  const scriptId = Number(episodesId?.value);
+  const { targetType, targetId } = props.flowData;
+  if (!projectId || !scriptId || !targetType || !targetId) {
+    throw new Error($t("workbench.production.editImage.targetMissing"));
+  }
+  return { projectId, scriptId, targetType, targetId };
+}
 
-    if (props.flowData.flowId) {
-      await axios.post("/production/editImage/updateImageFlow", { ...payload, flowId: props.flowData.flowId });
-      emit("save", { imageUrl, flowId: props.flowData.flowId });
-    } else {
-      const { data } = await axios.post("/production/editImage/saveImageFlow", { ...payload });
-      emit("save", { imageUrl, flowId: data?.id });
+async function persistFlowNow(selectedImageUrl = "") {
+  const selectedMedia = normalizeMediaRef(
+    nodes.value
+      .filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated")
+      .find((node) => sameImageUrl(node.data.generatedImage, selectedImageUrl) || sameImageUrl(node.data.selectedResult?.url, selectedImageUrl))
+      ?.data.resultMedia ?? selectedImageUrl,
+    "image",
+  );
+  const payload = {
+    flowId: localFlowId.value,
+    ...getFlowTarget(),
+    nodes: cleanNodes(nodes.value),
+    edges: cleanEdges(edges.value),
+    selectedMediaPath: selectedMedia ? getMediaPathForGeneration(selectedMedia) : undefined,
+  };
+
+  const { data } = await axios.post("/production/editImage/saveImageFlow", { ...payload });
+  localFlowId.value = data?.flowId ?? data?.id;
+  if (!localFlowId.value) throw new Error($t("workbench.production.editImage.saveFailed"));
+  return localFlowId.value;
+}
+
+function persistFlow(selectedImageUrl = "") {
+  const save = saveQueue.catch(() => localFlowId.value).then(() => persistFlowNow(selectedImageUrl));
+  saveQueue = save;
+  return save;
+}
+
+function sameImageUrl(left = "", right = "") {
+  return Boolean(left && right && getOriginalImageUrl(left) === getOriginalImageUrl(right));
+}
+
+function resolvePrimaryGeneratedNode(imageUrl = "", preferredNodeId = "") {
+  const generatedNodes = nodes.value.filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated");
+  const preferred = preferredNodeId ? generatedNodes.find((node) => node.id === preferredNodeId) : undefined;
+  const imageMatched = imageUrl
+    ? generatedNodes.find(
+        (node) =>
+          sameImageUrl(node.data.selectedResult?.url, imageUrl) ||
+          sameImageUrl(node.data.generatedImage, imageUrl) ||
+          sameImageUrl(node.data.resultMedia ? getMediaOriginalUrl(node.data.resultMedia) : "", imageUrl),
+      )
+    : undefined;
+  const marked = generatedNodes.find((node) => node.data.isPrimary);
+  const single = generatedNodes.length === 1 ? generatedNodes[0] : undefined;
+  const primary = preferred ?? imageMatched ?? marked ?? single;
+
+  if (primary) {
+    generatedNodes.forEach((node) => {
+      node.data.isPrimary = node.id === primary.id;
+    });
+  }
+  return primary;
+}
+
+function getPrimarySnapshot(imageUrl = "", preferredNodeId = "") {
+  _doSyncReferences();
+  const primary = resolvePrimaryGeneratedNode(imageUrl, preferredNodeId);
+  const nodeMap = new Map(nodes.value.map((node) => [node.id, node]));
+  const references: ReferenceImage[] = [];
+  if (primary) {
+    for (const edge of edges.value) {
+      if (edge.target !== primary.id) continue;
+      const sourceNode = nodeMap.get(edge.source);
+      if (sourceNode?.type === "upload") references.push(normalizeReferenceImage(sourceNode.data));
+      if (sourceNode?.type === "directorStage") references.push(...normalizeDirectorAssetReferences(sourceNode.data as DirectorStageData));
     }
+  }
+  return {
+    primaryNodeId: primary?.id,
+    prompt: primary?.data.prompt ?? "",
+    references,
+  };
+}
+
+function emitSave(imageUrl: string, flowId: number, preferredNodeId = "") {
+  const primary = resolvePrimaryGeneratedNode(imageUrl, preferredNodeId);
+  emit("save", {
+    imageUrl,
+    media: primary?.data.resultMedia ?? normalizeMediaRef(imageUrl, "image"),
+    flowId,
+    ...getPrimarySnapshot(imageUrl, preferredNodeId),
+  });
+}
+
+async function selectFinalImage(imageUrl: string, nodeId = "") {
+  if (!imageUrl) return;
+  selectedImageUrl.value = imageUrl;
+  resolvePrimaryGeneratedNode(imageUrl, nodeId);
+  try {
+    const flowId = await persistFlow(imageUrl);
+    emitSave(imageUrl, flowId, nodeId);
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
+  }
+}
+
+function onDirectorStageChange() {
+  syncReferences();
+  persistFlow().catch((e) => {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
+  });
+}
+
+function hasActiveImageTask() {
+  return nodes.value.some((node) => {
+    if (node.type !== "generated") return false;
+    return Boolean(node.data.taskRequestPending || isActiveImageTask(node.data));
+  });
+}
+
+function normalizeLoadedGeneratedData(data: GeneratedNodeData): GeneratedNodeData {
+  return normalizeGeneratedNodeData({
+    ...data,
+    references: (data.references ?? []).map(normalizeReferenceImage),
+  });
+}
+
+async function rebuildEmptyFlow() {
+  nodes.value = [];
+  edges.value = [];
+  buildFlow();
+  await nextTick();
+  _doSyncReferences();
+  const flowId = await persistFlow();
+  emitSave("", flowId);
+}
+
+//保存节点
+async function sureNode(imageUrl: string, nodeId = "") {
+  try {
+    selectedImageUrl.value = imageUrl;
+    resolvePrimaryGeneratedNode(imageUrl, nodeId);
+    const flowId = await persistFlow(imageUrl);
+    emitSave(imageUrl, flowId, nodeId);
     visible.value = false;
   } catch (e) {
     window.$message.error((e as any).message || $t("workbench.production.editImage.saveFailed"));
@@ -254,13 +520,40 @@ async function sureNode(imageUrl: string) {
 }
 onMounted(async () => {
   try {
-    if (!props.flowData.flowId) return buildFlow();
+    localFlowId.value = props.flowData.flowId ?? null;
+    if (!localFlowId.value) {
+      await rebuildEmptyFlow();
+      return;
+    }
     const { data } = await axios.post("/production/editImage/getImageFlow", {
-      id: props.flowData.flowId,
+      id: localFlowId.value,
     });
-    if (!data) return buildFlow();
-    edges.value = data.edges.map((e: any) => ({ ...e, ...DEFAULT_EDGE_OPTIONS }));
-    nodes.value = data.nodes;
+    if (!data || !Array.isArray(data.nodes) || data.nodes.length === 0) {
+      await rebuildEmptyFlow();
+      return;
+    }
+    edges.value = (Array.isArray(data.edges) ? data.edges : []).map((e: any) => ({ ...e, ...DEFAULT_EDGE_OPTIONS }));
+    nodes.value = data.nodes.map((node: NodeType) => {
+      if (node.type === "upload") {
+        return {
+          ...node,
+          data: normalizeReferenceImage(node.data as UploadNodeData),
+        };
+      }
+      if (node.type === "directorStage") {
+        return {
+          ...node,
+          data: normalizeDirectorStageData(node.data as DirectorStageData),
+        };
+      }
+      return {
+        ...node,
+        data: normalizeLoadedGeneratedData(node.data as GeneratedNodeData),
+      };
+    });
+    const selectedMedia = normalizeMediaRef(data.selectedMedia ?? props.flowData.resultImages[0], "image");
+    selectedImageUrl.value = selectedMedia ? getMediaOriginalUrl(selectedMedia) : props.flowData.resultImages[0]?.src || "";
+    resolvePrimaryGeneratedNode(selectedImageUrl.value);
     await nextTick();
     setTimeout(() => fitView({ duration: 300 }), 100);
   } catch (e) {
@@ -271,11 +564,12 @@ onMounted(async () => {
 function buildFlow() {
   const uploadIds: string[] = [];
   const generatedIds: string[] = [];
-  props.flowData.referanceImages.forEach((i: string) => {
+  props.flowData.referanceImages.forEach((i) => {
     uploadIds.push(addUploadNode("upload", i));
   });
   props.flowData.resultImages.forEach((i: { src: string; prompt: string }) => {
-    generatedIds.push(addUploadNode("generated", i.src, i.prompt));
+    const media = normalizeMediaRef(i, "image");
+    generatedIds.push(addUploadNode("generated", media ? { image: getMediaOriginalUrl(media), previewImage: getMediaPreviewUrl(media), media } : i.src, i.prompt));
   });
   // 将每个 upload 节点连接到每个 generated 节点
   for (const sourceId of uploadIds) {
@@ -298,17 +592,23 @@ function closeFn() {
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.production.editImage.closeConfirmTitle"),
     body: $t("workbench.production.editImage.closeConfirmBody"),
-    confirmBtn: $t("common.confirm"),
-    cancelBtn: $t("common.cancel"),
-    onConfirm: () => {
-      if (props.flowData.flowId) {
-        const payload = {
-          flowId: props.flowData.flowId,
-          nodes: cleanNodes(getNodes.value as NodeType[]),
-          edges: cleanEdges(getEdges.value),
-        };
-        axios.post("/production/editImage/updateImageFlow", { ...payload });
+    confirmBtn: $t("workbench.production.editImage.saveAndExit"),
+    cancelBtn: $t("workbench.production.editImage.discardExit"),
+    onConfirm: async () => {
+      try {
+        // 生成任务的节点状态由后端持续更新，生成前也已保存完整画布。
+        // 生成中直接退出，避免前端 processing 快照覆盖后端刚完成的结果。
+        const imageUrl = selectedImageUrl.value;
+        const flowId = hasActiveImageTask() ? localFlowId.value : await persistFlow(imageUrl);
+        if (!flowId) throw new Error($t("workbench.production.editImage.saveFailed"));
+        emitSave(imageUrl, flowId);
+        visible.value = false;
+        dialog.destroy();
+      } catch (e) {
+        window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
       }
+    },
+    onCancel: () => {
       visible.value = false;
       dialog.destroy();
     },

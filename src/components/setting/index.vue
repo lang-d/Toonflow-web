@@ -27,6 +27,7 @@
           <logoutConfig v-if="activeMenu === 'logoutConfig'" />
           <memoryConfig v-if="activeMenu === 'memoryConfig'" />
           <fileManagement v-if="activeMenu === 'fileManagement'" />
+          <workspaceConfig v-if="activeMenu === 'workspace'" />
           <skillManagement v-if="activeMenu === 'skillManagement'" />
           <devConfig v-if="activeMenu === 'devConfig'" />
           <modelMap v-if="activeMenu === 'modelMap'" />
@@ -52,6 +53,7 @@ import logoutConfig from "./components/logoutConfig.vue";
 import vendorConfig from "./components/vendorConfig.vue";
 import memoryConfig from "./components/memoryConfig.vue";
 import fileManagement from "./components/fileManagement.vue";
+import workspaceConfig from "./components/workspaceConfig.vue";
 import skillManagement from "./components/skillManagement.vue";
 import devConfig from "./components/devConfig.vue";
 import promptManage from "./components/promptManage.vue";
@@ -68,6 +70,7 @@ const menuItems = [
   { key: "memoryConfig", label: "settings.menu.memoryConfig", icon: "i-memory-card-one" },
   { key: "loginConfig", label: "settings.menu.loginConfig", icon: "i-lock" },
   { key: "dbConfig", label: "settings.menu.dbConfig", icon: "i-data" },
+  { key: "workspace", label: "settings.menu.workspace", icon: "i-folder-close" },
   { key: "fileManagement", label: "settings.menu.fileManagement", icon: "i-hard-disk" },
   { key: "otherConfig", label: "settings.menu.otherConfig", icon: "i-application-menu" },
   { key: "requestConfig", label: "settings.menu.requestConfig", icon: "i-api" },

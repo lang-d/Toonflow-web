@@ -2,6 +2,7 @@
   <titleBar v-if="isElectron" />
   <t-config-provider :global-config="globalConfig">
     <router-view></router-view>
+    <ImageLightbox />
   </t-config-provider>
 </template>
 
@@ -13,7 +14,8 @@ import enConfig from "tdesign-vue-next/es/locale/en_US";
 import { cachedLocale } from "@/locales";
 import { initTheme } from "@/utils/theme";
 import { type GlobalConfigProvider } from "tdesign-vue-next";
-const { baseUrl, isElectron } = storeToRefs(settingStore());
+import ImageLightbox from "@/components/ImageLightbox.vue";
+const { baseUrl, apiReady, isElectron } = storeToRefs(settingStore());
 import { config } from "md-editor-v3";
 
 watch(
@@ -68,17 +70,19 @@ async function getPort() {
   await nextTick();
   await nextTick();
   await nextTick();
-  if (/Electron/i.test(navigator.userAgent)) {
-    isElectron.value = true;
+  isElectron.value = /Electron/i.test(navigator.userAgent);
+  if (isElectron.value) {
+    try {
+      const res = await fetch("toonflow://getAppUrl");
+      const data = await res.json();
+      if (data?.url) {
+        baseUrl.value = normalizeApiBaseUrl(data.url);
+      }
+    } catch (error) {}
+  } else if (import.meta.env.DEV) {
+    baseUrl.value = "http://127.0.0.1:10588/api";
   }
-  try {
-    const res = await fetch("toonflow://getAppUrl");
-    const data = await res.json();
-    if (data?.url) {
-      baseUrl.value = data.url;
-      isElectron.value = true;
-    }
-  } catch (error) {}
+  apiReady.value = true;
 
   config({
     markdownItConfig(md) {
@@ -119,6 +123,11 @@ const customConfig: GlobalConfigProvider = {
   pagination: {},
 };
 const globalConfig = computed<GlobalConfigProvider>(() => merge({}, tdesignLocaleMap[cachedLocale.value] || zhConfig, customConfig));
+
+function normalizeApiBaseUrl(url: string) {
+  const trimmed = url.replace(/\/+$/, "");
+  return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+}
 
 onBeforeMount(() => {
   initTheme();

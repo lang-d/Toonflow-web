@@ -143,6 +143,7 @@ import modelSelect from "@/components/modelSelect.vue";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 import axios from "@/utils/axios";
+import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
 const props = defineProps<{
   formData: {
     id?: number;
@@ -164,7 +165,7 @@ const generateImageShow = defineModel({
 function handleCancel() {
   generateImageShow.value = false;
   generateLoading.value = false;
-  stopPolling();
+  releaseImageTask();
   emit("update");
 }
 //上传参考图片
@@ -229,7 +230,7 @@ async function handleGenerate() {
         });
       }
     }
-    await axios.post("/assetsGenerate/generateAssets", {
+    const { data } = await axios.post("/assetsGenerate/generateAssets", {
       type: props.formData.type ?? "props",
       projectId: project.value?.id,
       name: props.formData.name ?? $t("workbench.assets.gen.unnamed"),
@@ -240,7 +241,8 @@ async function handleGenerate() {
       resolution: resolution.value,
     });
     window.$message.success($t("workbench.assets.gen.assetGenSuccess"));
-    await fetchGeneratedImages();
+    bindImageTask(data?.taskId, data?.legacyTaskId);
+    if (!data?.taskId) await fetchGeneratedImages();
   } catch (e: any) {
     window.$message.error(e.message ?? $t("workbench.assets.gen.assetGenFail"));
     fetchGeneratedImages();
@@ -272,7 +274,9 @@ function handleCustomUpload(files: any[]): void {
 }
 
 //生成结果
-const resultImages = ref<{ id: string; src: string; state: string; selected?: boolean }[]>([]);
+const resultImages = ref<{ id: string; src: string; state: string; selected?: boolean; taskId?: string; legacyTaskId?: string | number }[]>([]);
+const taskCenter = useTaskCenterStore();
+let releaseCurrentImageTask: (() => void) | null = null;
 //预览图片
 const visible = ref(false);
 const trigger = ref();
@@ -297,36 +301,55 @@ watch(
     }
   },
 );
-// 获取图片列表
-let pollingTimer: ReturnType<typeof setTimeout> | null = null;
+function releaseImageTask() {
+  releaseCurrentImageTask?.();
+  releaseCurrentImageTask = null;
+}
 
-function stopPolling() {
-  if (pollingTimer) {
-    clearTimeout(pollingTimer);
-    pollingTimer = null;
+function applyImageTask(task: RuntimeTask) {
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    generateLoading.value = false;
+    releaseImageTask();
+    void fetchGeneratedImages();
+    if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || $t("workbench.assets.gen.assetGenFail"));
   }
+}
+
+function bindImageTask(taskId?: string, legacyTaskId?: string | number) {
+  if (!props.formData.id || (!taskId && !legacyTaskId)) return;
+  releaseImageTask();
+  releaseCurrentImageTask = taskCenter.registerTask(
+    {
+      key: createTaskKey("assetImage", Number(project.value?.id), props.formData.id, undefined, taskId),
+      domain: "assetImage",
+      unifiedTaskId: taskId,
+      legacyTaskId,
+      targetType: "asset",
+      targetId: props.formData.id,
+      projectId: Number(project.value?.id),
+      status: "processing",
+    },
+    applyImageTask,
+  );
 }
 
 async function fetchGeneratedImages() {
   const { data } = await axios.post("/assets/getImage", { assetsId: props.formData.id });
-  const images = data.tempAssets.map((item: { id: string; filePath: string; state: string; selected?: boolean }) => ({
+  const images = data.tempAssets.map((item: { id: string; filePath: string; state: string; selected?: boolean; taskId?: string; legacyTaskId?: string | number }) => ({
     id: item.id,
     src: item.filePath,
     state: item.state,
     selected: item.selected ?? false,
+    taskId: item.taskId,
+    legacyTaskId: item.legacyTaskId,
   }));
   resultImages.value = images;
   const selectedIdx = images.findIndex((img: { selected?: boolean }) => img.selected);
   if (selectedIdx !== -1) {
     selectedImageIndex.value = selectedIdx;
   }
-
-  // 如果还有"生成中"的图片，自动轮询刷新
-  const hasGenerating = images.some((img: { state: string }) => img.state === "生成中");
-  stopPolling();
-  if (hasGenerating && generateImageShow.value) {
-    pollingTimer = setTimeout(() => fetchGeneratedImages(), 3000);
-  }
+  const generating = images.find((img: { state: string; taskId?: string; legacyTaskId?: string | number }) => img.state === "生成中" && (img.taskId || img.legacyTaskId));
+  if (generating && generateImageShow.value) bindImageTask(generating.taskId, generating.legacyTaskId);
 }
 
 //选择图片

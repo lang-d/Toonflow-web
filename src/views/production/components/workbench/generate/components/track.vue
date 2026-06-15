@@ -17,7 +17,11 @@
           <!-- <t-button size="small" variant="outline" @click="importVideo">{{ $t("workbench.generate.importVideo") }}</t-button> -->
         </div>
       </div>
-      <div class="itemBox">
+      <div class="trackScroller">
+        <t-button class="scrollBtn" shape="circle" variant="outline" @click="scrollTrackList(-1)">
+          <template #icon><i-left /></template>
+        </t-button>
+        <div class="itemBox" ref="itemBoxRef">
         <div
           class="item"
           :class="{ active: index === activeTrackIndex }"
@@ -62,6 +66,10 @@
         <div class="item addItem c" @click="addTrack">
           <i-plus size="36"></i-plus>
         </div>
+        </div>
+        <t-button class="scrollBtn" shape="circle" variant="outline" @click="scrollTrackList(1)">
+          <template #icon><i-right /></template>
+        </t-button>
       </div>
     </t-card>
   </div>
@@ -75,15 +83,19 @@ import projectStore from "@/stores/project";
 import imageListCacheStore from "@/stores/imageListCache";
 import JSZip from "jszip";
 import settingStore from "@/stores/setting";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus } from "@/stores/taskCenter";
 
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
 const { removeCache } = imageListCacheStore();
+const taskCenter = useTaskCenterStore();
 const episodesId = inject<Ref<number>>("episodesId")!;
 const props = defineProps<{
   modelParmas: ModelSetting;
   imageList: UploadItem[];
   clampDuration: (trackDuration: number) => number;
+  promptPrefix?: string;
+  promptSuffix?: string;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
   default: 0,
@@ -97,6 +109,7 @@ const emit = defineEmits<{
   change: [prevIndex: number];
   saveImageList: [trackId: number];
 }>();
+const itemBoxRef = ref<HTMLElement>();
 const checkAll = ref(false); // 全选状态
 
 /** 视频封面缓存 src -> dataURL */
@@ -158,6 +171,17 @@ function changeIndex(index: number) {
   activeTrackIndex.value = index;
   emit("change", prevIndex);
 }
+function scrollTrackList(direction: -1 | 1) {
+  const el = itemBoxRef.value;
+  if (!el) return;
+  el.scrollBy({
+    left: direction * Math.max(el.clientWidth * 0.8, 240),
+    behavior: "smooth",
+  });
+}
+function composeTrackPrompt(prompt?: string) {
+  return [props.promptPrefix, prompt, props.promptSuffix].map((item) => item?.trim()).filter(Boolean).join("\n\n");
+}
 /** 删除轨道请求 */
 async function deleteTrack(index: number) {
   const track = trackList.value[index];
@@ -170,6 +194,8 @@ async function deleteTrack(index: number) {
   if (pid != null && sid != null && track.id != null) {
     removeCache(pid, sid, track.id);
   }
+  taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), track.id));
+  track.videoList.forEach((video) => taskCenter.removeTask(createTaskKey("video", Number(project.value?.id), video.id)));
   if (activeTrackIndex.value >= trackList.value.length) {
     activeTrackIndex.value = trackList.value.length - 1;
   }
@@ -257,7 +283,9 @@ function batchGenText() {
       trackId,
       info: info.filter((i) => i.id),
     });
+    taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), track.id));
     track.state = "生成中";
+    track.status = "processing";
   });
   axios
     .post("/production/workbench/batchGeneratePrompt", {
@@ -265,9 +293,24 @@ function batchGenText() {
       trackData,
       model: props.modelParmas.model,
       mode: props.modelParmas.mode,
+      promptPrefix: props.promptPrefix ?? "",
+      promptSuffix: props.promptSuffix ?? "",
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
     })
     .then(({ data }) => {
+      const taskRows = Array.isArray(data) ? data : data?.tasks ?? [];
+      const taskByTrack = new Map<number, string>();
+      taskRows.forEach((item: { trackId?: number; id?: number; taskId?: string }) => {
+        const trackId = item.trackId ?? item.id;
+        if (trackId != null && item.taskId) taskByTrack.set(trackId, item.taskId);
+      });
+      trackList.value.forEach((track) => {
+        const taskId = taskByTrack.get(track.id);
+        if (taskId) {
+          track.taskId = taskId;
+          track.status = "queued";
+        }
+      });
       window.$message.success("开始生成提示词");
       generateTextLoad.value = false;
       checkedTrackIds.value = [];
@@ -277,6 +320,7 @@ function batchGenText() {
       window.$message.error(e?.message ?? "生成提示词失败");
       trackList.value.forEach((i) => {
         i.state = "生成失败";
+        i.status = "failed";
       });
     })
     .finally(() => {});
@@ -317,7 +361,7 @@ function batchGenVideo() {
         const uploadData = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track, true);
         return {
           duration: props.clampDuration(track.duration || props.modelParmas.duration),
-          prompt: track.prompt,
+          prompt: composeTrackPrompt(track.prompt),
           uploadData,
           trackId,
         };
@@ -333,16 +377,21 @@ function batchGenVideo() {
       };
       try {
         const { data } = await axios.post("/production/workbench/batchGenerateVideo", requestData);
-        const videoRecordId: Record<number, number> = {};
-        data.forEach((item: { videoId: number; trackId: number }) => {
-          videoRecordId[item.trackId] = item.videoId;
+        const videoRecord: Record<number, { videoId: number; taskId?: string; queueTaskId?: number }> = {};
+        const rows = Array.isArray(data) ? data : data?.tasks ?? [];
+        rows.forEach((item: { videoId: number; trackId: number; taskId?: string; queueTaskId?: number }) => {
+          videoRecord[item.trackId] = { videoId: item.videoId, taskId: item.taskId, queueTaskId: item.queueTaskId };
         });
         checkedTrackData.forEach((i) => {
-          if (videoRecordId[i.id])
+          const record = videoRecord[i.id];
+          if (record)
             i.videoList.push({
-              id: videoRecordId[i.id],
+              id: record.videoId,
               state: "生成中",
+              status: normalizeTaskStatus((record as any).status, "queued"),
               src: "",
+              taskId: record.taskId,
+              queueTaskId: record.queueTaskId,
             });
         });
         checkedTrackIds.value = [];
@@ -404,6 +453,16 @@ watch(
     .right {
       gap: 8px;
     }
+  }
+  .trackScroller {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    min-width: 0;
+  }
+  .scrollBtn {
+    flex-shrink: 0;
+    align-self: center;
   }
   .itemBox {
     height: 150px;

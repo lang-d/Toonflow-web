@@ -9,7 +9,7 @@
       <div class="imageBox">
         <t-image
           class="image"
-          :src="currentImageUrl"
+          :src="currentPreviewUrl"
           fit="contain"
           :style="{
             width: '100%',
@@ -22,6 +22,7 @@
             </div>
           </template>
         </t-image>
+        <div v-if="data.label" class="imageLabel">{{ data.label }}</div>
         <t-dropdown :options="options" @click="clickHandler">
           <div class="upload ac">
             <i-upload theme="outline" size="18" fill="#fff" />
@@ -52,30 +53,57 @@
 <script setup lang="ts">
 import { Handle, Position, useVueFlow } from "@vue-flow/core";
 import { onBeforeUnmount, ref, watch } from "vue";
+import type { Ref } from "vue";
 import openAssetsSelector from "@/utils/assetsCheck";
 import type { Storyboard } from "../../utils/flowBuilder";
 import type { DropdownOption } from "tdesign-vue-next/es/dropdown";
+import { useFileDialog } from "@vueuse/core";
+import axios from "@/utils/axios";
+import projectStore from "@/stores/project";
+import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import type { MediaRef } from "@/types/api";
+
+const { project } = storeToRefs(projectStore());
 const props = defineProps<{
   id: string;
   data: {
     image?: string;
+    previewImage?: string;
+    label?: string;
+    source?: "asset" | "local" | "storyboard" | "directorStage" | "directorAsset" | "generated";
+    sourceId?: number | string;
+    group?: string;
+    type?: "image" | "video" | "audio" | "text";
+    media?: MediaRef;
   };
 }>();
 const openStoryboardCheck = inject<() => Promise<Storyboard[]>>("openStoryboardCheck")!;
 
 const { updateNodeData, removeNodes } = useVueFlow("editImage");
 const currentImageUrl = ref(props.data?.image || "");
+const currentPreviewUrl = ref(props.data?.previewImage || props.data?.image || "");
 const currentObjectUrl = ref<string | null>(null);
+const episodesId = inject<Ref<number>>("episodesId");
+const { open, onChange, onCancel } = useFileDialog({ multiple: false, reset: true, accept: ".png,.jpg,.jpeg,.webp" });
 
 const options = [
   { content: $t("workbench.production.editImage.uploadImage"), value: 1 },
   { content: $t("workbench.production.editImage.uploadStoryboardImage"), value: 2 },
+  { content: $t("workbench.production.generatedNode.localUpload"), value: 3 },
 ];
 
 watch(
   () => props.data?.image,
   (newUrl) => {
     currentImageUrl.value = newUrl || "";
+    currentPreviewUrl.value = props.data?.previewImage || newUrl || "";
+  },
+);
+
+watch(
+  () => props.data?.previewImage,
+  (newUrl) => {
+    currentPreviewUrl.value = newUrl || currentImageUrl.value || "";
   },
 );
 
@@ -95,8 +123,46 @@ function clickHandler(data: DropdownOption) {
     uploadFn();
   } else if (data.value == 2) {
     getStoryboardImage();
+  } else if (data.value == 3) {
+    localUpload();
   }
 }
+
+async function localUpload() {
+  const files = await new Promise<FileList | null>((resolve) => {
+    open();
+    onChange((f) => resolve(f));
+    onCancel(() => resolve(null));
+  });
+  if (!files?.length) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const { data } = await axios.post("/production/editImage/uploadImage", {
+        base64Data: reader.result as string,
+        projectId: project.value?.id,
+        scriptId: episodesId?.value,
+      });
+      const media = normalizeMediaRef(data?.media ?? data, "image");
+      currentImageUrl.value = media ? getMediaOriginalUrl(media) : data;
+      currentPreviewUrl.value = media ? getMediaPreviewUrl(media) : data;
+      updateNodeData(props.id, {
+        image: currentImageUrl.value,
+        previewImage: currentPreviewUrl.value,
+        media,
+        label: files[0].name,
+        source: "local",
+        sourceId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        type: "image",
+      });
+      emit("upload");
+    } catch (e) {
+      window.$message.error((e as any)?.message || $t("workbench.production.editImage.uploadFailed"));
+    }
+  };
+  reader.readAsDataURL(files[0]);
+}
+
 function handleKeep() {
   if (!currentImageUrl.value) return window.$message.error($t("workbench.production.editImage.noImage"));
   emit("keep", currentImageUrl.value);
@@ -107,18 +173,42 @@ async function uploadFn() {
     title: $t("workbench.production.editImage.selectImage"),
   });
   if (selectedAssets.length > 0) {
-    const filePath = selectedAssets[0].src!;
-    currentImageUrl.value = filePath;
-    updateNodeData(props.id, { image: filePath });
+    const asset = selectedAssets[0] as any;
+    const media = normalizeMediaRef((asset as any).media ?? asset, "image");
+    const image = media ? getMediaOriginalUrl(media) : asset?.originalUrl || asset?.imageUrl || asset?.url || asset?.src || "";
+    const previewImage = media ? getMediaPreviewUrl(media) : asset?.thumbnail || asset?.thumb || asset?.previewImage || asset?.src || asset?.imageUrl || asset?.url || image;
+    currentImageUrl.value = image;
+    currentPreviewUrl.value = previewImage;
+    updateNodeData(props.id, {
+      image,
+      previewImage,
+      media,
+      label: asset.name,
+      source: "asset",
+      sourceId: asset.id,
+      type: "image",
+    });
     emit("upload");
   }
 }
 async function getStoryboardImage() {
   const rows = await openStoryboardCheck();
   if (rows.length > 0) {
-    const filePath = rows[0].src!;
-    currentImageUrl.value = filePath;
-    updateNodeData(props.id, { image: filePath });
+    const row = rows[0] as any;
+    const media = normalizeMediaRef((row as any).media ?? row, "image");
+    const image = media ? getMediaOriginalUrl(media) : row?.originalUrl || row?.imageUrl || row?.url || row?.src || "";
+    const previewImage = media ? getMediaPreviewUrl(media) : row?.thumbnail || row?.thumb || row?.previewImage || row?.src || row?.imageUrl || row?.url || image;
+    currentImageUrl.value = image;
+    currentPreviewUrl.value = previewImage;
+    updateNodeData(props.id, {
+      image,
+      previewImage,
+      media,
+      label: row.videoDesc || row.prompt,
+      source: "storyboard",
+      sourceId: row.id,
+      type: "image",
+    });
     emit("upload");
   }
 }
@@ -164,6 +254,23 @@ async function getStoryboardImage() {
             pointer-events: auto;
           }
         }
+      }
+
+      .imageLabel {
+        position: absolute;
+        left: 48px;
+        right: 10px;
+        bottom: 10px;
+        z-index: 2;
+        padding: 3px 6px;
+        border-radius: 4px;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.5);
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        pointer-events: none;
       }
 
       .upload {
