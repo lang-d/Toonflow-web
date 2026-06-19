@@ -1,4 +1,5 @@
 import { ref } from "vue";
+import type { Ref } from "vue";
 import { io, Socket } from "socket.io-client";
 
 export interface SocketEventMap {
@@ -17,7 +18,18 @@ export interface SocketEventMap {
   thinkMessage: { type: "start" | "content" | "end"; messageId: string; delta: string | null; role: "assistant"; name: string };
 }
 
-export function useSocket<T extends SocketEventMap = SocketEventMap>(url = "http://localhost:10588", authOptions?: Record<string, any>) {
+export interface UseSocketReturn<T extends SocketEventMap = SocketEventMap> {
+  connected: Ref<boolean>;
+  socket: {
+    connect: () => void;
+    disconnect: () => void;
+    send: <E extends keyof T & string>(event: E, ...args: T[E] extends void ? [] : [T[E]]) => void;
+    on: <E extends keyof T & string>(event: E, callback: T[E] extends (...args: any[]) => any ? T[E] : (data: T[E]) => void) => void;
+    off: <E extends keyof T & string>(event: E, callback?: T[E] extends (...args: any[]) => any ? T[E] : (data: T[E]) => void) => void;
+  };
+}
+
+export function useSocket<T extends SocketEventMap = SocketEventMap>(url = "http://localhost:10588", authOptions?: Record<string, any>): UseSocketReturn<T> {
   let socket: Socket | null = null;
   const connected = ref(false);
 

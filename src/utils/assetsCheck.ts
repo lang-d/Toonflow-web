@@ -70,6 +70,11 @@ export default function openAssetsSelector(options: AssetsSelectOptions = {}): P
           confirmBtn: window.$t("common.confirm"),
           cancelBtn: window.$t("common.cancel"),
           onConfirm: () => {
+            const cachedSelectedAssets = assetsRef.value?.selectedAssets || [];
+            if (cachedSelectedAssets.length) {
+              finish(cachedSelectedAssets as Asset[]);
+              return;
+            }
             const selectedKeys = assetsRef.value?.selectedRowKeys || [];
             const selectedSubKeys = assetsRef.value?.selectedSubRowKeys || [];
             const data = assetsRef.value?.tableData || [];

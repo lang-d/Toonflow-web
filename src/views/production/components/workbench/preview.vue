@@ -280,7 +280,7 @@ const totalProgress = computed(() => {
 const promptTips = computed(() => [
   { label: $t("workbench.production.preview.sceneDescription"), value: currentShot.value?.description },
   // { label: "运镜方式", value: currentShot.value?.camera != null ? String(currentShot.value.camera) : undefined },
-  { label: $t("workbench.production.preview.promptLabel"), value: currentShot.value?.prompt },
+  { label: "分镜图提示词", value: currentShot.value?.prompt },
 ]);
 
 // ===== 工具函数 =====

@@ -75,13 +75,12 @@ function mergeCachedItemsWithBackend(cached: CachedUploadItem[], backendItems: (
     backendByKey.set(makeUrlKey(item.id, item.sources), item);
   });
 
-  const usedBackendKeys = new Set<string>();
-  const merged = cached.map((item) => {
+  // 本地缓存代表用户手动调整后的引用列表；后端只刷新已有项的元数据，不追加已删除项。
+  return cached.map((item) => {
     if (item.id == null) return item;
     const key = makeUrlKey(item.id, item.sources);
     const fresh = backendByKey.get(key);
     if (!fresh) return item;
-    usedBackendKeys.add(key);
     return {
       ...item,
       ...fresh,
@@ -89,13 +88,6 @@ function mergeCachedItemsWithBackend(cached: CachedUploadItem[], backendItems: (
       sourceRefs: (fresh as any).sourceRefs ?? (item as any).sourceRefs,
     };
   });
-
-  backend.forEach((item) => {
-    if (item.id == null) return;
-    const key = makeUrlKey(item.id, item.sources);
-    if (!usedBackendKeys.has(key)) merged.push(item);
-  });
-  return merged;
 }
 
 function loadPersistedCache(): ImageListCacheData {
@@ -332,7 +324,8 @@ export default defineStore(
         if (!cacheData.value[projectId]) cacheData.value[projectId] = {};
         if (!cacheData.value[projectId][scriptId]) cacheData.value[projectId][scriptId] = {};
         const current = cacheData.value[projectId][scriptId][track.id];
-        cacheData.value[projectId][scriptId][track.id] = current?.length
+        const hasCurrentCache = Object.prototype.hasOwnProperty.call(cacheData.value[projectId][scriptId], track.id);
+        cacheData.value[projectId][scriptId][track.id] = hasCurrentCache
           ? mergeCachedItemsWithBackend(current, track.medias)
           : toCachedItems(track.medias);
       });

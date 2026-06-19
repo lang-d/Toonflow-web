@@ -10,10 +10,10 @@
         <span class="loadingText">{{ $t("workbench.production.editImage.generating") }}</span>
       </div>
       <div v-else class="imageWrapper">
-        <t-image class="image" :src="data.generatedImage" fit="contain" :class="['nodeImage', { selected }]">
+        <t-image class="image" :src="displayImage" fit="contain" :class="['nodeImage', { selected }]">
           <template #overlayContent>
             <div class="imageToolsWrap">
-              <ImageTools :src="data.generatedImage ?? ''" position="br" />
+              <ImageTools :src="originalImage" position="br" />
             </div>
           </template>
         </t-image>
@@ -36,13 +36,23 @@
 <script setup lang="ts">
 import type { GeneratedNodeData } from "../../../utils/editImageType";
 import type { DropdownOption } from "tdesign-vue-next/es/dropdown";
+import { getMediaOriginalUrl, getMediaPreviewUrl } from "@/utils/mediaRef";
+import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 
-defineProps<{
+const props = defineProps<{
   data: GeneratedNodeData;
   generating: boolean;
   selected: boolean;
   options: DropdownOption[];
 }>();
+
+const fallbackImage = computed(() => props.data.generatedImage || props.data.selectedResult?.url || "");
+const displayImage = computed(() =>
+  props.data.resultMedia ? getMediaPreviewUrl(props.data.resultMedia) : getThumbnailImageUrl(fallbackImage.value),
+);
+const originalImage = computed(() =>
+  props.data.resultMedia ? getMediaOriginalUrl(props.data.resultMedia) : getOriginalImageUrl(fallbackImage.value),
+);
 
 const emit = defineEmits<{
   toggleSelected: [];

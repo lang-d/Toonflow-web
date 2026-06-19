@@ -6,7 +6,7 @@
       </div>
       <div class="itemBox fc ac">
         <t-tooltip
-          :content="menu.labelKey ? $t(menu.labelKey) : ''"
+          :content="getMenuLabel(menu)"
           placement="right"
           destroyOnClose
           :showArrow="false"
@@ -45,7 +45,7 @@
         </div>
         <div class="rightBtnList f ac">
           <t-tooltip
-            :content="menu.labelKey ? $t(menu.labelKey) : ''"
+            :content="getMenuLabel(menu)"
             placement="bottom"
             destroyOnClose
             :showArrow="false"
@@ -109,6 +109,7 @@ const menuList = ref([
 const rightBtnList = ref([
   { type: "btn", path: "/novel", labelKey: "workbench.menu.novel", icon: "i-notebook", nodelOnly: true, needProject: true },
   { type: "btn", path: "/scriptAgent", labelKey: "workbench.menu.scriptAgent", icon: "i-color-filter", nodelOnly: true, needProject: true },
+  { type: "btn", path: "/storyAgent", label: "故事创作台", icon: "i-edit-name", needProject: true },
   { type: "btn", path: "/script", labelKey: "workbench.menu.scriptManage", icon: "i-document-folder", needProject: true },
   { type: "btn", path: "/cornerScape", labelKey: "workbench.menu.cornerScape", icon: "i-peoples-two", needProject: true },
   { type: "btn", path: "/production", labelKey: "workbench.menu.production", icon: "i-carousel-video", needProject: true },
@@ -120,6 +121,10 @@ const router = useRouter();
 const route = useRoute();
 const activeMenu = ref(route.path);
 const pageError = ref<{ message: string } | null>(null);
+
+function getMenuLabel(menu: any) {
+  return menu.labelKey ? $t(menu.labelKey) : menu.label || "";
+}
 
 onErrorCaptured((error) => {
   const message = error instanceof Error ? error.message : String(error || "未知错误");

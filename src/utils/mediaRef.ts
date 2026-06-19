@@ -77,13 +77,14 @@ export function normalizeMediaList(input: unknown, fallbackType: MediaRef["type"
 
 export function getMediaPreviewUrl(media?: MediaRef | null, size = 20) {
   if (!media) return "";
-  const value = media.previewUrl || media.url;
+  const value = media.previewUrl || media.url || media.path;
   return media.type === "image" ? getThumbnailImageUrl(value, size) : value;
 }
 
 export function getMediaOriginalUrl(media?: MediaRef | null) {
   if (!media) return "";
-  return media.type === "image" ? getOriginalImageUrl(media.url) : media.url;
+  const value = media.url || media.path;
+  return media.type === "image" ? getOriginalImageUrl(value) : value;
 }
 
 export function getMediaPathForGeneration(media?: MediaRef | null) {

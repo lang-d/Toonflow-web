@@ -525,6 +525,7 @@ const selectedRowKeys = ref<Array<string | number>>([]);
 const selectedSubRowKeys = ref<Array<string | number>>([]);
 const expandedRowKeys = ref<Array<string | number>>([]);
 const loading = ref(false);
+const selectedAssets = computed(() => [...selectedParentAssetMap.value.values(), ...selectedSubAssetMap.value.values()]);
 // 是否正在处于任意生成中（提示词或图片），基于 item 的实际 state/promptState 判断
 const isGenerating = (id: number) => {
   const item = findAssetById(id);
@@ -534,12 +535,14 @@ const isGenerating = (id: number) => {
 interface Asset {
   id: number;
   assetsId: number | null;
+  parentName?: string;
+  parentType?: Asset["type"];
   name: string;
   prompt: string;
   describe: string;
   remark: string;
   src: string;
-  type: "role" | "tool" | "scene" | "clip"; // "角色" | "道具" | "场景" | "素材"
+  type: "role" | "tool" | "scene" | "clip" | "audio"; // "角色" | "道具" | "场景" | "素材" | "音频"
   state: string;
   sonAssets?: Asset[]; // 子资产列表
   imageId: number;
@@ -550,6 +553,8 @@ interface Asset {
   media?: MediaRef;
 }
 const tableData = ref<Asset[]>([]);
+const selectedParentAssetMap = ref(new Map<number, Asset>());
+const selectedSubAssetMap = ref(new Map<number, Asset>());
 const taskCenter = useTaskCenterStore();
 const assetImageBindings = new Map<number, () => void>();
 const assetPromptBindings = new Map<number, () => void>();
@@ -593,6 +598,7 @@ async function getFilteredData(type: string) {
     }
     pagination.value.total = data.total || 0;
     syncAssetRuntimeTasks();
+    syncVisibleSelectionFromCache();
     return tableData.value;
   } catch (error) {
     console.error("加载资产数据失败:", error);
@@ -620,8 +626,10 @@ async function loadCurrentTabData() {
 }
 function selectAssetOptions(value: TabValue) {
   searchText.value = "";
-  selectedRowKeys.value = [];
-  selectedSubRowKeys.value = [];
+  if (!props.selectorMode) {
+    selectedRowKeys.value = [];
+    selectedSubRowKeys.value = [];
+  }
   expandedRowKeys.value = [];
   pagination.value.page = 1;
   loadCurrentTabData();
@@ -1093,20 +1101,67 @@ const subAudioColumns: TableProps["columns"] = [
   },
 ];
 // 选择行（正在生成中的行不允许勾选）
+function syncVisibleSelectionFromCache() {
+  if (!props.selectorMode) return;
+  selectedRowKeys.value = tableData.value.filter((item) => selectedParentAssetMap.value.has(item.id)).map((item) => item.id);
+  selectedSubRowKeys.value = tableData.value.flatMap((item) => item.sonAssets ?? []).filter((item) => selectedSubAssetMap.value.has(item.id)).map((item) => item.id);
+}
+
+function clearSelectionCache() {
+  selectedParentAssetMap.value.clear();
+  selectedSubAssetMap.value.clear();
+}
+
+function updateParentSelectionCache(value: Array<string | number>) {
+  const selected = new Set(value.map(Number));
+  tableData.value.forEach((item) => {
+    if (isGenerating(item.id)) return;
+    if (selected.has(item.id)) {
+      selectedParentAssetMap.value.set(item.id, item);
+    } else {
+      selectedParentAssetMap.value.delete(item.id);
+    }
+  });
+}
+
+function updateSubSelectionCache(value: Array<string | number>) {
+  const selected = new Set(value.map(Number));
+  tableData.value.forEach((item) => {
+    item.sonAssets?.forEach((sub) => {
+      if (isGenerating(sub.id)) return;
+      if (selected.has(sub.id)) {
+        selectedSubAssetMap.value.set(sub.id, {
+          ...sub,
+          parentName: item.name,
+          parentType: item.type,
+        });
+      } else {
+        selectedSubAssetMap.value.delete(sub.id);
+      }
+    });
+  });
+}
+
 function handleSelectChange(value: Array<string | number>) {
   const filtered = value.filter((key) => !isGenerating(key as number));
   if (!props.multiple) {
+    clearSelectionCache();
     selectedRowKeys.value = filtered.length > 0 ? [filtered[filtered.length - 1]] : [];
+    updateParentSelectionCache(selectedRowKeys.value);
   } else {
     selectedRowKeys.value = filtered;
+    updateParentSelectionCache(filtered);
   }
 }
 // 子资产选择行
 function handleSubSelectChange(value: Array<string | number>) {
   if (!props.multiple) {
+    clearSelectionCache();
     selectedSubRowKeys.value = value.length > 0 ? [value[value.length - 1]] : [];
+    updateSubSelectionCache(selectedSubRowKeys.value);
   } else {
     selectedSubRowKeys.value = value;
+    updateSubSelectionCache(value);
   }
 }
 function handleExpandChange(value: Array<string | number>) {
@@ -1192,6 +1247,7 @@ function handleDelete(row: any) {
 defineExpose({
   selectedRowKeys,
   selectedSubRowKeys,
+  selectedAssets,
   tableData,
 });
 

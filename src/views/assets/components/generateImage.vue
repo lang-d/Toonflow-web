@@ -96,7 +96,7 @@
                   </template>
                 </t-image>
                 <div class="preview" v-show="hoveredImageIndex === index && img.state === '已完成'">
-                  <i-preview-open theme="outline" size="25" fill="#ffffff" @click.stop="handlePreview(img.src)" />
+                  <i-preview-open theme="outline" size="25" fill="#ffffff" @click.stop="handlePreview(img.originalSrc || img.src)" />
                 </div>
                 <div class="selected" v-show="selectedImageIndex === index && img.state === '已完成'">
                   <i-check-one theme="filled" size="25" fill="#000" />
@@ -144,6 +144,8 @@ import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 import axios from "@/utils/axios";
 import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
+import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 const props = defineProps<{
   formData: {
     id?: number;
@@ -274,7 +276,17 @@ function handleCustomUpload(files: any[]): void {
 }
 
 //生成结果
-const resultImages = ref<{ id: string; src: string; state: string; selected?: boolean; taskId?: string; legacyTaskId?: string | number }[]>([]);
+type GeneratedImageItem = {
+  id: string | number;
+  src: string;
+  originalSrc?: string;
+  state: string;
+  selected?: boolean;
+  taskId?: string;
+  legacyTaskId?: string | number;
+};
+
+const resultImages = ref<GeneratedImageItem[]>([]);
 const taskCenter = useTaskCenterStore();
 let releaseCurrentImageTask: (() => void) | null = null;
 //预览图片
@@ -335,14 +347,20 @@ function bindImageTask(taskId?: string, legacyTaskId?: string | number) {
 
 async function fetchGeneratedImages() {
   const { data } = await axios.post("/assets/getImage", { assetsId: props.formData.id });
-  const images = data.tempAssets.map((item: { id: string; filePath: string; state: string; selected?: boolean; taskId?: string; legacyTaskId?: string | number }) => ({
-    id: item.id,
-    src: item.filePath,
-    state: item.state,
-    selected: item.selected ?? false,
-    taskId: item.taskId,
-    legacyTaskId: item.legacyTaskId,
-  }));
+  const images = (data.tempAssets ?? []).map((item: any): GeneratedImageItem => {
+    const media = normalizeMediaRef(item.media ?? item, "image");
+    const fallbackPreview = item.previewUrl || item.thumbnail || item.thumb || item.filePath || item.url || item.src || item.imageUrl || "";
+    const fallbackOriginal = item.url || item.originalUrl || item.imageUrl || item.filePath || item.src || "";
+    return {
+      id: item.id,
+      src: media ? getMediaPreviewUrl(media) : getThumbnailImageUrl(fallbackPreview),
+      originalSrc: media ? getMediaOriginalUrl(media) : getOriginalImageUrl(fallbackOriginal),
+      state: item.state,
+      selected: item.selected ?? false,
+      taskId: item.taskId,
+      legacyTaskId: item.legacyTaskId,
+    };
+  });
   resultImages.value = images;
   const selectedIdx = images.findIndex((img: { selected?: boolean }) => img.selected);
   if (selectedIdx !== -1) {

@@ -51,6 +51,11 @@ const router = createRouter({
           component: () => import("@/views/scriptAgent/index.vue"),
         },
         {
+          path: "/storyAgent",
+          meta: { requiresProject: true },
+          component: () => import("@/views/storyAgent/index.vue"),
+        },
+        {
           path: "/cornerScape",
           meta: { requiresProject: true },
           component: () => import("@/views/cornerScape/index.vue"),

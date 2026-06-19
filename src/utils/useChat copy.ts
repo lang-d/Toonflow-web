@@ -83,7 +83,7 @@ export interface UseChatOptions {
   manageLifecycle?: boolean;
 }
 
-export function useChat(options: UseChatOptions) {
+export function useChat(options: UseChatOptions): any {
   const { url, auth, autoConnect = true, xmlTags = [], keepXmlInMessage = true, onXmlTag, onError, onConnect, onDisconnect, manageLifecycle = true } = options;
 
   const socket = shallowRef<Socket | null>(null);
