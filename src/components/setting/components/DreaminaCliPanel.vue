@@ -407,6 +407,7 @@ const creditSummary = computed(() => {
 const DREAMINA_MODEL_LABELS: Record<string, string> = {
   "dreamina:seedance2.0": "Seedance 2.0",
   "dreamina:seedance2.0fast": "Seedance 2.0 Fast",
+  "dreamina:seedance2.0mini": "Seedance 2.0 Mini",
   "dreamina:seedance2.0_vip": "Seedance 2.0 VIP",
   "dreamina:seedance2.0fast_vip": "Seedance 2.0 Fast VIP",
 };
@@ -418,6 +419,9 @@ function getDreaminaProviderModelKey(modelName: string) {
   const aliases: Record<string, string> = {
     "seedance2.0-fast": "seedance2.0fast",
     "seedance2.0_fast": "seedance2.0fast",
+    "seedance2.0-mini": "seedance2.0mini",
+    "seedance2.0_mini": "seedance2.0mini",
+    "seedance2.0mini": "seedance2.0mini",
     "seedance2.0-fast-vip": "seedance2.0fast_vip",
     "seedance2.0-fast_vip": "seedance2.0fast_vip",
     "seedance2.0_fast_vip": "seedance2.0fast_vip",
