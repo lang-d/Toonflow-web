@@ -16,7 +16,7 @@
             <t-tooltip theme="primary" v-else-if="item.fileType == 'audio'" :content="item?.prompt || ''">
               <div class="mediaPreview audioPreview">
                 <i-acoustic size="20" />
-                <span class="mediaLabel">闊抽</span>
+                <span class="mediaLabel">音频</span>
               </div>
             </t-tooltip>
             <div v-else-if="item.fileType == 'video'" class="mediaPreview videoPreview">
@@ -35,7 +35,7 @@
             <i-close size="12" />
           </div>
           <div class="source">
-            <t-tag size="small">{{ getSourceLabel(item) }}</t-tag>
+            <t-tag size="small" :title="getSourceTip(item)">{{ getSourceLabel(item) }}</t-tag>
           </div>
         </div>
       </VueDraggable>
@@ -68,7 +68,7 @@
           <i-close size="12" />
         </div>
         <div class="source">
-          <t-tag size="small">{{ getSourceLabel(item) }}</t-tag>
+          <t-tag size="small" :title="getSourceTip(item)">{{ getSourceLabel(item) }}</t-tag>
         </div>
       </div>
     </template>
@@ -104,7 +104,7 @@
             <i-close size="12" />
           </div>
           <div class="source">
-            <t-tag size="small">{{ getSourceLabel(imageList?.[index]) }}</t-tag>
+            <t-tag size="small" :title="getSourceTip(imageList?.[index])">{{ getSourceLabel(imageList?.[index]) }}</t-tag>
           </div>
         </div>
         <template v-else>
@@ -126,16 +126,30 @@
       width="800px"
       placement="center">
       <div class="storyboardGrid">
-        <div class="storyboardItem" v-for="sb in storyboardList" :key="sb.id" @click="pickStoryboard(sb)">
+        <div
+          class="storyboardItem"
+          v-for="sb in storyboardList"
+          :key="sb.id"
+          :class="{ selected: isStoryboardSelected(sb) }"
+          @click="handleStoryboardClick(sb)">
           <div class="imageToolsWrap" v-if="sb?.index != null">
             {{ `P${sb?.index + 1}` }}
           </div>
           <img v-if="sb.src" :src="sb.src" />
           <div v-else class="textBox ac jc">
-            <t-tooltip theme="primary" :content="sb?.videoDesc || ''">
+            <t-tooltip theme="primary" :content="getStoryboardFactSummary(sb)">
               <span style="font-size: 20px">{{ `分镜 ${sb?.index + 1 || ""}` }}</span>
             </t-tooltip>
           </div>
+        </div>
+      </div>
+      <div v-if="canMultiPickStoryboard" class="storyboardDialogActions">
+        <span class="storyboardSelectedCount">{{ $t("workbench.production.node.storyboard.selectedCount", { count: selectedStoryboardIds.length }) }}</span>
+        <div class="storyboardActionButtons">
+          <t-button variant="outline" @click="storyboardDialogVisible = false">{{ $t("common.cancel") }}</t-button>
+          <t-button theme="primary" :disabled="!selectedStoryboardIds.length" @click="confirmStoryboardSelection">
+            {{ $t("common.confirm") }}
+          </t-button>
         </div>
       </div>
     </t-dialog>
@@ -161,6 +175,7 @@ const imageList = defineModel<UploadItem[]>({
 });
 //分镜选择弹窗
 const storyboardDialogVisible = ref(false);
+const selectedStoryboardIds = ref<number[]>([]);
 
 function getReferenceThumbnail(item?: UploadItem) {
   if (!item) return "";
@@ -234,8 +249,14 @@ function normalizeCategory(type: string | undefined): UploadCategory {
 function getSourceLabel(item?: UploadItem) {
   if (!item) return "";
   if (item.sources == "storyboard") return $t("workbench.generate.storyboard");
-  if (item.sources == "merged") return "合图";
+  if (item.sources == "merged") return "合图参考";
+  if (item.sources == "directorAsset") return "导演资产";
   return $t("workbench.generate.assets");
+}
+
+function getSourceTip(item?: UploadItem) {
+  if (item?.sources === "merged") return "合图只是视觉参考快照，不代表单个分镜，也不会替代分镜组明细。";
+  return "";
 }
 
 //判断是否显示添加参考图
@@ -267,11 +288,13 @@ const mixedClipMediaTypes = computed<ClipMediaType[]>(() => {
   const map: Record<string, ClipMediaType> = { audioReference: "audio", imageReference: "image", videoReference: "video" };
   return mode.filter((m) => m in map).map((m) => map[m]);
 });
-let currentSlot: "start" | "end" | "" = "";
+const currentSlot = ref<"start" | "end" | "">("");
+const canMultiPickStoryboard = computed(() => !currentSlot.value && props.mode !== "singleImage");
 function handleMixedAdd(slot: "start" | "end" | "" = "") {
   if (!props.mode) return window.$message.error($t("workbench.generate.notSelectMode"));
-  currentSlot = slot;
-  const multiple = Array.isArray(parseMode(props.mode as string));
+  currentSlot.value = slot;
+  selectedStoryboardIds.value = [];
+  const multiple = !slot && props.mode !== "singleImage";
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.selectSource"),
     confirmBtn: $t("workbench.generate.confirm"),
@@ -338,6 +361,7 @@ function handleMixedAdd(slot: "start" | "end" | "" = "") {
     },
     onCancel: () => {
       dlg.destroy();
+      selectedStoryboardIds.value = [];
       storyboardDialogVisible.value = true;
     },
   });
@@ -347,12 +371,10 @@ function clearImage(index: number) {
   list[index] = { ...EMPTY_SLOT };
   imageList.value = list;
 }
-/** 分镜弹窗选中回调 */
-function pickStoryboard(sb: StoryboardItem) {
-  storyboardDialogVisible.value = false;
+function createStoryboardUploadItem(sb: StoryboardItem): UploadItem {
   const fileType = "image";
   const media = normalizeMediaRef((sb as any).media ?? sb, "image");
-  const newItem = {
+  return {
     fileType,
     sources: "storyboard",
     src: media ? getMediaPreviewUrl(media) : sb.src,
@@ -362,16 +384,57 @@ function pickStoryboard(sb: StoryboardItem) {
     thumbnail: sb.thumbnail ?? undefined,
     thumb: sb.thumb ?? undefined,
     id: sb.id,
-    prompt: sb.videoDesc ?? undefined,
+    prompt: getStoryboardFactSummary(sb) || undefined,
     name: `P${sb.index + 1}`,
     index: sb.index,
   } as UploadItem;
+}
 
-  if (currentSlot === "start" || currentSlot === "end") {
-    setFrameSlot(currentSlot, newItem);
+function getStoryboardFactSummary(sb: StoryboardItem) {
+  return [sb.location, sb.timeOfDay, sb.picture, sb.action, sb.dialogue, sb.sound]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .join(" 路 ");
+}
+
+function isStoryboardSelected(sb: StoryboardItem) {
+  return selectedStoryboardIds.value.includes(sb.id);
+}
+
+function toggleStoryboardSelection(sb: StoryboardItem) {
+  selectedStoryboardIds.value = isStoryboardSelected(sb)
+    ? selectedStoryboardIds.value.filter((id) => id !== sb.id)
+    : [...selectedStoryboardIds.value, sb.id];
+}
+
+function handleStoryboardClick(sb: StoryboardItem) {
+  if (canMultiPickStoryboard.value) {
+    toggleStoryboardSelection(sb);
+    return;
+  }
+  pickStoryboard(sb);
+}
+
+/** 分镜弹窗选中回调 */
+function pickStoryboard(sb: StoryboardItem) {
+  storyboardDialogVisible.value = false;
+  const newItem = createStoryboardUploadItem(sb);
+
+  if (currentSlot.value === "start" || currentSlot.value === "end") {
+    setFrameSlot(currentSlot.value, newItem);
   } else {
     imageList.value = [...imageList.value, newItem];
   }
+}
+
+function confirmStoryboardSelection() {
+  const selectedItems = props.storyboardList
+    .filter((item) => selectedStoryboardIds.value.includes(item.id))
+    .map(createStoryboardUploadItem);
+  if (!selectedItems.length) return;
+  imageList.value = [...imageList.value, ...selectedItems];
+  selectedStoryboardIds.value = [];
+  storyboardDialogVisible.value = false;
 }
 function splitImage(index: number) {
   const list = [...imageList.value];
@@ -542,6 +605,26 @@ function splitImage(index: number) {
         border-color: var(--td-brand-color);
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
       }
+      &.selected {
+        border-color: var(--td-brand-color);
+        box-shadow: 0 0 0 2px rgba(0, 82, 217, 0.18);
+      }
+      &.selected::after {
+        content: "✓";
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        z-index: 2;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: var(--td-brand-color);
+        color: #fff;
+        font-size: 14px;
+        line-height: 22px;
+        text-align: center;
+        font-weight: 700;
+      }
       img {
         width: 100%;
         aspect-ratio: 16/9;
@@ -555,6 +638,21 @@ function splitImage(index: number) {
         border: 1px solid #ccc;
       }
     }
+  }
+  .storyboardDialogActions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 4px 0;
+  }
+  .storyboardSelectedCount {
+    color: var(--td-text-color-secondary);
+    font-size: 13px;
+  }
+  .storyboardActionButtons {
+    display: flex;
+    gap: 8px;
   }
 }
 </style>

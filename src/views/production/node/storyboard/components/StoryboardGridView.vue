@@ -9,9 +9,20 @@
               <t-tag class="frameTypeTag" :style="{ backgroundColor: tagColors[index % tagColors.length] }">
                 S{{ String(index + 1).padStart(2, "0") }}
               </t-tag>
+              <t-tag v-if="item.factStatus && item.factStatus !== 'ready'" class="frameFactTag" size="small" :theme="getFactStatusTheme(item.factStatus)" variant="light">
+                {{ getFactStatusLabel(item.factStatus) }}
+              </t-tag>
             </div>
-            <div v-if="item.src && item.state === '已完成'" class="frameImgWrap" :style="{ aspectRatio: getImageRatio(item.src) }" @click="emit('editStoryboardImage', item, [item.src])">
-              <img :src="item.src" class="frameImg" loading="lazy" @load="emit('imageLoad', item.src, $event)" />
+            <div
+              v-if="getStoryboardImageUrl(item, 'display') && item.state === '已完成'"
+              class="frameImgWrap"
+              :style="{ aspectRatio: getImageRatio(getStoryboardImageUrl(item, 'display')) }"
+              @click="emit('editStoryboardImage', item, [getStoryboardImageUrl(item, 'preview')])">
+              <img
+                :src="getStoryboardImageUrl(item, 'display')"
+                class="frameImg"
+                loading="lazy"
+                @load="emit('imageLoad', getStoryboardImageUrl(item, 'display'), $event)" />
             </div>
             <div v-else class="generatingPlaceholder" :style="{ aspectRatio: defaultImageRatio }" @click="emit('editStoryboardImage', item, [])">
               <t-loading v-if="item.state === '生成中'" size="small" />
@@ -24,7 +35,7 @@
               <t-button size="small" shape="circle" @click="emit('regenerateSingleImage', item)">
                 <template #icon><i-play-one /></template>
               </t-button>
-              <t-button size="small" shape="circle" @click="emit('editStoryboardImage', item, [item.src || ''])">
+              <t-button size="small" shape="circle" @click="emit('editStoryboardImage', item, [getStoryboardImageUrl(item, 'preview') || ''])">
                 <template #icon><i-edit /></template>
               </t-button>
               <t-button size="small" shape="circle" theme="danger" @click="emit('remove', item.id!)">
@@ -47,6 +58,7 @@ defineProps<{
   defaultImageRatio: string;
   tagColors: string[];
   getImageRatio: (src: string) => string;
+  getStoryboardImageUrl: (row: any, purpose?: "preview" | "display") => string;
 }>();
 
 const emit = defineEmits<{
@@ -56,4 +68,16 @@ const emit = defineEmits<{
   remove: [id: number];
   imageLoad: [src: string, event: Event];
 }>();
+
+function getFactStatusLabel(status?: string) {
+  if (status === "draft") return "草稿";
+  if (status === "legacy") return "旧数据";
+  return status || "";
+}
+
+function getFactStatusTheme(status?: string) {
+  if (status === "draft") return "warning";
+  if (status === "legacy") return "default";
+  return "success";
+}
 </script>

@@ -14,6 +14,17 @@
 
     <div class="content">
       <t-empty v-if="!storyboard.length" style="margin-top: 16px" />
+      <t-alert
+        v-if="false && hasUnreadyFacts"
+        class="historyFactAlert"
+        theme="warning"
+        message="当前包含历史分镜数据，建议重新生成或结构化重整分镜表。" />
+
+      <t-alert
+        v-if="hasUnreadyFacts"
+        class="historyFactAlert"
+        theme="warning"
+        message="当前包含草稿或旧数据分镜，可继续展示、编辑和生成分镜图，但生成视频前需要补齐结构化分镜事实。" />
 
       <StoryboardTableView
         v-if="storyboard.length && viewMode === 'table'"
@@ -27,6 +38,7 @@
         :get-storyboard-references="getStoryboardReferences"
         :get-grouped-references="getGroupedReferences"
         :get-image-ratio="getImageRatio"
+        :get-storyboard-image-url="getStoryboardImageUrl"
         @toggle-group="toggleGroup"
         @generate-group="generateGroup"
         @toggle-select="toggleSelect"
@@ -48,6 +60,7 @@
         :default-image-ratio="defaultImageRatio"
         :tag-colors="tagColors"
         :get-image-ratio="getImageRatio"
+        :get-storyboard-image-url="getStoryboardImageUrl"
         @update:selected-ids="selectedIds = $event"
         @edit-storyboard-image="editStoryboaryImage"
         @regenerate-single-image="regenerateSingleImage"
@@ -85,10 +98,10 @@
       v-model:visible="promptEditorVisible"
       v-model:prompt="promptDraft"
       v-model:primary-node-id="promptPrimaryNodeId"
+      v-model:facts="promptFactDraft"
       :loading="promptEditorLoading"
       :saving="promptEditorSaving"
       :shot-label="promptEditorShotLabel"
-      :video-desc="currentPromptTarget?.videoDesc || ''"
       :references="promptDraftReferenceRows"
       :node-options="promptNodeOptions"
       @pick-assets="pickAssetsForPrompt"
@@ -124,6 +137,7 @@
       :history-items="historyItems"
       :history-selected-id="historySelectedId"
       @select-history-item="selectHistoryItem" />
+
   </t-card>
 </template>
 
@@ -133,7 +147,7 @@ import editImage from "../../components/editImage/index.vue";
 import { DialogPlugin, LoadingPlugin } from "tdesign-vue-next";
 import { Handle, Position } from "@vue-flow/core";
 import axios from "@/utils/axios";
-import type { AssetItem, Storyboard, StoryboardReference } from "../../utils/flowBuilder";
+import { parseStoryboardTableRow, type AssetItem, type Storyboard, type StoryboardReference } from "../../utils/flowBuilder";
 import projectStore from "@/stores/project";
 import openAssetsSelector from "@/utils/assetsCheck";
 import productionAgentStore from "@/stores/productionAgent";
@@ -196,6 +210,33 @@ const promptEditorLoading = ref(false);
 const promptEditorSaving = ref(false);
 const currentPromptTarget = ref<Storyboard | null>(null);
 const promptDraft = ref("");
+ type StoryboardFactKey =
+  | "scene"
+  | "location"
+  | "timeOfDay"
+  | "sceneContinuityId"
+  | "picture"
+  | "action"
+  | "shotSize"
+  | "cameraMove"
+  | "dialogue"
+  | "sound"
+  | "visibleEmotion";
+ type StoryboardFactDraft = Record<StoryboardFactKey, string>;
+ const storyboardFactKeys: StoryboardFactKey[] = [
+  "scene",
+  "location",
+  "timeOfDay",
+  "sceneContinuityId",
+  "picture",
+  "action",
+  "shotSize",
+  "cameraMove",
+  "dialogue",
+  "sound",
+  "visibleEmotion",
+];
+const promptFactDraft = ref<StoryboardFactDraft>(createEmptyStoryboardFacts());
 const promptDraftReferences = ref<ReferenceImage[]>([]);
 const promptPrimaryNodeId = ref("");
 const promptNodeOptions = ref<{ label: string; value: string }[]>([]);
@@ -223,12 +264,12 @@ const currentRowStoryboardInfo = ref<{ id: number | null; insertAfterIndex: numb
 
 const tagColors = ["#5bccb3", "#9c7cfc", "#fbbf24", "#5b9afc", "#e86b6b", "#7cb8fc", "#e8a855", "#34d399"];
 const tableColumns = [
-  { colKey: "shot", title: $t("workbench.production.node.storyboard.shot"), width: 118, cell: "shot" },
-  { colKey: "assets", title: $t("workbench.production.node.storyboard.relatedAssets"), width: 250, cell: "assets" },
-  { colKey: "prompt", title: $t("workbench.production.node.storyboard.prompt"), width: 390, cell: "prompt" },
-  { colKey: "image", title: $t("workbench.production.node.storyboard.image"), width: 190, cell: "image" },
-  { colKey: "duration", title: $t("workbench.production.node.storyboard.duration"), width: 112, cell: "duration" },
-  { colKey: "operate", title: $t("common.operation"), width: 82, cell: "operate" },
+  { colKey: "shot", title: $t("workbench.production.node.storyboard.shot"), width: 96, cell: "shot" },
+  { colKey: "assets", title: $t("workbench.production.node.storyboard.relatedAssets"), width: 220, cell: "assets" },
+  { colKey: "prompt", title: $t("workbench.production.node.storyboard.prompt"), width: 360, cell: "prompt" },
+  { colKey: "image", title: $t("workbench.production.node.storyboard.image"), width: 170, cell: "image" },
+  { colKey: "duration", title: $t("workbench.production.node.storyboard.duration"), width: 100, cell: "duration" },
+  { colKey: "operate", title: $t("common.operation"), width: 72, cell: "operate" },
 ];
 
 const defaultImageRatio = computed(() => (project.value?.videoRatio || "16:9").replace(":", " / "));
@@ -262,7 +303,68 @@ const promptEditorShotLabel = computed(() => {
   if (!currentPromptTarget.value) return "";
   return `S${String(getStoryboardIndex(currentPromptTarget.value) + 1).padStart(2, "0")}`;
 });
+const hasUnreadyFacts = computed(() => storyboard.value.some((item) => item.factStatus !== "ready"));
 const promptDraftReferenceRows = computed(() => promptDraftReferences.value.map(referenceImageToView));
+
+function createEmptyStoryboardFacts(): StoryboardFactDraft {
+  return {
+    scene: "",
+    location: "",
+    timeOfDay: "",
+    sceneContinuityId: "",
+    picture: "",
+    action: "",
+    shotSize: "",
+    cameraMove: "",
+    dialogue: "",
+    sound: "",
+    visibleEmotion: "",
+  };
+}
+
+function getStoryboardFacts(row: Storyboard): StoryboardFactDraft {
+  const tableRow = parseStoryboardTableRow(row.tableRowJson);
+  const facts = createEmptyStoryboardFacts();
+  facts.scene = String(row.scene ?? "");
+  facts.location = String(tableRow?.location ?? row.location ?? "");
+  facts.timeOfDay = String(tableRow?.timeOfDay ?? row.timeOfDay ?? "");
+  facts.sceneContinuityId = String(tableRow?.sceneContinuityId ?? row.sceneContinuityId ?? "");
+  facts.picture = String(tableRow?.picture ?? row.picture ?? "");
+  facts.action = String(tableRow?.action ?? row.action ?? "");
+  facts.shotSize = String(tableRow?.shotSize ?? row.shotSize ?? "");
+  facts.cameraMove = String(tableRow?.cameraMove ?? row.cameraMove ?? "");
+  facts.dialogue = tableRow?.dialogue?.length
+    ? tableRow.dialogue.map((item) => [item.speaker, item.text].filter(Boolean).join("：")).join("\n")
+    : String(row.dialogue ?? "");
+  facts.sound = tableRow?.soundEffects?.length ? tableRow.soundEffects.join("\n") : String(row.sound ?? "");
+  facts.visibleEmotion = String(tableRow?.visibleEmotion ?? row.visibleEmotion ?? "");
+  return facts;
+}
+
+function getStoryboardFactPayload(row: Storyboard) {
+  return storyboardFactKeys.reduce<Record<string, string | null>>((payload, key) => {
+    payload[key] = String(row[key] ?? "").trim() || null;
+    return payload;
+  }, {});
+}
+
+function getStoryboardFactDraftPayload(facts: StoryboardFactDraft) {
+  return storyboardFactKeys.reduce<Record<string, string | null>>((payload, key) => {
+    payload[key] = facts[key]?.trim() || null;
+    return payload;
+  }, {});
+}
+
+function notifyStoryboardIssues(data: any) {
+  const issues = Array.isArray(data?.issues) ? data.issues : [];
+  if (!issues.length) return;
+  const summary = issues
+    .slice(0, 3)
+    .map((issue: any) => issue?.message)
+    .filter(Boolean)
+    .join("；");
+  window.$message.warning(summary || "分镜已保存为草稿，请补齐结构化分镜事实。");
+}
 
 function toggleGroup(key: string) {
   collapsedGroupKeys.value = collapsedGroupKeys.value.includes(key)
@@ -312,30 +414,38 @@ function findAssetById(assetId: number) {
 function getStoryboardReferences(row: Storyboard): ReferenceView[] {
   const assetRefs: ReferenceView[] = (row.associateAssetsIds ?? []).flatMap((id) => {
       const asset = findAssetById(id);
-      if (!asset?.src) return [];
+      const media = normalizeMediaRef((asset as any)?.media ?? asset, "image");
+      const original = media ? getMediaOriginalUrl(media) : (asset as any)?.originalUrl || (asset as any)?.imageUrl || asset?.src || "";
+      const preview = media ? getMediaPreviewUrl(media) : (asset as any)?.thumbnail || (asset as any)?.thumb || asset?.src || original;
+      if (!preview && !original) return [];
       return [{
         key: `asset-${id}`,
         id,
         source: "asset" as const,
         sourceId: id,
-        src: getThumbnailImageUrl(asset.src),
-        originalSrc: getOriginalImageUrl(asset.src),
-        label: asset.name || String(id),
-        group: assetTypeLabel(asset!.type),
+        src: getThumbnailImageUrl(preview || original),
+        originalSrc: getOriginalImageUrl(original || preview),
+        label: asset?.name || String(id),
+        group: assetTypeLabel(asset?.type),
         type: "image" as const,
       }];
     });
-  const localRefs = (row.referenceImages ?? []).map((item) => ({
-    key: `${item.source || "local"}-${item.id}`,
-    localId: item.id,
-    source: (item.source || "local") as "local" | "storyboard",
-    sourceId: item.sourceId ?? item.id,
-    src: getThumbnailImageUrl(item.previewUrl || item.url),
-    originalSrc: getOriginalImageUrl(item.url),
-    label: item.name,
-    group: assetTypeLabel(item.type ?? "image"),
-    type: "image" as const,
-  }));
+  const localRefs = (row.referenceImages ?? []).map((item) => {
+    const media = normalizeMediaRef((item as any).media ?? item, "image");
+    const preview = media ? getMediaPreviewUrl(media) : item.previewUrl || item.url;
+    const original = media ? getMediaOriginalUrl(media) : item.url || item.previewUrl;
+    return {
+      key: `${item.source || "local"}-${item.id}`,
+      localId: item.id,
+      source: (item.source || "local") as "local" | "storyboard",
+      sourceId: item.sourceId ?? item.id,
+      src: getThumbnailImageUrl(preview || original || ""),
+      originalSrc: getOriginalImageUrl(original || preview || ""),
+      label: item.name,
+      group: assetTypeLabel(item.type ?? "image"),
+      type: "image" as const,
+    };
+  });
   return [...assetRefs, ...localRefs];
 }
 
@@ -394,8 +504,8 @@ function getLocalReferenceImages(row: Storyboard): ReferenceImage[] {
 function getStoryboardImageUrl(item: Storyboard, purpose: "preview" | "display" = "display") {
   const media = normalizeMediaRef((item as any).media ?? item, "image");
   if (media) return purpose === "preview" ? getMediaOriginalUrl(media) : getMediaPreviewUrl(media);
-  if (purpose === "preview") return item.originalUrl || item.imageUrl || item.url || item.src || "";
-  return item.src || item.thumbnail || item.thumb || item.imageUrl || item.url || "";
+  if (purpose === "preview") return getOriginalImageUrl(item.originalUrl || item.imageUrl || item.url || item.src || "");
+  return getThumbnailImageUrl(item.thumbnail || item.thumb || item.src || item.imageUrl || item.url || "");
 }
 
 function getPreviewImageFit(item: Storyboard): "cover" | "contain" {
@@ -408,9 +518,11 @@ function getPreviewImageFit(item: Storyboard): "cover" | "contain" {
 }
 
 function normalizeReferenceImage(reference: ReferenceImage): ReferenceImage {
+  const media = normalizeMediaRef(reference.media ?? reference, "image");
   return {
-    image: getOriginalImageUrl(reference.image),
-    previewImage: getThumbnailImageUrl(reference.previewImage || reference.image),
+    image: media ? getMediaOriginalUrl(media) : getOriginalImageUrl(reference.image),
+    previewImage: media ? getMediaPreviewUrl(media) : getThumbnailImageUrl(reference.previewImage || reference.image),
+    media,
     label: reference.label,
     source: reference.source,
     sourceId: reference.sourceId,
@@ -420,14 +532,17 @@ function normalizeReferenceImage(reference: ReferenceImage): ReferenceImage {
 }
 
 function referenceImageToView(reference: ReferenceImage, index: number): ReferenceView {
+  const media = normalizeMediaRef(reference.media ?? reference, "image");
+  const preview = media ? getMediaPreviewUrl(media) : reference.previewImage || reference.image;
+  const original = media ? getMediaOriginalUrl(media) : reference.image || reference.previewImage || "";
   return {
     key: `${reference.source || "local"}-${reference.sourceId ?? index}`,
     id: reference.source === "asset" && typeof reference.sourceId === "number" ? reference.sourceId : undefined,
     localId: reference.source !== "asset" ? String(reference.sourceId ?? index) : undefined,
     source: reference.source || "local",
     sourceId: reference.sourceId,
-    src: getThumbnailImageUrl(reference.previewImage || reference.image),
-    originalSrc: getOriginalImageUrl(reference.image),
+    src: getThumbnailImageUrl(preview || original),
+    originalSrc: getOriginalImageUrl(original || preview),
     label: reference.label || $t("workbench.production.editImage.reference", { index: index + 1 }),
     group: reference.group || assetTypeLabel(reference.source === "local" ? "image" : ""),
     type: reference.type || "image",
@@ -464,7 +579,7 @@ function enrichLegacyReferences(references: ReferenceImage[], row: Storyboard) {
 
 function resolvePrimaryNode(nodes: NodeType[], row: Storyboard) {
   const generatedNodes = nodes.filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated");
-  const selectedImage = row.originalUrl || row.imageUrl || row.src || "";
+  const selectedImage = getStoryboardImageUrl(row, "preview");
   const imageMatched = selectedImage
     ? generatedNodes.find(
         (node) =>
@@ -495,6 +610,7 @@ watch(promptPrimaryNodeId, (nodeId) => {
 async function openPromptEditor(row: Storyboard) {
   currentPromptTarget.value = row;
   promptDraft.value = row.prompt || "";
+  promptFactDraft.value = getStoryboardFacts(row);
   promptDraftReferences.value = [...getAssetReferenceImagesByIds(row.associateAssetsIds), ...getLocalReferenceImages(row)];
   promptPrimaryNodeId.value = "";
   promptNodeOptions.value = [];
@@ -597,14 +713,21 @@ function previewPromptReference(ref: ReferenceView) {
 async function saveStoryboardInfo(row: Storyboard) {
   if (!row.id) return;
   try {
-    await axios.post("/production/storyboard/editStoryboardInfo", {
+    const { data } = await axios.post("/production/storyboard/editStoryboardInfo", {
       id: row.id,
       prompt: row.prompt,
-      videoDesc: row.videoDesc,
+      videoDesc: "",
       duration: row.duration,
+      groupKey: row.groupKey,
+      groupName: row.groupName,
+      groupIntent: row.groupIntent,
+      beatId: row.beatId,
+      ...getStoryboardFactPayload(row),
       associateAssetsIds: row.associateAssetsIds ?? [],
       referenceImages: row.referenceImages ?? [],
     });
+    notifyStoryboardIssues(data);
+    await productionStore.getFlowData();
   } catch (e) {
     window.$message.error((e as any)?.message || $t("common.saveFailed"));
   }
@@ -655,7 +778,7 @@ function buildPromptFlow(row: Storyboard) {
       type: "generated",
       position: { x: 600, y: 100 },
       data: {
-        ...createGeneratedData(row.src || "", promptDraft.value),
+        ...createGeneratedData(getStoryboardImageUrl(row, "preview"), promptDraft.value),
         isPrimary: true,
       },
     };
@@ -751,18 +874,21 @@ async function savePromptEditor() {
 
     const references = promptDraftReferences.value.map(normalizeReferenceImage);
     const referenceFields = splitStoryboardReferences(references);
-    await axios.post("/production/storyboard/editStoryboardInfo", {
+    const { data: editResult } = await axios.post("/production/storyboard/editStoryboardInfo", {
       id: row.id,
       prompt: promptDraft.value,
-      videoDesc: row.videoDesc,
+      videoDesc: "",
       duration: row.duration,
+      groupKey: row.groupKey,
+      groupName: row.groupName,
+      groupIntent: row.groupIntent,
+      beatId: row.beatId,
+      ...getStoryboardFactDraftPayload(promptFactDraft.value),
       ...referenceFields,
     });
+    notifyStoryboardIssues(editResult);
 
-    row.flowId = flowId;
-    row.prompt = promptDraft.value;
-    row.associateAssetsIds = referenceFields.associateAssetsIds;
-    row.referenceImages = referenceFields.referenceImages;
+    await productionStore.getFlowData();
     promptFlowSnapshot.value = { nodes, edges };
     promptPrimaryNodeId.value = primary.id;
     promptEditorVisible.value = false;
@@ -828,6 +954,7 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
   const { id, insertAfterIndex } = currentRowStoryboardInfo.value;
   if (id === null && insertAfterIndex !== null && imageUrl) {
     const referenceFields = splitStoryboardReferences(references);
+    const sourceFrame = storyboard.value[insertAfterIndex];
     const newFrame: Storyboard = {
       duration: 0,
       prompt,
@@ -837,6 +964,21 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
       media,
       videoDesc: "",
       shouldGenerateImage: 1,
+      groupKey: sourceFrame?.groupKey,
+      groupName: sourceFrame?.groupName,
+      groupIntent: sourceFrame?.groupIntent,
+      beatId: sourceFrame?.beatId,
+      scene: sourceFrame?.scene,
+      location: sourceFrame?.location,
+      timeOfDay: sourceFrame?.timeOfDay,
+      sceneContinuityId: sourceFrame?.sceneContinuityId,
+      picture: "",
+      action: "",
+      shotSize: sourceFrame?.shotSize,
+      cameraMove: sourceFrame?.cameraMove,
+      dialogue: "",
+      sound: sourceFrame?.sound,
+      visibleEmotion: "",
       state: "已完成",
     };
     const { data } = await axios.post("/production/storyboard/addStoryboard", {
@@ -845,8 +987,8 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
       scriptId: episodesId.value,
       flowId,
     });
-    storyboard.value.splice(insertAfterIndex + 1, 0, { ...newFrame, id: data.id!, flowId });
-    productionStore.setFlowData();
+    notifyStoryboardIssues(data);
+    await productionStore.getFlowData();
     return;
   }
 
@@ -861,16 +1003,20 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
     if (primaryNodeId) {
       const referenceFields = splitStoryboardReferences(references);
       try {
-        await axios.post("/production/storyboard/editStoryboardInfo", {
+        const { data } = await axios.post("/production/storyboard/editStoryboardInfo", {
           id: target.id,
           prompt,
-          videoDesc: target.videoDesc,
+          videoDesc: "",
           duration: target.duration,
+          groupKey: target.groupKey,
+          groupName: target.groupName,
+          groupIntent: target.groupIntent,
+          beatId: target.beatId,
+          ...getStoryboardFactPayload(target),
           ...referenceFields,
         });
-        target.prompt = prompt;
-        target.associateAssetsIds = referenceFields.associateAssetsIds;
-        target.referenceImages = referenceFields.referenceImages;
+        notifyStoryboardIssues(data);
+        await productionStore.getFlowData();
       } catch (e) {
         window.$message.error((e as any)?.message || $t("common.saveFailed"));
       }
@@ -899,13 +1045,13 @@ function onImageLoad(src: string, event: Event) {
 
 function openImageViewer(row: Storyboard) {
   const group = storyboardGroups.value.find((item) => item.items.some((story) => story.id === row.id));
-  const sourceItems = (group?.items ?? storyboard.value).filter((item) => item.src && item.state === "已完成");
+  const sourceItems = (group?.items ?? storyboard.value).filter((item) => getStoryboardImageUrl(item, "display") && item.state === "已完成");
   openImageLightbox({
     images: sourceItems.map((item) => {
-      const src = item.src || "";
+      const src = getStoryboardImageUrl(item, "preview");
       return {
-        src: getThumbnailImageUrl(item.thumbnail || item.thumb || src),
-        originalSrc: getOriginalImageUrl(item.originalUrl || item.imageUrl || src),
+        src: getStoryboardImageUrl(item, "display") || src,
+        originalSrc: src,
         title: `S${String(getStoryboardIndex(item) + 1).padStart(2, "0")}`,
       };
     }),
@@ -982,7 +1128,8 @@ async function openStoryboardHistory(row: Storyboard) {
         const media = normalizeMediaRef(item.media ?? item, "image");
         return {
         id: item.id,
-        url: media ? getMediaOriginalUrl(media) : item.url ?? item.src,
+        url: media ? getMediaOriginalUrl(media) : getOriginalImageUrl(item.url ?? item.src ?? item.filePath ?? ""),
+        previewUrl: media ? getMediaPreviewUrl(media) : getThumbnailImageUrl(item.previewUrl ?? item.thumbnail ?? item.thumb ?? item.url ?? item.src ?? item.filePath ?? ""),
         media,
         prompt: item.prompt,
         model: item.model,

@@ -4,6 +4,7 @@ import type { MediaRef } from "@/types/api";
 export interface ImageHistoryItem {
   id: number;
   url: string;
+  previewUrl?: string;
   media?: MediaRef;
   prompt?: string;
   model?: string;
@@ -28,5 +29,7 @@ export interface ReferenceView {
 export interface StoryboardGroup {
   key: string;
   title: string;
+  intent?: string | null;
+  beatId?: string | null;
   items: Storyboard[];
 }

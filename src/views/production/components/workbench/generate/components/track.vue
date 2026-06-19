@@ -8,6 +8,9 @@
         </div>
         <div class="right f ac">
           <t-button size="small" variant="outline" @click="batchDownloadVideo">{{ $t("workbench.generate.batchDownloadVideo") }}</t-button>
+          <t-button size="small" variant="outline" :loading="reviewLoading" :disabled="!checkedTrackIds.length" @click="emit('reviewTracks', checkedTrackIds)">
+            Review
+          </t-button>
           <t-button size="small" variant="outline" @click="batchGenText" :loading="generateTextLoad">
             {{ $t("workbench.generate.batchGenerateText") }}
           </t-button>
@@ -34,6 +37,9 @@
             @click.stop
             @change="(val: boolean) => toggleCheck(track.id, val)" />
           <t-tag class="indexTag" size="small">#{{ index + 1 }}</t-tag>
+          <t-tag v-if="track.reviewState === 'blocked'" class="reviewTag" theme="danger" size="small">Blocked</t-tag>
+          <t-tag v-else-if="track.reviewState === 'hasIssues'" class="reviewTag" theme="warning" size="small">Review</t-tag>
+          <t-tag v-if="track.groupName" class="groupTag" size="small" variant="light">{{ track.groupName }}</t-tag>
           <t-tag class="selectTag" theme="success" size="small" v-if="track.selectVideoId">已选择</t-tag>
           <!-- 优先展示选中视频的首帧 -->
           <div class="thumbGroup" v-if="track.selectVideoId && getSelectedVideoSrc(track)">
@@ -84,6 +90,7 @@ import imageListCacheStore from "@/stores/imageListCache";
 import JSZip from "jszip";
 import settingStore from "@/stores/setting";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus } from "@/stores/taskCenter";
+import { getReviewMessage, isTrackBlocked } from "@/utils/productionReview";
 
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
@@ -96,6 +103,7 @@ const props = defineProps<{
   clampDuration: (trackDuration: number) => number;
   promptPrefix?: string;
   promptSuffix?: string;
+  reviewLoading?: boolean;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
   default: 0,
@@ -108,6 +116,7 @@ const emit = defineEmits<{
   getData: [];
   change: [prevIndex: number];
   saveImageList: [trackId: number];
+  reviewTracks: [trackIds: number[]];
 }>();
 const itemBoxRef = ref<HTMLElement>();
 const checkAll = ref(false); // 全选状态
@@ -273,12 +282,7 @@ function batchGenText() {
   trackList.value.forEach((track, index) => {
     if (!checkedTrackIds.value.includes(track.id)) return;
     const trackId = track.id;
-    let info = [];
-    if (props.modelParmas.mode == "text") {
-      info = track?.medias.map(({ id, sources }) => ({ id, sources }));
-    } else {
-      info = getTrackUploadInfo(track);
-    }
+    const info = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track);
     trackData.push({
       trackId,
       info: info.filter((i) => i.id),
@@ -336,12 +340,14 @@ function getTrackUploadInfo(track: TrackItem, filterEmpty = false) {
 
   if (track.id === activeTrackId) {
     const items = props.imageList as UploadItem[];
-    return (filterEmpty ? items.filter((item) => Boolean(item.src)) : items).map(({ id, sources }) => ({
+    return (filterEmpty ? items.filter((item) => Boolean(item.src)) : items).filter((item) => item.id != null && Boolean(item.sources)).map(({ id, sources }) => ({
       id,
-      sources: (sources ?? "storyboard") as string,
+      sources: sources as WorkbenchReferenceSource,
     }));
   }
-  return track.medias.filter((m) => !filterEmpty || Boolean(m.src)).map(({ id, sources }) => ({ id, sources: (sources ?? "storyboard") as string }));
+  return track.medias
+    .filter((m) => (!filterEmpty || Boolean(m.src)) && m.id != null && Boolean(m.sources))
+    .map(({ id, sources }) => ({ id, sources: sources as WorkbenchReferenceSource }));
 }
 const generateVideoLoad = ref(false);
 /** 批量为已勾选轨道生成视频 */
@@ -355,6 +361,11 @@ function batchGenVideo() {
       const checkedTrackData = trackList.value.filter((track) => checkedTrackIds.value.includes(track.id));
       const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
       if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
+      const blockedTrack = checkedTrackData.find(isTrackBlocked);
+      if (blockedTrack) {
+        const blocking = blockedTrack.reviewIssues?.find((review) => review.status === "open" && review.severity === "blocking");
+        return window.$message.error(blocking?.message || "Video generation is blocked by open production review issues");
+      }
 
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
@@ -397,7 +408,7 @@ function batchGenVideo() {
         checkedTrackIds.value = [];
         window.$message.success($t("workbench.generate.generateStarted"));
       } catch (e) {
-        window.$message.error((e as any)?.message ?? $t("workbench.generate.generateError"));
+        window.$message.error(getReviewMessage(e) || $t("workbench.generate.generateError"));
       } finally {
         generateVideoLoad.value = false;
       }
@@ -511,6 +522,21 @@ watch(
         bottom: 4px;
         right: 4px;
         z-index: 1;
+      }
+      .reviewTag {
+        position: absolute;
+        top: 4px;
+        left: 34px;
+        z-index: 2;
+      }
+      .groupTag {
+        position: absolute;
+        top: 30px;
+        left: 4px;
+        right: 4px;
+        z-index: 2;
+        max-width: calc(100% - 8px);
+        overflow: hidden;
       }
       .thumbGroup {
         width: 100%;

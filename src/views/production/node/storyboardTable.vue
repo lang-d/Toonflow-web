@@ -2,52 +2,62 @@
   <t-card class="storyboardTable">
     <div class="titleBar dragHandle pr">
       <div class="title c">{{ $t("workbench.production.node.storyboardTable.title") }}</div>
-      <t-button size="small" variant="text" @click="openEdit">{{ $t("workbench.production.edit") }}</t-button>
+      <div class="titleActions" @mousedown.stop @click.stop>
+        <t-button v-if="meta?.textAssetId" size="small" variant="text" :loading="textAssetLoading" @click="openTextAsset">
+          查看完整稿
+        </t-button>
+        <t-button size="small" variant="text" :disabled="!storyboardTable" @click="copyMarkdown">复制</t-button>
+        <t-button size="small" variant="text" :disabled="!storyboardTable" @click="exportMarkdown">导出</t-button>
+      </div>
       <Handle :id="props.handleIds.target" type="target" :position="Position.Left" style="left: calc(-1 * var(--td-comp-paddingLR-xl))" />
       <Handle :id="props.handleIds.source" type="source" :position="Position.Right" style="right: calc(-1 * var(--td-comp-paddingLR-xl))" />
     </div>
+
+    <div class="metaLine">
+      <t-tag size="small" :theme="metaTheme" variant="light">{{ metaLabel }}</t-tag>
+      <span>{{ rowCountLabel }}</span>
+      <span v-if="meta?.hash" class="hashText">{{ meta.hash }}</span>
+    </div>
+
+    <t-alert class="readOnlyAlert" theme="info" message="分镜表 Markdown 为后端从结构化事实渲染的只读展示/导出内容。" />
+    <t-alert v-if="failureAlertMessage" class="failureAlert" theme="error" :message="failureAlertMessage" />
+    <t-alert v-if="showDraftAlert" class="draftAlert" theme="warning" :message="draftAlertMessage" />
+
     <div class="storyboardList">
       <t-empty v-if="!storyboardTable" style="margin-top: 16px"></t-empty>
-      <MdPreview v-else v-model="storyboardTable" :theme="mdTheme" />
+      <MdPreview v-else :model-value="storyboardTable" :theme="mdTheme" />
     </div>
   </t-card>
 
-  <t-dialog
-    v-model:visible="dialogVisible"
-    :header="$t('workbench.production.node.storyboardTable.editDialog')"
-    :width="'90vw'"
-    :confirm-btn="$t('workbench.production.save')"
-    :cancel-btn="$t('workbench.production.cancel')"
-    @confirm="onConfirm"
-    @cancel="onCancel"
-    @close="onCancel"
-    :close-on-overlay-click="false"
-    placement="center"
-    attach="body">
-    <MdEditor
-      v-model="editContent"
-      :theme="mdTheme"
-      :toolbars="toolbars"
-      :footers="[]"
-      style="height: 72vh"
-      @onUploadImg="() => {}"
-      @drop.prevent
-      @paste="onPaste" />
+  <t-dialog v-model:visible="textAssetVisible" header="完整分镜表展示稿" width="min(980px, 92vw)" :footer="false" placement="center" attach="body">
+    <div class="textAssetViewer">
+      <pre>{{ textAssetContent || "暂无内容" }}</pre>
+      <div class="textAssetFooter">
+        <span>{{ textAssetContent.length }} / {{ textAssetSize || textAssetContent.length }} 字符</span>
+        <t-button size="small" :disabled="textAssetEof" :loading="textAssetLoading" @click="loadMoreTextAsset">加载更多</t-button>
+      </div>
+    </div>
   </t-dialog>
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { Handle, Position } from "@vue-flow/core";
-import { MdEditor, MdPreview } from "md-editor-v3";
-import type { ToolbarNames } from "md-editor-v3";
+import { MdPreview } from "md-editor-v3";
 import settingStore from "@/stores/setting";
-import productionAgentStore from "@/stores/productionAgent";
+import projectStore from "@/stores/project";
+import { getTextAssetContent } from "@/api/textAsset";
+import type { StoryboardGenerationLastFailure, StoryboardTableMeta } from "../utils/flowBuilder";
+
 const { themeSetting } = storeToRefs(settingStore());
 const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
+const project = projectStore();
 
 const props = defineProps<{
   id: string;
+  meta?: StoryboardTableMeta;
+  lastFailure?: StoryboardGenerationLastFailure | null;
+  storyboardCount?: number;
   handleIds: {
     target: string;
     source: string;
@@ -55,57 +65,122 @@ const props = defineProps<{
 }>();
 
 const storyboardTable = defineModel<string>({ required: true });
-const editContent = ref("");
-const dialogVisible = ref(false);
+const textAssetVisible = ref(false);
+const textAssetLoading = ref(false);
+const textAssetContent = ref("");
+const textAssetSize = ref(0);
+const textAssetEof = ref(true);
+const textAssetOffset = ref(0);
+const TEXT_ASSET_PAGE_SIZE = 64 * 1024;
 
-const toolbars: ToolbarNames[] = [
-  "bold",
-  "underline",
-  "italic",
-  "strikeThrough",
-  "-",
-  "title",
-  "sub",
-  "sup",
-  "quote",
-  "unorderedList",
-  "orderedList",
-  "task",
-  "-",
-  "codeRow",
-  "code",
-  "table",
-  "-",
-  "revoke",
-  "next",
-  "=",
-  "preview",
-];
-
-function openEdit() {
-  editContent.value = storyboardTable.value ?? "";
-  dialogVisible.value = true;
+function countStoryboardTableRows(text: unknown) {
+  if (typeof text !== "string") return 0;
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.includes("|") && !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line)).length;
 }
 
-function onConfirm() {
-  storyboardTable.value = editContent.value;
-  dialogVisible.value = false;
-  productionAgentStore().setFlowData();
-
+function getByteLength(text: string) {
+  return new TextEncoder().encode(text).length;
 }
 
-function onCancel() {
-  dialogVisible.value = false;
+const projectId = computed(() => Number(project.project?.id));
+const visibleRowCount = computed(() => countStoryboardTableRows(storyboardTable.value));
+
+const metaTheme = computed(() => {
+  if (props.meta?.source === "structured") return "success";
+  if (props.meta?.source === "draft") return "warning";
+  return "default";
+});
+
+const metaLabel = computed(() => {
+  if (props.meta?.source === "structured") return "结构化只读表";
+  if (props.meta?.source === "draft") return "历史草稿展示";
+  if (props.meta?.source === "empty") return "空分镜表";
+  return "只读分镜表";
+});
+
+const rowCountLabel = computed(() => {
+  const tableRows = props.meta?.rowCount ?? visibleRowCount.value;
+  const storyboardRows = props.storyboardCount ?? 0;
+  const ready = props.meta?.readyCount ?? 0;
+  const draft = props.meta?.draftCount ?? 0;
+  const legacy = props.meta?.legacyCount ?? 0;
+  const statusText = [
+    ready ? `ready ${ready}` : "",
+    draft ? `draft ${draft}` : "",
+    legacy ? `legacy ${legacy}` : "",
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  const suffix = statusText ? ` · ${statusText}` : "";
+  if (props.meta?.source === "structured") return `${tableRows || storyboardRows} 行 · 结构化分镜 ${storyboardRows} 条${suffix}`;
+  if (props.meta?.source === "draft") return `${tableRows} 行 · 结构化分镜 ${storyboardRows} 条${suffix}`;
+  return `结构化分镜 ${storyboardRows} 条${suffix}`;
+});
+
+const showDraftAlert = computed(() => props.meta?.source === "draft" || (props.meta && props.meta.complete === false));
+const draftAlertMessage = computed(() => {
+  return "当前分镜表来自历史草稿或不完整展示稿；如需修改事实，请编辑单条结构化分镜。";
+});
+const failureAlertMessage = computed(() => {
+  if (!props.lastFailure) return "";
+  const suffix = props.lastFailure.state === "invalid" ? "分镜字段校验失败。" : "提交失败，请重试生成。";
+  return `上次分镜表提交失败，正式分镜未被覆盖。${suffix}`;
+});
+
+async function readTextAssetPage(id: number, offset: number) {
+  return getTextAssetContent({
+    projectId: projectId.value,
+    id,
+    offset,
+    limit: TEXT_ASSET_PAGE_SIZE,
+  });
 }
 
-function onPaste(e: ClipboardEvent) {
-  const items = e.clipboardData?.items;
-  if (!items) return;
-  for (const item of items) {
-    if (item.type.startsWith("image/") || item.type.startsWith("video/")) {
-      e.preventDefault();
-      return;
-    }
+async function copyMarkdown() {
+  if (!storyboardTable.value) return;
+  await navigator.clipboard.writeText(storyboardTable.value);
+  window.$message?.success?.("已复制分镜表 Markdown");
+}
+
+function exportMarkdown() {
+  if (!storyboardTable.value) return;
+  const blob = new Blob([storyboardTable.value], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "storyboard-table.md";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function openTextAsset() {
+  const textAssetId = props.meta?.textAssetId;
+  if (!textAssetId) return;
+  textAssetVisible.value = true;
+  textAssetContent.value = "";
+  textAssetSize.value = 0;
+  textAssetOffset.value = 0;
+  textAssetEof.value = false;
+
+  await loadMoreTextAsset();
+}
+
+async function loadMoreTextAsset() {
+  const textAssetId = props.meta?.textAssetId;
+  if (!textAssetId || !projectId.value || textAssetLoading.value || textAssetEof.value) return;
+  textAssetLoading.value = true;
+  try {
+    const data = await readTextAssetPage(textAssetId, textAssetOffset.value);
+    const chunk = data.content ?? "";
+    textAssetContent.value += chunk;
+    textAssetSize.value = data.size ?? textAssetContent.value.length;
+    textAssetOffset.value += getByteLength(chunk);
+    textAssetEof.value = Boolean(data.eof) || chunk.length === 0;
+  } finally {
+    textAssetLoading.value = false;
   }
 }
 </script>
@@ -124,6 +199,13 @@ function onPaste(e: ClipboardEvent) {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
+  }
+
+  .titleActions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .title {
@@ -150,66 +232,53 @@ function onPaste(e: ClipboardEvent) {
     }
   }
 
-  .storyboardItem {
-    display: flex;
-    align-items: flex-start;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--td-border-level-1-color, #e7e7e7);
-
-    &:last-child {
-      border-bottom: none;
-    }
-  }
-
-  .itemTag {
-    flex-shrink: 0;
-    width: 36px;
-    height: 22px;
-    border-radius: 4px;
-    color: #fff;
-    font-size: 12px;
-    font-weight: 500;
+  .metaLine {
     display: flex;
     align-items: center;
-    justify-content: center;
-    margin-right: 12px;
-    margin-top: 2px;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
   }
 
-  .itemContent {
-    flex: 1;
-    min-width: 0;
+  .hashText {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .itemHeader {
+  .readOnlyAlert,
+  .failureAlert,
+  .draftAlert {
+    margin-top: 8px;
+  }
+}
+
+.textAssetViewer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  pre {
+    max-height: 68vh;
+    margin: 0;
+    padding: 12px;
+    overflow: auto;
+    border-radius: 6px;
+    background: var(--td-bg-color-secondarycontainer);
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.7;
+  }
+
+  .textAssetFooter {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 4px;
-  }
-
-  .itemTags {
-    display: flex;
-    gap: 5px;
-    flex-shrink: 0;
-    margin-left: 12px;
-  }
-
-  .itemTitle {
-    font-size: 14px;
-    color: var(--td-text-color-primary, #333);
-    line-height: 1.5;
-  }
-
-  .itemDetail {
+    color: var(--td-text-color-secondary);
     font-size: 12px;
-    color: var(--td-text-color-secondary, #999);
-    line-height: 1.4;
-
-    .sep {
-      margin: 0 6px;
-      color: var(--td-border-level-1-color, #ddd);
-    }
   }
 }
 </style>

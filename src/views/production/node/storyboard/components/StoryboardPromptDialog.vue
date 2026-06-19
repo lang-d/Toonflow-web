@@ -53,18 +53,32 @@
           <t-empty v-else />
         </section>
 
+        <section class="promptEditorSection">
+          <div class="sectionHeader">
+            <strong>视频事实</strong>
+            <span class="sectionHint">用于视频提示词生成，不替代分镜图提示词。</span>
+          </div>
+          <div class="factGrid">
+            <label v-for="field in factFields" :key="field.key" class="factField">
+              <span>{{ field.label }}</span>
+              <t-textarea
+                v-if="field.multiline"
+                v-model="facts[field.key]"
+                :autosize="{ minRows: 2, maxRows: 4 }"
+                :placeholder="field.placeholder" />
+              <t-input v-else v-model="facts[field.key]" :placeholder="field.placeholder" />
+            </label>
+          </div>
+        </section>
+
         <section class="promptEditorSection promptTextSection">
-          <strong>{{ $t("workbench.production.node.storyboard.prompt") }}</strong>
+          <strong>分镜图提示词</strong>
           <PromptEditor
             v-model="prompt"
             :references="promptReferences"
             :placeholder="$t('workbench.production.node.storyboard.promptPlaceholder')" />
         </section>
 
-        <section class="promptEditorSection">
-          <strong>{{ $t("workbench.production.node.storyboard.videoDesc") }}</strong>
-          <div class="videoDescReadonly">{{ videoDesc || "-" }}</div>
-        </section>
       </div>
     </t-loading>
   </t-dialog>
@@ -74,15 +88,56 @@
 import PromptEditor from "@/components/promptEditor.vue";
 import type { ReferenceView } from "../types";
 
+type StoryboardFactKey =
+  | "scene"
+  | "location"
+  | "timeOfDay"
+  | "sceneContinuityId"
+  | "picture"
+  | "action"
+  | "shotSize"
+  | "cameraMove"
+  | "dialogue"
+  | "sound"
+  | "visibleEmotion";
+
 const visible = defineModel<boolean>("visible", { default: false });
 const prompt = defineModel<string>("prompt", { default: "" });
 const primaryNodeId = defineModel<string>("primaryNodeId", { default: "" });
+const facts = defineModel<Record<StoryboardFactKey, string>>("facts", {
+  default: () => ({
+    scene: "",
+    location: "",
+    timeOfDay: "",
+    sceneContinuityId: "",
+    picture: "",
+    action: "",
+    shotSize: "",
+    cameraMove: "",
+    dialogue: "",
+    sound: "",
+    visibleEmotion: "",
+  }),
+});
+
+const factFields: Array<{ key: StoryboardFactKey; label: string; placeholder: string; multiline?: boolean }> = [
+  { key: "scene", label: "场景摘要", placeholder: "旧数据兼容场景摘要" },
+  { key: "location", label: "地点", placeholder: "明确的拍摄地点或空间" },
+  { key: "timeOfDay", label: "时间", placeholder: "早晨、白天、黄昏、夜晚等" },
+  { key: "sceneContinuityId", label: "场景连续性", placeholder: "连续场景标识，可选" },
+  { key: "picture", label: "画面", placeholder: "画面主体与构图", multiline: true },
+  { key: "action", label: "动作", placeholder: "人物或镜头内动作", multiline: true },
+  { key: "shotSize", label: "景别", placeholder: "远景/中景/近景/特写" },
+  { key: "cameraMove", label: "运镜", placeholder: "推拉摇移跟等" },
+  { key: "dialogue", label: "对白", placeholder: "本镜头对白", multiline: true },
+  { key: "sound", label: "声音", placeholder: "音效、环境声、音乐提示", multiline: true },
+  { key: "visibleEmotion", label: "可见情绪", placeholder: "可被画面看见的情绪" },
+];
 
 const props = defineProps<{
   loading: boolean;
   saving: boolean;
   shotLabel: string;
-  videoDesc: string;
   references: ReferenceView[];
   nodeOptions: { label: string; value: string }[];
 }>();
@@ -145,6 +200,30 @@ const emit = defineEmits<{
   border: 1px solid var(--td-border-level-1-color);
   border-radius: 6px;
   background: var(--td-bg-color-container);
+}
+
+.sectionHint {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.factGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.factField {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.factField span {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
 }
 
 .referenceActions {

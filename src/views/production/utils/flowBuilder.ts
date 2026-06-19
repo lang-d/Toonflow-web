@@ -44,12 +44,96 @@ export interface AssetItem {
   errorReason?: string;
 }
 
+export type StoryboardFactStatus = "draft" | "ready" | "legacy";
+export type StoryboardFactSource = "storyboardTable" | "minimalFallback";
+
+export interface StoryboardCharacterFact {
+  name: string;
+  assetId?: number;
+  action: string;
+  orientation: string;
+  spatialPosition: string;
+  posture?: string;
+  expression?: string;
+  gaze?: string;
+  handAction?: string;
+  movement?: string;
+}
+
+export interface StoryboardDialogueFact {
+  speaker: string;
+  text: string;
+  voiceTone?: string;
+}
+
+export interface StoryboardRequiredAssetFact {
+  assetId: number;
+  name: string;
+  type: "role" | "scene" | "tool" | "clip";
+  order: number;
+}
+
+export interface StoryboardTableRow {
+  version: 1;
+  index: number;
+  sceneNo?: string;
+  groupKey: string;
+  groupName: string;
+  groupIntent: string;
+  beatId: string;
+  durationSec: number;
+  location: string;
+  timeOfDay: string;
+  sceneContinuityId?: string;
+  picture: string;
+  shotSize: string;
+  cameraMove: string;
+  cameraAngle?: string;
+  transitionFromPrevious?: string;
+  action: string;
+  characters: StoryboardCharacterFact[];
+  visibleEmotion: string;
+  dialogue: StoryboardDialogueFact[];
+  soundEffects: string[];
+  requiredAssets: StoryboardRequiredAssetFact[];
+}
+
+export function parseStoryboardTableRow(value?: string | null): StoryboardTableRow | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? (parsed as StoryboardTableRow) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface Storyboard {
   id?: number;
+  index?: number;
   duration?: number;
   prompt: string;
+  scene?: string | null;
+  location?: string | null;
+  timeOfDay?: string | null;
+  sceneContinuityId?: string | null;
+  picture?: string | null;
+  action?: string | null;
+  shotSize?: string | null;
+  cameraMove?: string | null;
+  dialogue?: string | null;
+  sound?: string | null;
+  visibleEmotion?: string | null;
+  tableRowJson?: string | null;
+  factStatus?: StoryboardFactStatus;
+  factVersion?: number | null;
+  factSource?: StoryboardFactSource;
   trackId?: number;
   trackName?: string;
+  groupKey?: string | null;
+  groupName?: string | null;
+  groupIntent?: string | null;
+  beatId?: string | null;
   associateAssetsIds?: number[];
   referenceImages?: StoryboardReference[];
   src: string | null;
@@ -85,11 +169,32 @@ interface VideoList {
   trackId: number;
 }
 
+export interface StoryboardTableMeta {
+  source?: "structured" | "draft" | "empty";
+  rowCount: number;
+  readyCount?: number;
+  draftCount?: number;
+  legacyCount?: number;
+  complete?: boolean;
+  hash?: string;
+  textAssetId?: number;
+}
+
+export interface StoryboardGenerationLastFailure {
+  generationId: string;
+  state: "invalid" | "failed";
+  expectedRowCount: number;
+  errorJson?: string;
+  updatedAt: number;
+}
+
 export interface FlowData {
   script: string;
   scriptPlan: string;
   assets: AssetItem[];
   storyboardTable: string;
+  storyboardTableMeta?: StoryboardTableMeta;
+  storyboardGenerationLastFailure: StoryboardGenerationLastFailure | null;
   storyboard: Storyboard[];
   workbench: {
     videoList: VideoList[];

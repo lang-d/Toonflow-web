@@ -1,6 +1,7 @@
 // useChat.ts
 import { ref, shallowRef, onMounted, onUnmounted, computed } from "vue";
-import { io, Socket } from "socket.io-client";
+import type { ComputedRef, Ref, ShallowRef } from "vue";
+import { io } from "socket.io-client";
 import type { ChatMessagesData, AIMessage, UserMessage, AIMessageContent, ChatMessageStatus } from "@tdesign-vue-next/chat";
 
 // Socket 事件类型定义
@@ -49,6 +50,7 @@ export interface XmlTagEvent {
   attrs: Record<string, string>;
   children: XmlChildItem[];
   status: ChatMessageStatus;
+  isComplete: boolean;
 }
 
 export interface XmlTagOption {
@@ -58,8 +60,8 @@ export interface XmlTagOption {
 
 export interface ChatSocketEvents {
   // 发送事件
-  chat: { content: string; attachments?: any[] };
-  stop: { messageId: string };
+  chat: { content: string; attachments?: any[]; [key: string]: any };
+  stop: { messageId?: string; [key: string]: any };
   regenerate: { messageId: string };
 
   // 接收事件
@@ -83,7 +85,49 @@ export interface UseChatOptions {
   manageLifecycle?: boolean;
 }
 
-export function useChat(options: UseChatOptions) {
+export interface ChatSocketLike {
+  connected: boolean;
+  disconnected: boolean;
+  connect: () => ChatSocketLike;
+  disconnect: () => ChatSocketLike;
+  emit: (event: string, ...args: any[]) => ChatSocketLike;
+  on: (event: string, callback: (...args: any[]) => void) => ChatSocketLike;
+  once: (event: string, callback: (...args: any[]) => void) => ChatSocketLike;
+  off: (event: string, callback?: (...args: any[]) => void) => ChatSocketLike;
+  removeAllListeners: (event?: string) => ChatSocketLike;
+}
+
+export interface UseChatReturn {
+  socket: ShallowRef<ChatSocketLike | null>;
+  connected: Ref<boolean>;
+  connecting: Ref<boolean>;
+  status: Ref<"idle" | "pending" | "streaming">;
+  messages: Ref<ChatMessagesData[]>;
+  currentMessageId: Ref<string | null>;
+  xmlData: Ref<Record<string, string>>;
+  xmlDataByMessage: Ref<Record<string, Record<string, string>>>;
+  isGenerating: ComputedRef<boolean>;
+  lastMessage: ComputedRef<ChatMessagesData | undefined>;
+  connect: () => void;
+  disconnect: () => void;
+  reconnect: () => void;
+  emit: <E extends keyof ChatSocketEvents & string>(event: E, data?: ChatSocketEvents[E]) => boolean;
+  on: <E extends keyof ChatSocketEvents & string>(event: E, callback: (data: ChatSocketEvents[E]) => void) => () => void | undefined;
+  once: <E extends keyof ChatSocketEvents & string>(event: E, callback: (data: ChatSocketEvents[E]) => void) => void;
+  off: <E extends keyof ChatSocketEvents & string>(event: E, callback?: (data: ChatSocketEvents[E]) => void) => void;
+  chat: (content: string, attachments?: any[], extraPayload?: Record<string, any>) => boolean;
+  stopGenerate: (messageId?: string, extraPayload?: Record<string, any>) => boolean;
+  regenerate: (messageId: string) => boolean;
+  clearMessages: () => void;
+  removeMessage: (id: string) => void;
+  removeMessagesAfter: (id: string) => void;
+  updateMessage: (id: string, updates: Partial<ChatMessagesData>) => void;
+  findMessage: (id: string) => ChatMessagesData | undefined;
+  syncGenerationStatus: (preferredMessageId?: string) => void;
+  getContentByType: <T extends AIMessageContent["type"]>(messageId: string, type: T) => Extract<AIMessageContent, { type: T }>[];
+}
+
+export function useChat(options: UseChatOptions): UseChatReturn {
   const {
     url,
     auth,
@@ -97,7 +141,7 @@ export function useChat(options: UseChatOptions) {
     manageLifecycle = true,
   } = options;
 
-  const socket = shallowRef<Socket | null>(null);
+  const socket = shallowRef<ChatSocketLike | null>(null);
   const connected = ref(false);
   const connecting = ref(false);
   const messages = ref<ChatMessagesData[]>([]);
@@ -117,6 +161,15 @@ export function useChat(options: UseChatOptions) {
   const hiddenXmlTags = normalizedXmlTagOptions.filter((item) => ((item.keepInMessage ?? keepXmlInMessage) ? false : true)).map((item) => item.tag);
   const emittedXmlState = new Map<string, Record<string, string>>();
   const rawContentState = new Map<string, string>();
+  const terminalStatuses = new Set<ChatMessageStatus>(["complete", "error", "stop"] as ChatMessageStatus[]);
+  const debugChat = import.meta.env.DEV && url.includes("/productionAgent");
+
+  const isTerminalStatus = (value?: ChatMessageStatus) => Boolean(value && terminalStatuses.has(value));
+
+  const logChatEvent = (event: string, payload: Record<string, any>) => {
+    if (!debugChat) return;
+    console.debug("[production-agent chat]", event, payload);
+  };
 
   // 计算属性 - 修复：增加对内容流状态的判断
   const isGenerating = computed(() => {
@@ -149,6 +202,87 @@ export function useChat(options: UseChatOptions) {
 
   const findContent = (msg: AIMessage, contentId: string): AIMessageContent | undefined => {
     return msg.content?.find((c) => c.id === contentId);
+  };
+
+  const getMessageGenerationStatus = (msg: ChatMessagesData | undefined): "idle" | "pending" | "streaming" => {
+    if (!msg || msg.role !== "assistant") return "idle";
+    if (isTerminalStatus(msg.status)) return "idle";
+
+    const aiMsg = msg as AIMessage;
+    const contentList = aiMsg.content ?? [];
+    const hasStreamingContent = contentList.some((content) => content.status === "streaming");
+    const hasPendingContent = contentList.some((content) => content.status === "pending");
+    const allContentTerminal = contentList.length > 0 && contentList.every((content) => isTerminalStatus(content.status));
+
+    if (msg.status === "streaming" || hasStreamingContent) {
+      return "streaming";
+    }
+    if (hasPendingContent) {
+      return "pending";
+    }
+    if (allContentTerminal) return "idle";
+    if (msg.status === "pending") return "pending";
+    return "idle";
+  };
+
+  const syncGenerationStatus = (preferredMessageId?: string) => {
+    const preferred = preferredMessageId ? findMessage(preferredMessageId) : undefined;
+    const preferredStatus = getMessageGenerationStatus(preferred);
+    if (preferredStatus !== "idle") {
+      currentMessageId.value = preferredMessageId ?? null;
+      status.value = preferredStatus;
+      logChatEvent("status:sync", {
+        currentMessageId: currentMessageId.value,
+        status: status.value,
+        source: "preferred",
+      });
+      return;
+    }
+
+    if (preferredMessageId) {
+      const active = currentMessageId.value ? findMessage(currentMessageId.value) : undefined;
+      const activeStatus = currentMessageId.value && currentMessageId.value !== preferredMessageId ? getMessageGenerationStatus(active) : "idle";
+      if (activeStatus !== "idle") {
+        status.value = activeStatus;
+        logChatEvent("status:sync", {
+          currentMessageId: currentMessageId.value,
+          status: status.value,
+          source: "current",
+        });
+        return;
+      }
+
+      currentMessageId.value = null;
+      status.value = "idle";
+      logChatEvent("status:sync", {
+        currentMessageId: currentMessageId.value,
+        status: status.value,
+        source: "preferred-idle",
+      });
+      return;
+    }
+
+    for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+      const message = messages.value[index];
+      const nextStatus = getMessageGenerationStatus(message);
+      if (nextStatus === "idle") continue;
+      currentMessageId.value = message.id;
+      status.value = nextStatus;
+      logChatEvent("status:sync", {
+        currentMessageId: currentMessageId.value,
+        status: status.value,
+        source: "scan",
+      });
+      return;
+    }
+
+    currentMessageId.value = null;
+    status.value = "idle";
+    logChatEvent("status:sync", {
+      currentMessageId: currentMessageId.value,
+      status: status.value,
+      source: "idle",
+    });
   };
 
   const isEmptyMessageContent = (msg: ChatMessagesData | undefined): boolean => {
@@ -280,7 +414,15 @@ export function useChat(options: UseChatOptions) {
       if (parsed === null) continue;
 
       const { value, isComplete } = parsed;
-      const eventStatus = isComplete ? (status === "error" || status === "stop" ? status : "complete") : status;
+      const eventStatus = isComplete
+        ? status === "error" || status === "stop"
+          ? status
+          : "complete"
+        : status === "error" || status === "stop"
+          ? status
+          : status === "pending"
+            ? "pending"
+            : "streaming";
 
       const shouldEmit = prevState[tag] !== value || eventStatus === "complete";
       if (!shouldEmit) continue;
@@ -299,6 +441,7 @@ export function useChat(options: UseChatOptions) {
         attrs: parsed.attrs,
         children: parsed.children,
         status: eventStatus,
+        isComplete,
       });
     }
 
@@ -361,6 +504,16 @@ export function useChat(options: UseChatOptions) {
 
     const content = findContent(msg, contentId);
     if (!content) return;
+    logChatEvent("content:update", {
+      messageId,
+      contentId,
+      type,
+      strategy,
+      status: eventStatus,
+      dataLength: typeof data === "string" ? data.length : undefined,
+      currentMessageId: currentMessageId.value,
+      globalStatus: status.value,
+    });
 
     // 更新内容状态
     if (eventStatus) {
@@ -380,6 +533,7 @@ export function useChat(options: UseChatOptions) {
     // 无数据时仅更新状态
     if (data === undefined || data === null) {
       syncXmlData(messageId, content, msg.status);
+      syncGenerationStatus(messageId);
       return;
     }
 
@@ -411,6 +565,7 @@ export function useChat(options: UseChatOptions) {
     }
 
     syncXmlData(messageId, content, msg.status);
+    syncGenerationStatus(messageId);
   };
 
   // 消息处理器
@@ -419,6 +574,14 @@ export function useChat(options: UseChatOptions) {
 
     // 新消息
     socket.value.on("message", (data: MessageEvent) => {
+      logChatEvent("message", {
+        id: data.id,
+        role: data.role,
+        status: data.status,
+        contentStatuses: data.content?.map((item) => item?.status),
+        currentMessageId: currentMessageId.value,
+        globalStatus: status.value,
+      });
       const newMessage: ChatMessagesData = {
         id: data.id,
         role: data.role,
@@ -449,16 +612,22 @@ export function useChat(options: UseChatOptions) {
         aiMessage.content?.forEach((content) => syncXmlData(data.id, content, aiMessage.status));
       }
 
-      if (data.role === "assistant") {
-        currentMessageId.value = data.id;
-        status.value = data.status === "streaming" ? "streaming" : "pending";
-      }
+      if (data.role === "assistant") syncGenerationStatus(data.id);
     });
 
     // 消息状态更新
     socket.value.on("message:update", (data: MessageUpdateEvent) => {
+      logChatEvent("message:update", {
+        id: data.id,
+        status: data.status,
+        currentMessageId: currentMessageId.value,
+        globalStatus: status.value,
+      });
       const msg = findMessage(data.id);
-      if (!msg) return;
+      if (!msg) {
+        if (isTerminalStatus(data.status) && currentMessageId.value === data.id) syncGenerationStatus(data.id);
+        return;
+      }
 
       if (data.status) {
         msg.status = data.status;
@@ -474,23 +643,10 @@ export function useChat(options: UseChatOptions) {
 
       if (data.status === "complete" && isEmptyMessageContent(msg)) {
         removeMessage(data.id);
-        if (currentMessageId.value === data.id) {
-          currentMessageId.value = null;
-          status.value = "idle";
-        }
+        syncGenerationStatus(data.id);
         return;
       }
-
-      if (data.status === "streaming") {
-        status.value = "streaming";
-      }
-
-      if (data.status === "complete" || data.status === "error" || data.status === "stop") {
-        if (currentMessageId.value === data.id) {
-          currentMessageId.value = null;
-          status.value = "idle";
-        }
-      }
+      syncGenerationStatus(data.id);
     });
 
     // 添加内容块 - 修复：不要在这里改变消息状态
@@ -535,6 +691,7 @@ export function useChat(options: UseChatOptions) {
           msg.status = "streaming";
         }
       }
+      syncGenerationStatus(data.messageId);
     });
 
     // 内容更新（流式/完成）
@@ -614,7 +771,9 @@ export function useChat(options: UseChatOptions) {
   // 监听方法
   const on = <E extends keyof ChatSocketEvents & string>(event: E, callback: (data: ChatSocketEvents[E]) => void) => {
     socket.value?.on(event, callback as any);
-    return () => socket.value?.off(event, callback as any);
+    return () => {
+      socket.value?.off(event, callback as any);
+    };
   };
 
   const once = <E extends keyof ChatSocketEvents & string>(event: E, callback: (data: ChatSocketEvents[E]) => void) => {
@@ -626,7 +785,7 @@ export function useChat(options: UseChatOptions) {
   };
 
   // 业务方法
-  const chat = (content: string, attachments?: any[]) => {
+  const chat = (content: string, attachments?: any[], extraPayload?: Record<string, any>) => {
     if (!content.trim() && !attachments?.length) return false;
 
     const userMessage: UserMessage = {
@@ -647,22 +806,22 @@ export function useChat(options: UseChatOptions) {
 
     messages.value.push(userMessage);
 
-    return emit("chat", { content, attachments });
+    return emit("chat", { content, attachments, ...extraPayload });
   };
 
-  const stopGenerate = (messageId?: string) => {
+  const stopGenerate = (messageId?: string, extraPayload?: Record<string, any>) => {
     const id = messageId || currentMessageId.value;
-    if (!id) return false;
+    if (!id && !extraPayload) return false;
 
     // 立即更新本地状态，不等服务端响应
-    const msg = findMessage(id);
+    const msg = id ? findMessage(id) : undefined;
     if (msg) {
       msg.status = "stop";
     }
     currentMessageId.value = null;
     status.value = "idle";
 
-    return emit("stop", { messageId: id });
+    return emit("stop", { messageId: id ?? undefined, ...extraPayload });
   };
 
   const regenerate = (messageId: string) => {
@@ -756,8 +915,7 @@ export function useChat(options: UseChatOptions) {
     removeMessagesAfter,
     updateMessage,
     findMessage,
+    syncGenerationStatus,
     getContentByType,
   };
 }
-
-export type UseChatReturn = ReturnType<typeof useChat>;

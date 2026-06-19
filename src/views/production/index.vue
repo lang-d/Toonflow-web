@@ -38,7 +38,13 @@
       <scriptPlan :id="props.id" v-model="flowData.scriptPlan" :handleIds="props.data.handleIds" />
     </template>
     <template #node-storyboardTable="props">
-      <storyboardTable :id="props.id" v-model="flowData.storyboardTable" :handleIds="props.data.handleIds" />
+      <storyboardTable
+        :id="props.id"
+        v-model="flowData.storyboardTable"
+        :meta="flowData.storyboardTableMeta"
+        :last-failure="flowData.storyboardGenerationLastFailure"
+        :storyboard-count="flowData.storyboard.length"
+        :handleIds="props.data.handleIds" />
     </template>
     <template #node-assets="props">
       <assets :id="props.id" v-model="flowData.assets" :handleIds="props.data.handleIds" />
@@ -220,7 +226,7 @@ const { layout } = useLayout("mainFlowBox");
 import productionAgentStore from "@/stores/productionAgent";
 const agentStore = productionAgentStore();
 const taskCenter = useTaskCenterStore();
-const { episodesId, flowData, status } = storeToRefs(agentStore);
+const { episodesId, flowData } = storeToRefs(agentStore);
 const { activeTaskCount, inFlightRequests, activeTransport, lastLongTask, pollCount, registeredListenerCount } = storeToRefs(taskCenter);
 const totalPollCount = computed(() => Object.values(pollCount.value).reduce((sum, count) => sum + count, 0));
 const showPerfPanel = import.meta.env.DEV;
@@ -331,44 +337,12 @@ onMounted(async () => {
 });
 
 const episodesOptions = ref<{ label: string; value: number }[]>([]);
-function confirmEpisodesSwitch() {
-  if (status.value !== "pending" && status.value !== "streaming") {
-    return Promise.resolve(true);
-  }
-
-  return new Promise<boolean>((resolve) => {
-    const dialog = DialogPlugin.confirm({
-      header: $t("workbench.production.confirm"),
-      body: $t("workbench.production.confirmEpisodesSwitch"),
-      confirmBtn: $t("workbench.production.save"),
-      cancelBtn: $t("workbench.production.cancel"),
-      theme: "warning",
-      onConfirm: () => {
-        dialog.destroy();
-        resolve(true);
-      },
-      onCancel: () => {
-        dialog.destroy();
-        resolve(false);
-      },
-      onClose: () => {
-        dialog.destroy();
-        resolve(false);
-      },
-    });
-  });
-}
-
 function handleEpisodesChange(value: unknown) {
   const rawValue = Array.isArray(value) ? value[0] : value;
   const nextEpisodesId = Number(rawValue);
   if (!Number.isFinite(nextEpisodesId) || nextEpisodesId === episodesId.value) return;
 
-  void (async () => {
-    if (!(await confirmEpisodesSwitch())) return;
-
-    episodesId.value = nextEpisodesId;
-  })();
+  episodesId.value = nextEpisodesId;
 }
 
 async function getScriptData() {
@@ -539,11 +513,9 @@ async function refFlowData() {
 
 async function loadEpisodeFlow({ restoreViewport }: { restoreViewport: boolean }) {
   if (!hasProject.value) return;
-  if (status.value !== "pending" && status.value !== "streaming") {
-    await agentStore.getFlowData();
-    agentStore.updateContext();
-    await agentStore.getHistory();
-  }
+  await agentStore.getFlowData();
+  agentStore.updateContext();
+  await agentStore.getHistory();
   const restored = restoreViewport ? await restoreSavedViewport(readCanvasMemory()) : false;
   if (!restored) {
     await layoutGraph();

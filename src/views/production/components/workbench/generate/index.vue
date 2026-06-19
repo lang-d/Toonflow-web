@@ -24,11 +24,48 @@
       <t-input v-model="promptPrefix" size="small" placeholder="前置提示词" clearable />
       <t-input v-model="promptSuffix" size="small" placeholder="后置提示词" clearable />
     </div>
+    <div v-if="currentTrack" class="trackReviewSummary">
+      <div class="trackGroupInfo">
+        <strong>{{ currentTrack.groupName || `Track ${activeTrackIndex + 1}` }}</strong>
+        <span v-if="currentTrack.groupIntent">{{ currentTrack.groupIntent }}</span>
+      </div>
+      <div class="trackReviewTags">
+        <t-tag size="small" theme="primary" variant="light">
+          分镜 {{ currentTrackStoryboardCount }}
+        </t-tag>
+        <t-tag size="small" variant="light">
+          时长 {{ currentTrackStoryboardDuration }}s
+        </t-tag>
+        <t-tag size="small" variant="light">
+          引用 {{ currentReferenceCount }}
+        </t-tag>
+        <t-tag v-if="currentTrack.reviewState" size="small" :theme="currentTrack.reviewState === 'blocked' ? 'danger' : currentTrack.reviewState === 'hasIssues' ? 'warning' : 'success'" variant="light">
+          {{ currentTrack.reviewState }}
+        </t-tag>
+        <t-tag v-if="currentReviewCounts.total" size="small" theme="warning" variant="light">
+          Review {{ currentReviewCounts.total }}
+        </t-tag>
+        <t-tag v-if="currentTrack.musicPlan" size="small" theme="primary" variant="light">
+          BGM {{ currentTrack.musicPlan.mood || "ready" }}
+        </t-tag>
+        <t-tag v-if="hasUnreadyStoryboardForCurrentTrack" size="small" theme="warning" variant="light">
+          分镜事实待补齐
+        </t-tag>
+      </div>
+    </div>
+    <t-alert
+      v-if="hasUnreadyStoryboardForCurrentTrack"
+      class="storyboardFactGate"
+      theme="warning"
+      message="请先补齐结构化分镜事实后再生成视频。" />
     <div class="generate ac">
       <div class="prompt" v-if="currentTrack">
         <t-card :title="'#' + (activeTrackIndex + 1) + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
           <template #actions>
-            <t-button size="small" class="genTextbtn" :loading="currentTrack.state == '生成中'" @click="genText">
+            <t-button size="small" variant="outline" :loading="reviewLoading" @click="reviewCurrentTrack">
+              Review
+            </t-button>
+            <t-button size="small" class="genTextbtn" :loading="currentTrack.state == '生成中'" :disabled="hasUnreadyStoryboardForCurrentTrack" @click="genText">
               {{ $t("workbench.generate.generateText") }}
             </t-button>
           </template>
@@ -47,6 +84,17 @@
           @refresh="getGenerateData"
           @generate="generateVideo" />
       </div>
+      <div class="reviewAside" v-if="currentTrack">
+        <ProductionReviewPanel
+          title="Track review"
+          mode="videoPromptBatch"
+          :reviews="currentTrack.reviewIssues || []"
+          :music-plan="currentTrack.musicPlan"
+          :loading="reviewLoading"
+          :applying="reviewLoading"
+          @refresh="reviewCurrentTrack"
+          @resolve-batch="resolveCurrentTrackReviews" />
+      </div>
     </div>
     <div class="track">
       <newTrack
@@ -58,6 +106,8 @@
         :clampDuration="clampDuration"
         :prompt-prefix="promptPrefix"
         :prompt-suffix="promptSuffix"
+        :review-loading="reviewLoading"
+        @reviewTracks="reviewTracks"
         @getData="getGenerateData" />
     </div>
   </div>
@@ -69,6 +119,7 @@ import newTrack from "./components/track.vue";
 import imageSelect from "./components/imageSelect.vue";
 import modeMenu from "./components/modeMenu.vue";
 import videoCard from "./components/video.vue";
+import ProductionReviewPanel from "../../review/ProductionReviewPanel.vue";
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
@@ -76,6 +127,12 @@ import promptEditor from "@/components/promptEditor.vue";
 import imageListCacheStore from "@/stores/imageListCache";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import {
+  resolveProductionReviewBatch,
+  reviewVideoTracks,
+} from "@/api/productionReview";
+import type { ProductionReviewSuggestion } from "@/types/productionReview";
+import { countOpenReviews, getReviewMessage, isTrackBlocked } from "@/utils/productionReview";
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -86,11 +143,13 @@ const { getCache, setCache, initCacheFromTrackList, forceInitCacheFromTrackList,
 const { urlMap } = storeToRefs(cacheStore);
 const cacheRefreshing = ref(false);
 const mergeLoading = ref<"" | "storyboard" | "assets">("");
+const reviewLoading = ref(false);
 const promptPrefix = ref("");
 const promptSuffix = ref("");
 const restoredLastTrack = ref(false);
 const videoTaskBindings = new Map<number, () => void>();
 const promptTaskBindings = new Map<number, () => void>();
+const promptResultRefreshing = new Set<number>();
 const reportedFailures = new Set<string>();
 const cacheWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let promptAffixWriteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -115,6 +174,7 @@ const modelParmas = ref<ModelSetting>({
 });
 
 const storyboardList = ref<StoryboardItem[]>([]); // 分镜列表
+const STRUCTURED_FACT_REQUIRED_MESSAGE = "请先补齐结构化分镜事实后再生成视频。";
 
 /** 当前剧集维度的本地操作状态 */
 function getScriptStorageKey(name: string) {
@@ -158,7 +218,7 @@ const imageList = computed({
     if (pid != null && sid != null && trackId != null) {
       const cached = getCache(pid, sid, trackId);
 
-      if (cached?.length) {
+      if (cached !== undefined) {
         return cached;
       }
     }
@@ -233,6 +293,123 @@ const currentTrack = computed({
     trackList.value[activeTrackIndex.value] = val;
   },
 });
+const currentReviewCounts = computed(() => countOpenReviews(currentTrack.value?.reviewIssues ?? []));
+const currentTrackStoryboardCount = computed(() => {
+  const trackId = currentTrack.value?.id;
+  if (trackId == null) return 0;
+  const matched = storyboardList.value.filter((item) => Number(item.trackId) === Number(trackId));
+  if (matched.length) return matched.length;
+  return imageList.value.filter((item) => item.sources === "storyboard").length;
+});
+const currentTrackStoryboardDuration = computed(() => {
+  const trackId = currentTrack.value?.id;
+  if (trackId == null) return 0;
+  const matched = storyboardList.value.filter((item) => Number(item.trackId) === Number(trackId));
+  return matched.reduce((total, item) => total + Number(item.duration || 0), 0);
+});
+const currentReferenceCount = computed(() => imageList.value.filter((item) => item.id != null).length);
+const currentTrackStoryboards = computed(() => {
+  const trackId = currentTrack.value?.id;
+  const byId = new Map(storyboardList.value.map((item) => [Number(item.id), item]));
+  const matched = trackId == null ? [] : storyboardList.value.filter((item) => Number(item.trackId) === Number(trackId));
+  const referenced = imageList.value
+    .filter((item) => item.sources === "storyboard" && item.id != null)
+    .map((item) => byId.get(Number(item.id)))
+    .filter((item): item is StoryboardItem => Boolean(item));
+  return Array.from(new Map([...matched, ...referenced].map((item) => [Number(item.id), item])).values());
+});
+const hasUnreadyStoryboardForCurrentTrack = computed(() =>
+  currentTrackStoryboards.value.some((item) => item.factStatus !== "ready"),
+);
+
+function ensureCurrentTrackStoryboardReady() {
+  if (!hasUnreadyStoryboardForCurrentTrack.value) return true;
+  window.$message.warning(STRUCTURED_FACT_REQUIRED_MESSAGE);
+  return false;
+}
+
+function mergeTrackReviews(trackIds: number[], reviews: ProductionReviewSuggestion[]) {
+  const byTrackId = new Map<string, ProductionReviewSuggestion[]>();
+  reviews.forEach((review) => {
+    const key = String(review.parentId ?? review.targetId);
+    const list = byTrackId.get(key) ?? [];
+    list.push(review);
+    byTrackId.set(key, list);
+  });
+  trackList.value.forEach((track) => {
+    if (!trackIds.includes(track.id)) return;
+    const matched = byTrackId.get(String(track.id)) ?? reviews.filter((review) => String(review.targetId) === String(track.id));
+    track.reviewIssues = matched;
+    const hasBlocking = matched.some((review) => review.status === "open" && review.severity === "blocking");
+    const hasOpen = matched.some((review) => review.status === "open");
+    track.reviewState = hasBlocking ? "blocked" : hasOpen ? "hasIssues" : "passed";
+  });
+}
+
+async function reviewTracks(trackIds: number[]) {
+  const ids = trackIds.filter((id) => id != null);
+  if (!project.value?.id || !ids.length) return;
+  reviewLoading.value = true;
+  try {
+    const result = await reviewVideoTracks({
+      projectId: Number(project.value.id),
+      scriptId: episodesId.value,
+      trackIds: ids,
+    });
+    mergeTrackReviews(ids, result?.suggestions ?? []);
+    window.$message.success("Review completed");
+  } catch (e) {
+    window.$message.error(getReviewMessage(e));
+  } finally {
+    reviewLoading.value = false;
+  }
+}
+
+function reviewCurrentTrack() {
+  if (!currentTrack.value?.id) return;
+  void reviewTracks([currentTrack.value.id]);
+}
+
+async function refreshAfterReviewAction() {
+  await getGenerateData();
+}
+
+async function resolveCurrentTrackReviews(payload: {
+  actions: Array<{ suggestionId: number; action: "accept" | "revise" | "ignore"; instruction?: string }>;
+  userInstruction?: string;
+}) {
+  const track = currentTrack.value;
+  const projectId = Number(project.value?.id);
+  const scriptId = Number(episodesId.value);
+  const actions = payload.actions.filter(
+    (item) => item.suggestionId && ["accept", "revise", "ignore"].includes(item.action),
+  );
+  if (!track?.id || !projectId || !actions.length) return;
+  reviewLoading.value = true;
+  try {
+    const request = {
+      projectId,
+      scriptId: Number.isFinite(scriptId) ? scriptId : undefined,
+      targetType: "videoPrompt" as const,
+      targetId: track.id,
+      actions,
+      userInstruction: payload.userInstruction?.trim() || undefined,
+    };
+    const result = await resolveProductionReviewBatch({
+      ...request,
+    });
+    const prompt = result?.revision?.prompt;
+    if (typeof prompt === "string") track.prompt = prompt;
+    await refreshAfterReviewAction();
+    const refreshed = trackList.value.find((item) => item.id === track.id);
+    if (typeof prompt === "string" && refreshed) refreshed.prompt = prompt;
+    window.$message.success(actions.some((item) => item.action !== "ignore") ? "已提交 AI 统一修订" : "已忽略选中建议");
+  } catch (e) {
+    window.$message.error(getReviewMessage(e));
+  } finally {
+    reviewLoading.value = false;
+  }
+}
 
 /** 将时长限制在模型支持的范围内 */
 watch(
@@ -366,7 +543,13 @@ async function getGenerateData(options: { forceCache?: boolean } = {}) {
   });
 
   storyboardList.value = (data.storyboardList ?? []).map((item: StoryboardItem) =>
-    attachLegacyMediaFields(item as any, normalizeMediaRef((item as any).media ?? item, "image")),
+    attachLegacyMediaFields(
+      {
+        ...item,
+        factStatus: item.factStatus === "ready" || item.factStatus === "draft" || item.factStatus === "legacy" ? item.factStatus : "legacy",
+      } as any,
+      normalizeMediaRef((item as any).media ?? item, "image"),
+    ),
   ) as StoryboardItem[];
   data.trackList = (data.trackList ?? []).map((track: TrackItem) => ({
     ...track,
@@ -394,7 +577,7 @@ async function getGenerateData(options: { forceCache?: boolean } = {}) {
     data.trackList.forEach((track: TrackItem) => {
       if (track.id == null) return;
       const cached = getCache(pid, sid, track.id);
-      if (cached?.length) {
+      if (cached !== undefined) {
         track.medias = cached as unknown as TrackMedia[];
       }
     });
@@ -541,29 +724,47 @@ function handlePromptBlur() {
 
 /** 单个轨道生成提示词 */
 async function genText() {
+  if (!ensureCurrentTrackStoryboardReady()) return;
+  if (currentTrack.value?.prompt?.trim()) {
+    const dlg = DialogPlugin.confirm({
+      header: "Overwrite prompt",
+      body: "AI prompt generation will replace the current edited prompt. Continue?",
+      confirmBtn: "Overwrite",
+      cancelBtn: $t("common.cancel"),
+      onConfirm: async () => {
+        dlg.destroy();
+        await genTextConfirmed();
+      },
+      onCancel: () => dlg.destroy(),
+    });
+    return;
+  }
+  await genTextConfirmed();
+}
+
+async function genTextConfirmed() {
+  if (!ensureCurrentTrackStoryboardReady()) return;
   if (currentTrack.value.id == null) return;
   taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), currentTrack.value.id));
-  let info = [];
+  let info: Array<{ id: number; sources: WorkbenchReferenceSource }> = [];
   const currentTrackId = currentTrack.value.id;
   const changeTrack = currentTrack.value;
-  if (modelParmas.value.mode == "text") {
-    info = changeTrack?.medias.map(({ id, sources }) => ({ id, sources }));
-  } else {
+  if (modelParmas.value.mode !== "text") {
     info =
-      modelParmas.value.mode === "text"
-        ? []
-        : (() => {
-            const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-            const preSliced = frameMode.includes(modelParmas.value.mode)
-              ? imageList.value.slice(0, 2)
-              : modelParmas.value.mode === "singleImage"
-                ? imageList.value.slice(0, 1)
-                : imageList.value;
-            const filtered = preSliced.filter((item) => item.id).map(({ id, sources }) => ({ id, sources }));
-            if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
-            if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
-            return filtered;
-          })();
+      (() => {
+        const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
+        const preSliced = frameMode.includes(modelParmas.value.mode)
+          ? imageList.value.slice(0, 2)
+          : modelParmas.value.mode === "singleImage"
+            ? imageList.value.slice(0, 1)
+            : imageList.value;
+        const filtered = preSliced
+          .filter((item): item is UploadItem & { id: number; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.sources))
+          .map(({ id, sources }) => ({ id, sources }));
+        if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
+        if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
+        return filtered;
+      })();
   }
   currentTrack.value.state = "生成中";
   currentTrack.value.status = "processing";
@@ -642,6 +843,16 @@ onMounted(() => {
 });
 /** 单个轨道生成视频 */
 async function generateVideo() {
+  if (!ensureCurrentTrackStoryboardReady()) return;
+  if (!currentTrack.value?.prompt?.trim()) {
+    window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
+    return;
+  }
+  if (isTrackBlocked(currentTrack.value)) {
+    const blocking = currentTrack.value.reviewIssues?.find((review) => review.status === "open" && review.severity === "blocking");
+    window.$message.error(blocking?.message || "Video generation is blocked by open production review issues");
+    return;
+  }
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.generateConfirm"),
     body: $t("workbench.generate.generateConfirmBody"),
@@ -687,7 +898,7 @@ async function generateVideo() {
         });
         syncVideoTasks();
       } catch (e) {
-        window.$message.error((e as any)?.message ?? "视频发起生成请求失败");
+        window.$message.error(getReviewMessage(e) || "视频发起生成请求失败");
       } finally {
       }
     },
@@ -714,6 +925,30 @@ function releaseVideoTask(id: number) {
 function releasePromptTask(id: number) {
   promptTaskBindings.get(id)?.();
   promptTaskBindings.delete(id);
+}
+
+async function refreshCompletedPrompt(track: TrackItem) {
+  if (!track.id || promptResultRefreshing.has(track.id)) return;
+  const projectId = Number(project.value?.id);
+  const scriptId = Number(episodesId.value);
+  if (!projectId || !scriptId) return;
+  promptResultRefreshing.add(track.id);
+  try {
+    const { data } = await axios.post("/production/workbench/checkVideoPrompt", {
+      projectId,
+      scriptId,
+      trackIds: [track.id],
+    });
+    const records = Array.isArray(data) ? data : data?.data;
+    const record = Array.isArray(records) ? records.find((item: any) => Number(item.id) === Number(track.id)) : null;
+    if (record?.prompt !== undefined) track.prompt = record.prompt;
+    if (record?.state) track.state = record.state;
+    if (record?.reason !== undefined) track.reason = record.reason;
+  } catch (e) {
+    console.warn("[workbench-prompt] failed to refresh completed prompt", e);
+  } finally {
+    promptResultRefreshing.delete(track.id);
+  }
 }
 
 function applyVideoTask(video: VideoItem, task: RuntimeTask) {
@@ -749,7 +984,9 @@ function applyPromptTask(track: TrackItem, task: RuntimeTask) {
       : task.status === "failed" || task.status === "cancelled"
         ? "生成失败"
         : "生成中";
-  if (record.prompt !== undefined) track.prompt = record.prompt;
+  const prompt = record.prompt ?? record.text ?? record.content ?? record.result;
+  if (prompt !== undefined) track.prompt = String(prompt);
+  else if (task.status === "completed") void refreshCompletedPrompt(track);
   track.reason = task.reason ?? "";
   if (task.status === "failed" && !reportedFailures.has(task.key)) {
     reportedFailures.add(task.key);
@@ -870,13 +1107,44 @@ onUnmounted(() => {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 8px;
   }
+  .trackReviewSummary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 36px;
+    padding: 8px 10px;
+    border: 1px solid var(--td-component-border);
+    border-radius: 6px;
+    background: var(--td-bg-color-container);
+    .trackGroupInfo {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--td-text-color-secondary);
+        font-size: 12px;
+      }
+    }
+    .trackReviewTags {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+  }
   .generate {
     flex: 1;
     min-height: 0;
     width: 100%;
     gap: 5px;
     .prompt {
-      width: 50%;
+      width: 38%;
       height: 100%;
       min-height: 0;
       .videoPrompt {
@@ -907,9 +1175,16 @@ onUnmounted(() => {
       }
     }
     .video {
-      width: 50%;
+      width: 34%;
       height: 100%;
       min-height: 0;
+    }
+    .reviewAside {
+      width: 28%;
+      min-width: 280px;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
     }
   }
   .track {

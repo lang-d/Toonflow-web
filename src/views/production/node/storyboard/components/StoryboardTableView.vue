@@ -11,7 +11,11 @@
           </t-button>
           <span>{{ group.title }}</span>
           <t-tag size="small" variant="light">{{ group.items.length }}</t-tag>
+          <t-tag v-if="group.beatId" size="small" variant="outline">{{ group.beatId }}</t-tag>
         </div>
+        <t-tooltip v-if="group.intent" :content="group.intent">
+          <div class="groupIntent">{{ group.intent }}</div>
+        </t-tooltip>
         <t-button size="small" variant="outline" :disabled="!group.items.some((item: any) => item.id)" @click="emit('generateGroup', group.items)">
           <template #icon><i-play-one /></template>
           {{ $t("workbench.production.node.storyboard.generateImage") }}
@@ -32,6 +36,9 @@
             <t-checkbox :checked="selectedIds.includes(row.id!)" :disabled="!row.id" @change="(checked: boolean) => emit('toggleSelect', row.id!, checked)" />
             <t-tag :style="{ backgroundColor: tagColors[getStoryboardIndex(row) % tagColors.length], color: '#fff', border: 'none' }">
               S{{ String(getStoryboardIndex(row) + 1).padStart(2, "0") }}
+            </t-tag>
+            <t-tag v-if="row.factStatus && row.factStatus !== 'ready'" size="small" :theme="getFactStatusTheme(row.factStatus)" variant="light">
+              {{ getFactStatusLabel(row.factStatus) }}
             </t-tag>
           </div>
         </template>
@@ -79,8 +86,16 @@
         </template>
         <template #image="{ row }">
           <div class="tableImageCell">
-            <div v-if="row.src && row.state === '已完成'" class="storyboardThumbWrap" :style="{ aspectRatio: getImageRatio(row.src) }" @click="emit('openImageViewer', row)">
-              <img :src="row.src" class="storyboardThumb" loading="lazy" @load="emit('imageLoad', row.src, $event)" />
+            <div
+              v-if="getStoryboardImageUrl(row, 'display') && row.state === '已完成'"
+              class="storyboardThumbWrap"
+              :style="{ aspectRatio: getImageRatio(getStoryboardImageUrl(row, 'display')) }"
+              @click="emit('openImageViewer', row)">
+              <img
+                :src="getStoryboardImageUrl(row, 'display')"
+                class="storyboardThumb"
+                loading="lazy"
+                @load="emit('imageLoad', getStoryboardImageUrl(row, 'display'), $event)" />
             </div>
             <div v-else class="thumbPlaceholder">
               <t-loading v-if="row.state === '生成中'" size="small" />
@@ -96,7 +111,7 @@
                 </t-button>
               </t-tooltip>
               <t-tooltip :content="$t('workbench.production.node.storyboard.editNode')">
-                <t-button size="small" shape="circle" variant="text" @click="emit('editStoryboardImage', row, [row.src || ''], null)">
+                <t-button size="small" shape="circle" variant="text" @click="emit('editStoryboardImage', row, [getStoryboardImageUrl(row, 'preview') || ''], null)">
                   <template #icon><i-edit /></template>
                 </t-button>
               </t-tooltip>
@@ -146,6 +161,7 @@ defineProps<{
   getStoryboardReferences: (row: any) => any[];
   getGroupedReferences: (row: any) => any[];
   getImageRatio: (src: string) => string;
+  getStoryboardImageUrl: (row: any, purpose?: "preview" | "display") => string;
 }>();
 
 const emit = defineEmits<{
@@ -171,5 +187,17 @@ function handleDurationInput(row: any, event: Event) {
   const value = Number((event.target as HTMLInputElement).value);
   row.duration = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
   emit("saveStoryboardInfo", row);
+}
+
+function getFactStatusLabel(status?: string) {
+  if (status === "draft") return "草稿/待补齐";
+  if (status === "legacy") return "旧数据/待整理";
+  return status || "";
+}
+
+function getFactStatusTheme(status?: string) {
+  if (status === "draft") return "warning";
+  if (status === "legacy") return "default";
+  return "success";
 }
 </script>

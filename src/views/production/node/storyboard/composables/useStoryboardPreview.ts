@@ -10,7 +10,7 @@ export function useStoryboardPreview(options: {
   getTrackTitle: (index: number) => string;
   getStoryboardIndex: (row: Storyboard) => number;
 }) {
-  const hasTrackGroups = computed(() => options.storyboard.value.some((item) => item.trackId != null));
+  const hasTrackGroups = computed(() => options.storyboard.value.some((item) => item.groupKey || item.groupName || item.trackId != null));
   const storyboardGroups = computed<StoryboardGroup[]>(() => {
     if (!hasTrackGroups.value) {
       return [{ key: "all", title: options.getTrackTitle(0), items: options.storyboard.value }];
@@ -18,14 +18,16 @@ export function useStoryboardPreview(options: {
     const groups: StoryboardGroup[] = [];
     const keyIndex = new Map<string, number>();
     options.storyboard.value.forEach((item) => {
-      const key = `track-${item.trackId ?? "none"}`;
+      const key = item.groupKey ? `group-${item.groupKey}` : `track-${item.trackId ?? "none"}`;
       let index = keyIndex.get(key);
       if (index == null) {
         index = groups.length;
         keyIndex.set(key, index);
         groups.push({
           key,
-          title: item.trackName || options.getTrackTitle(groups.length),
+          title: item.groupName || item.trackName || options.getTrackTitle(groups.length),
+          intent: item.groupIntent,
+          beatId: item.beatId,
           items: [],
         });
       }
@@ -34,7 +36,8 @@ export function useStoryboardPreview(options: {
     return groups;
   });
 
-  const isFinished = (item: Storyboard) => Boolean(item.src && item.state === "已完成");
+  const isFinished = (item: Storyboard) =>
+    Boolean((item.media || item.src || item.url || item.imageUrl || item.thumbnail || item.thumb) && item.state === "已完成");
   const previewItems = computed(() => options.storyboard.value.filter(isFinished));
   const sliceStoryboardPages = (items: Storyboard[]) => {
     const pages: Storyboard[][] = [];
@@ -114,7 +117,11 @@ export function useStoryboardPreview(options: {
 
   function getStoryboardDescription(item: Storyboard) {
     const fallback = `S${String(options.getStoryboardIndex(item) + 1).padStart(2, "0")}`;
-    return item.videoDesc || item.prompt || fallback;
+    const structured = [item.location, item.timeOfDay, item.picture, item.action, item.dialogue, item.sound]
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+      .join(" · ");
+    return structured || fallback;
   }
 
   return {
