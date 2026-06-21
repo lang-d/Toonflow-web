@@ -21,6 +21,7 @@
 import { Handle, Position } from "@vue-flow/core";
 import editImage from "../../components/editImage/index.vue";
 import { type AssetItem, type DeriveAsset } from "../../utils/flowBuilder";
+import type { ImageFlowSavePayload } from "../../utils/editImageType";
 import axios from "@/utils/axios";
 import useProjectStore from "@/stores/project";
 import productionAgentStore from "@/stores/productionAgent";
@@ -76,14 +77,13 @@ function openEdit(row: DeriveAsset, referanceImageUrl: string) {
 
 async function generateDeriveAsset(row: DeriveAsset) {
   if (!row.id || row.state === "生成中") return;
-  row.state = "生成中";
   row.errorReason = "";
   try {
     await persistDeriveAssetPrompt(row);
     await productionStore.batchGenerateAssets([row.id]);
   } catch (e) {
-    row.state = "生成失败";
     row.errorReason = (e as any)?.message ?? "";
+    window.$message.error(row.errorReason || $t("workbench.novel.genFailed"));
   }
 }
 
@@ -140,7 +140,7 @@ async function submitAddDerive() {
   }
 }
 
-async function save({ imageUrl, flowId, prompt }: { imageUrl: string; flowId: number; prompt?: string }) {
+async function save({ imageUrl, media, flowId, prompt }: ImageFlowSavePayload) {
   const targetId = currentRow.value.targetId ?? currentAssetsId.value;
   if (!targetId || !flowId) return;
   let targetAsset: DeriveAsset | null = null;
@@ -153,7 +153,13 @@ async function save({ imageUrl, flowId, prompt }: { imageUrl: string; flowId: nu
     if (prompt !== undefined) target.prompt = prompt;
     if (imageUrl) {
       target.src = imageUrl;
+      target.media = media;
+      target.status = "completed";
       target.state = "已完成";
+      target.errorReason = "";
+      delete target.taskId;
+      delete target.legacyTaskId;
+      delete target.imageId;
     }
     break;
   }

@@ -2,10 +2,11 @@ import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import { useChat, type XmlTagEvent } from "@/utils/useChat";
-import type { FlowData, Storyboard, StoryboardGenerationLastFailure, StoryboardTableMeta } from "@/views/production/utils/flowBuilder";
+import type { DeriveAsset, FlowData, Storyboard, StoryboardGenerationLastFailure, StoryboardTableMeta } from "@/views/production/utils/flowBuilder";
 import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 import type { Ref, WatchStopHandle } from "vue";
 
@@ -30,11 +31,75 @@ interface EpisodeSession {
   storyboardFailureNoticeKeys: Set<string>;
 }
 
+interface ProductionAssetTaskBinding {
+  projectId: number;
+  episodeId: number;
+  assetId: number;
+  taskId: string;
+  legacyTaskId?: number;
+  imageId?: number;
+  createdAt: number;
+}
+
 const CHAT_TERMINAL_STATUSES = new Set(["complete", "error", "stop"]);
 const HISTORY_RECONCILE_MAX_ATTEMPTS = 20;
 const HISTORY_RECONCILE_RETRY_DELAY_MS = 3_000;
 const HISTORY_RECONCILE_TEXT_TAIL_LENGTH = 80;
 const HISTORY_RECONCILE_MIN_TEXT_LENGTH = 120;
+const PRODUCTION_ASSET_TASK_TTL_MS = 24 * 60 * 60 * 1000;
+
+function productionAssetTaskStorageKey(projectId: number, episodeId: number) {
+  return `productionAssetTasks:${projectId}:${episodeId}`;
+}
+
+function readProductionAssetTaskBindings(projectId: number, episodeId: number): ProductionAssetTaskBinding[] {
+  const key = productionAssetTaskStorageKey(projectId, episodeId);
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    if (!Array.isArray(parsed)) throw new Error("invalid production asset task cache");
+    const now = Date.now();
+    const bindings = parsed.filter(
+      (item): item is ProductionAssetTaskBinding =>
+        Number(item?.projectId) === projectId &&
+        Number(item?.episodeId) === episodeId &&
+        Number.isFinite(Number(item?.assetId)) &&
+        typeof item?.taskId === "string" &&
+        Boolean(item.taskId) &&
+        Number.isFinite(Number(item?.createdAt)) &&
+        now - Number(item.createdAt) <= PRODUCTION_ASSET_TASK_TTL_MS,
+    );
+    if (bindings.length !== parsed.length) {
+      if (bindings.length) localStorage.setItem(key, JSON.stringify(bindings));
+      else localStorage.removeItem(key);
+    }
+    return bindings;
+  } catch {
+    localStorage.removeItem(key);
+    return [];
+  }
+}
+
+function writeProductionAssetTaskBindings(projectId: number, episodeId: number, bindings: ProductionAssetTaskBinding[]) {
+  const key = productionAssetTaskStorageKey(projectId, episodeId);
+  try {
+    if (bindings.length) localStorage.setItem(key, JSON.stringify(bindings));
+    else localStorage.removeItem(key);
+  } catch (error) {
+    console.warn("[productionAgent] failed to persist asset task bindings", error);
+  }
+}
+
+function upsertProductionAssetTaskBinding(binding: ProductionAssetTaskBinding) {
+  const bindings = readProductionAssetTaskBindings(binding.projectId, binding.episodeId).filter((item) => item.assetId !== binding.assetId);
+  bindings.push(binding);
+  writeProductionAssetTaskBindings(binding.projectId, binding.episodeId, bindings);
+}
+
+function removeProductionAssetTaskBinding(projectId: number, episodeId: number, assetId: number, taskId?: string) {
+  const bindings = readProductionAssetTaskBindings(projectId, episodeId);
+  const next = bindings.filter((item) => item.assetId !== assetId || (taskId !== undefined && item.taskId !== taskId));
+  if (next.length !== bindings.length) writeProductionAssetTaskBindings(projectId, episodeId, next);
+}
 
 function createEmptyFlowData(): FlowData {
   return {
@@ -110,7 +175,8 @@ function extractMessageText(message: any): string {
 function findTerminalHistoryMessage(messages: unknown, messageIds: string[], liveMessages: ChatMessagesData[]) {
   if (!Array.isArray(messages)) return undefined;
   const idSet = new Set(messageIds);
-  const idMatched = messages.find((message: any) => idSet.has(String(message?.id)) && isTerminalHistoryMessage(message));
+  const terminalMessages = messages.filter(isTerminalHistoryMessage);
+  const idMatched = terminalMessages.find((message: any) => idSet.has(String(message?.id)));
   if (idMatched) return idMatched;
 
   const liveTails = liveMessages
@@ -118,8 +184,7 @@ function findTerminalHistoryMessage(messages: unknown, messageIds: string[], liv
     .filter((text) => text.length >= HISTORY_RECONCILE_MIN_TEXT_LENGTH)
     .map((text) => text.slice(-HISTORY_RECONCILE_TEXT_TAIL_LENGTH));
   if (!liveTails.length) return undefined;
-  return messages.find((message: any) => {
-    if (!isTerminalHistoryMessage(message)) return false;
+  return terminalMessages.find((message: any) => {
     const historyText = extractMessageText(message);
     return liveTails.some((tail) => historyText.includes(tail));
   });
@@ -288,7 +353,12 @@ function makeProductionAgentStore(projectId: string) {
         assets: (data?.assets ?? []).map((asset: any) =>
           normalizeAssetLike({
             ...asset,
-            derive: (asset.derive ?? []).map((derive: any) => normalizeAssetLike(derive)),
+            derive: (asset.derive ?? []).map((derive: any) =>
+              normalizeAssetLike({
+                ...derive,
+                status: normalizeTaskStatus(derive.status ?? derive.state, "pending"),
+              }),
+            ),
           }),
         ),
         storyboard: (data?.storyboard ?? []).map((item: any) =>
@@ -298,6 +368,36 @@ function makeProductionAgentStore(projectId: string) {
           }),
         ),
       };
+    }
+
+    function findDeriveAssetById(session: EpisodeSession, id: number) {
+      for (const asset of session.flowData.value.assets) {
+        const derive = asset.derive?.find((item) => item.id === id);
+        if (derive) return derive;
+      }
+      return undefined;
+    }
+
+    function restoreAssetTaskBindings(session: EpisodeSession) {
+      const numericProjectId = Number(projectId);
+      readProductionAssetTaskBindings(numericProjectId, session.episodeId).forEach((binding) => {
+        const derive = findDeriveAssetById(session, binding.assetId);
+        if (!derive) {
+          removeProductionAssetTaskBinding(numericProjectId, session.episodeId, binding.assetId, binding.taskId);
+          return;
+        }
+        derive.taskId = binding.taskId;
+        derive.legacyTaskId = binding.legacyTaskId;
+        derive.imageId = binding.imageId;
+        derive.status = "queued";
+        derive.state = "生成中";
+      });
+    }
+
+    function toLegacyAssetState(status: RuntimeTask["status"]): DeriveAsset["state"] {
+      if (status === "completed") return "已完成";
+      if (status === "failed" || status === "cancelled") return "生成失败";
+      return "生成中";
     }
 
     function notifyStoryboardFailure(session: EpisodeSession, failure: StoryboardGenerationLastFailure | null) {
@@ -442,6 +542,11 @@ function makeProductionAgentStore(projectId: string) {
       return data;
     }
 
+    function applyAgentHistory(session: EpisodeSession, data: unknown) {
+      session.chatApi.messages.value = [...cloneDefaultMessages(defMsg), ...normalizeHistoryMessages(data)];
+      session.chatApi.syncGenerationStatus();
+    }
+
     async function reconcileLiveGenerationHistory(session: EpisodeSession, messageIds: string[], reconcileId: number, attempt = 0) {
       if (reconcileId !== session.historyReconcileId) return;
       const currentLiveMessages = session.chatApi.messages.value.filter(isLiveGenerationMessage);
@@ -455,7 +560,7 @@ function makeProductionAgentStore(projectId: string) {
         const terminalMessage = findTerminalHistoryMessage(data, activeIds, currentLiveMessages);
         if (terminalMessage) {
           const terminalMessageId = String((terminalMessage as any).id);
-          await getHistory(session.episodeId);
+          applyAgentHistory(session, data);
           if ((terminalMessage as any).status === "complete" || (terminalMessage as any).status == null) {
             await refreshCompletedAgentFlow(session, terminalMessageId);
           }
@@ -531,8 +636,12 @@ function makeProductionAgentStore(projectId: string) {
             callback({ success: true, message: $t("storyboard.assets.derivativeDelSuccess") });
           });
           socket.on("generateDeriveAsset", async (data, callback) => {
-            const assetsData = await batchGenerateAssets(data.ids, session.episodeId);
-            callback({ success: true, message: assetsData });
+            try {
+              const assetsData = await batchGenerateAssets(data.ids, session.episodeId);
+              callback({ success: true, message: assetsData });
+            } catch (error) {
+              callback({ success: false, message: (error as any)?.message ?? String(error) });
+            }
           });
           socket.on("generateStoryboard", async (data, callback) => {
             const storyData = await batchGenerateStoryboard(data.ids, data.compulsory ?? false, session.episodeId);
@@ -660,7 +769,10 @@ function makeProductionAgentStore(projectId: string) {
         episodesId: session.episodeId,
       });
       if (requestId !== session.flowRequestId) return;
+      session.assetTaskBindings.forEach((release) => release());
+      session.assetTaskBindings.clear();
       session.flowData.value = normalizeFlowData(data);
+      restoreAssetTaskBindings(session);
       notifyStoryboardFailure(session, session.flowData.value.storyboardGenerationLastFailure);
       if (import.meta.env.DEV) {
         const table = session.flowData.value.storyboardTable;
@@ -686,14 +798,15 @@ function makeProductionAgentStore(projectId: string) {
       session.storyboardTaskBindings.delete(id);
     }
 
-    function applyAssetTask(session: EpisodeSession, derive: any, task: RuntimeTask) {
+    function applyAssetTask(session: EpisodeSession, deriveId: number, task: RuntimeTask) {
+      const derive = findDeriveAssetById(session, deriveId);
+      if (!derive) {
+        queueMicrotask(() => releaseAssetTask(session, deriveId));
+        return;
+      }
       const record = (task.result ?? {}) as any;
-      derive.state =
-        task.status === "completed"
-          ? ("已完成" as any)
-          : task.status === "failed" || task.status === "cancelled"
-            ? ("生成失败" as any)
-            : ("生成中" as any);
+      derive.status = task.status;
+      derive.state = toLegacyAssetState(task.status);
       const media = normalizeMediaRef(record.media ?? record, "image");
       if (media) {
         derive.media = media;
@@ -702,7 +815,8 @@ function makeProductionAgentStore(projectId: string) {
       derive.errorReason = task.reason ?? "";
       if (record.prompt !== undefined) derive.prompt = record.prompt;
       if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
-        queueMicrotask(() => releaseAssetTask(session, derive.id));
+        removeProductionAssetTaskBinding(Number(projectId), session.episodeId, deriveId, task.unifiedTaskId ?? derive.taskId);
+        queueMicrotask(() => releaseAssetTask(session, deriveId));
       }
     }
 
@@ -738,12 +852,14 @@ function makeProductionAgentStore(projectId: string) {
       const activeIds = new Set<number>();
       session.flowData.value.assets.forEach((asset) => {
         asset.derive?.forEach((derive) => {
-          if (normalizeTaskStatus(derive.state, "pending") !== "processing") return;
+          const status = normalizeTaskStatus(derive.status ?? derive.state, "pending");
+          if (!["queued", "submitting", "processing"].includes(status)) return;
+          const unifiedTaskId = derive.taskId;
+          if (!unifiedTaskId) return;
           activeIds.add(derive.id);
-          const unifiedTaskId = (derive as any).taskId;
           if (
             session.assetTaskBindings.has(derive.id) &&
-            (!unifiedTaskId || taskCenter.getTask(createTaskKey("assetImage", Number(projectId), derive.id, undefined, unifiedTaskId)))
+            taskCenter.getTask(createTaskKey("assetImage", Number(projectId), derive.id, undefined, unifiedTaskId))
           ) {
             return;
           }
@@ -753,14 +869,13 @@ function makeProductionAgentStore(projectId: string) {
               key: createTaskKey("assetImage", Number(projectId), derive.id, undefined, unifiedTaskId),
               domain: "assetImage",
               unifiedTaskId,
-              legacyTaskId: (derive as any).legacyTaskId,
+              legacyTaskId: derive.legacyTaskId,
               targetType: "productionAsset",
               targetId: derive.id,
               projectId: Number(projectId),
-              scriptId: session.episodeId,
-              status: "processing",
+              status,
             },
-            (task) => applyAssetTask(session, derive, task),
+            (task) => applyAssetTask(session, derive.id, task),
           );
           session.assetTaskBindings.set(derive.id, release);
         });
@@ -847,41 +962,105 @@ function makeProductionAgentStore(projectId: string) {
 
     async function batchGenerateAssets(allIds: number[], scriptId = episodesId.value) {
       const session = getSession(scriptId);
-      if (!session) return;
-      allIds.forEach((id) => taskCenter.removeTask(createTaskKey("assetImage", Number(projectId), id)));
-      session.flowData.value.assets.forEach((asset) => {
-        asset.derive?.forEach((derive) => {
-          if (allIds.includes(derive.id)) derive.state = "生成中" as any;
-        });
+      if (!session) throw new Error("Production session is unavailable");
+      const currentProject = projectStore().project;
+      if (!currentProject?.imageModel || !currentProject.imageQuality) throw new Error("请先配置图片模型和清晰度");
+
+      const selectedIds = new Set(allIds);
+      const selectedDeriveAssets = session.flowData.value.assets
+        .flatMap((asset) => asset.derive ?? [])
+        .filter((derive) => selectedIds.has(derive.id))
+        .map((derive) => ({ derive, type: normalizeAssetImageType(derive.type) }))
+        .filter((item): item is typeof item & { type: NonNullable<typeof item.type> } => !!item.type);
+
+      if (!selectedDeriveAssets.length) throw new Error("没有可生成图片的角色、场景或道具资产");
+
+      const previousState = new Map(
+        selectedDeriveAssets.map(({ derive }) => [
+          derive.id,
+          {
+            state: derive.state,
+            taskId: derive.taskId,
+            legacyTaskId: derive.legacyTaskId,
+            imageId: derive.imageId,
+            errorReason: derive.errorReason,
+            status: derive.status,
+          },
+        ]),
+      );
+      const previousBindings = new Map(
+        readProductionAssetTaskBindings(Number(projectId), session.episodeId)
+          .filter((binding) => selectedIds.has(binding.assetId))
+          .map((binding) => [binding.assetId, binding]),
+      );
+
+      selectedDeriveAssets.forEach(({ derive }) => {
+        releaseAssetTask(session, derive.id);
+        taskCenter.removeTask(createTaskKey("assetImage", Number(projectId), derive.id, undefined, derive.taskId));
+        removeProductionAssetTaskBinding(Number(projectId), session.episodeId, derive.id);
+        derive.taskId = undefined;
+        derive.legacyTaskId = undefined;
+        derive.errorReason = "";
+        derive.status = "submitting";
+        derive.state = "生成中";
       });
-      syncAssetTasks(session);
+
       try {
-        const { data } = await axios.post("/production/assets/batchGenerateAssetsImage", {
-          assetIds: allIds,
-          projectId,
-          scriptId: session.episodeId,
+        const { data } = await axios.post("/assetsGenerate/batchGenerateImageAssets", {
+          projectId: Number(projectId),
+          model: currentProject.imageModel,
+          resolution: currentProject.imageQuality,
           concurrentCount: settingStore().otherSetting.assetsBatchGenereateSize,
+          items: selectedDeriveAssets.map(({ derive, type }) => ({
+            id: derive.id,
+            type,
+            name: derive.name ?? "",
+            prompt: derive.prompt ?? "",
+            ...(derive.base64 ? { base64: derive.base64 } : {}),
+          })),
         });
-        if (data) {
-          data.forEach((record: { id: number; state: any; src: string; taskId?: string; legacyTaskId?: number }) => {
-            const normalized = normalizeAssetLike(record) as any;
-            session.flowData.value.assets.forEach((asset) => {
-              asset.derive?.forEach((derive) => {
-                if (derive.id === record.id) {
-                  derive.state = normalized.state;
-                  (derive as any).media = normalized.media;
-                  derive.src = normalized.src;
-                  (derive as any).taskId = record.taskId;
-                  (derive as any).legacyTaskId = record.legacyTaskId;
-                  if ((record as any).prompt !== undefined) derive.prompt = (record as any).prompt;
-                }
-              });
-            });
+        const result = data?.tasks ? data : data?.data;
+        const deriveById = new Map(selectedDeriveAssets.map(({ derive }) => [derive.id, derive]));
+        const returnedAssetIds = new Set<number>();
+        for (const task of result?.tasks ?? []) {
+          const derive = deriveById.get(task.assetId);
+          if (!derive || !task.taskId) continue;
+          returnedAssetIds.add(derive.id);
+          derive.taskId = task.taskId;
+          derive.legacyTaskId = task.legacyTaskId;
+          derive.imageId = task.imageId;
+          derive.status = "queued";
+          derive.state = "生成中";
+          upsertProductionAssetTaskBinding({
+            projectId: Number(projectId),
+            episodeId: session.episodeId,
+            assetId: derive.id,
+            taskId: task.taskId,
+            legacyTaskId: task.legacyTaskId,
+            imageId: task.imageId,
+            createdAt: Date.now(),
           });
         }
+        selectedDeriveAssets.forEach(({ derive }) => {
+          if (returnedAssetIds.has(derive.id)) return;
+          const previous = previousState.get(derive.id);
+          if (previous) Object.assign(derive, previous);
+          const previousBinding = previousBindings.get(derive.id);
+          if (previousBinding) upsertProductionAssetTaskBinding(previousBinding);
+        });
         syncAssetTasks(session);
-        return data;
-      } catch {}
+        return result;
+      } catch (error) {
+        selectedDeriveAssets.forEach(({ derive }) => {
+          releaseAssetTask(session, derive.id);
+          const previous = previousState.get(derive.id);
+          if (previous) Object.assign(derive, previous);
+          const previousBinding = previousBindings.get(derive.id);
+          if (previousBinding) upsertProductionAssetTaskBinding(previousBinding);
+        });
+        syncAssetTasks(session);
+        throw error;
+      }
     }
 
     function updateContext(scriptId = episodesId.value) {
@@ -901,8 +1080,12 @@ function makeProductionAgentStore(projectId: string) {
       try {
         const data = await fetchAgentMemory(session);
         if (requestId !== session.historyRequestId) return;
-        session.chatApi.messages.value = [...cloneDefaultMessages(defMsg), ...normalizeHistoryMessages(data)];
-        session.chatApi.syncGenerationStatus();
+        if (hasLiveGenerationMessage(session.chatApi.messages.value)) {
+          session.chatApi.syncGenerationStatus();
+          startLiveGenerationHistoryReconcile(session);
+          return;
+        }
+        applyAgentHistory(session, data);
       } finally {
         if (requestId === session.historyRequestId) session.loadingHistory.value = false;
       }

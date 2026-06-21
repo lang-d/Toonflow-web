@@ -1,6 +1,6 @@
 import type { Ref } from "vue";
 import { computed } from "vue";
-import type { MediaRef } from "@/types/api";
+import type { MediaRef, TaskStatus } from "@/types/api";
 
 // ==================== 固定节点 ID ====================
 const NODE_IDS = {
@@ -26,8 +26,13 @@ export interface DeriveAsset {
   media?: MediaRef;
   flowId?: number;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
-  type: "role" | "tool" | "scene" | "clip";
+  status?: TaskStatus;
+  type: "role" | "tool" | "scene" | "clip" | "props";
   errorReason?: string;
+  taskId?: string;
+  legacyTaskId?: number;
+  imageId?: number;
+  base64?: string | null;
 }
 
 export interface AssetItem {
@@ -38,7 +43,8 @@ export interface AssetItem {
   src: string;
   media?: MediaRef;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
-  type: "role" | "tool" | "scene" | "clip";
+  status?: TaskStatus;
+  type: "role" | "tool" | "scene" | "clip" | "props";
   flowId?: number;
   derive: DeriveAsset[];
   errorReason?: string;

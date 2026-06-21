@@ -444,6 +444,7 @@ import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 const { otherSetting } = storeToRefs(settingStore());
 
@@ -787,11 +788,31 @@ async function handleBatchGenerateImage() {
       window.$message.warning($t("workbench.assets.noPromptForImage", { name: asset.name }));
       return false;
     }
-    return true;
+    return !!normalizeAssetImageType(asset.type);
   });
-  if (validAssets.length === 0) return;
+  if (validAssets.length === 0) {
+    window.$message.warning($t("workbench.assets.selectAtLeastOne"));
+    return;
+  }
 
-  // 设置 state 为 '生成中'，让轮询自动接管状态跟踪
+  const previousState = new Map(
+    validAssets.map((asset) => [
+      asset.id,
+      {
+        state: asset.state,
+        taskId: asset.taskId,
+        legacyTaskId: asset.legacyTaskId,
+        imageId: asset.imageId,
+      },
+    ]),
+  );
+
+  validAssets.forEach((asset) => {
+    releaseAssetImageTask(asset.id);
+    taskCenter.removeTask(createTaskKey("assetImage", Number(project.value?.id), asset.id, undefined, asset.taskId));
+    asset.taskId = undefined;
+    asset.legacyTaskId = undefined;
+  });
   const validParentAssets = validAssets.filter((a) => selectedRowKeys.value.includes(a.id));
   const validSubAssets = validAssets.filter((a) => selectedSubRowKeys.value.includes(a.id));
   validParentAssets.forEach((asset) => {
@@ -810,13 +831,13 @@ async function handleBatchGenerateImage() {
 
   try {
     const { data } = await axios.post("/assetsGenerate/batchGenerateImageAssets", {
-      projectId: project.value?.id,
+      projectId: Number(project.value?.id),
       model: selectValue.value,
       resolution: resolution.value,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
       items: validAssets.map((item) => ({
         id: item.id,
-        type: item.type ?? "props",
+        type: normalizeAssetImageType(item.type)!,
         name: item.name ?? $t("workbench.cornerScape.unnamed"),
         prompt: item.prompt || item.describe,
       })),
@@ -834,16 +855,10 @@ async function handleBatchGenerateImage() {
   } catch (e: any) {
     window.$message.error($t("workbench.assets.imageGenFail", { name: "", error: e.message ?? "" }));
     validAssets.forEach((asset) => {
-      // 在父级和子级中都查找
-      const parentTarget = tableData.value.find((row) => row.id === asset.id);
-      if (parentTarget) {
-        parentTarget.state = "生成失败";
-      } else {
-        tableData.value.forEach((row) => {
-          const subTarget = row.sonAssets?.find((sub) => sub.id === asset.id);
-          if (subTarget) subTarget.state = "生成失败";
-        });
-      }
+      releaseAssetImageTask(asset.id);
+      const target = findAssetById(asset.id);
+      const previous = previousState.get(asset.id);
+      if (target && previous) Object.assign(target, previous);
     });
   }
 }

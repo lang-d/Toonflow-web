@@ -1,6 +1,6 @@
 <template>
   <t-card class="assetCard deriveCard">
-    <div v-if="item.src && item.state == '已完成'" class="assetImageWrap">
+    <div v-if="item.src && taskStatus === 'completed'" class="assetImageWrap">
       <t-image :src="item.src" fit="contain" class="assetImage" :preview="true">
         <template #overlayContent>
           <div class="imageToolsWrap show">
@@ -10,15 +10,15 @@
       </t-image>
     </div>
     <div v-else class="assetImageWrap assetImagePlaceholder">
-      <t-loading v-if="item.state == '生成中'" size="small" />
-      <t-tooltip v-else-if="item.state == '生成失败'" :content="item?.errorReason">
+      <t-loading v-if="isActive" size="small" />
+      <t-tooltip v-else-if="taskStatus === 'failed' || taskStatus === 'cancelled'" :content="item?.errorReason">
         <div style="color: red; cursor: pointer">{{ $t("workbench.novel.genFailed") }}</div>
       </t-tooltip>
       <t-empty v-else size="small" :title="$t('workbench.production.node.assets.notGenerated')" />
     </div>
     <div class="assetActions" @click.stop>
       <t-tooltip :content="$t('workbench.production.node.assets.generateSingle')">
-        <t-button size="small" shape="circle" :loading="item.state === '生成中'" @click="emit('generate', item)">
+        <t-button size="small" shape="circle" :loading="isActive" @click="emit('generate', item)">
           <template #icon><i-play-one /></template>
         </t-button>
       </t-tooltip>
@@ -45,11 +45,15 @@
 
 <script setup lang="ts">
 import type { DeriveAsset } from "../../../utils/flowBuilder";
+import { normalizeTaskStatus } from "@/stores/taskCenter";
 
-defineProps<{
+const props = defineProps<{
   item: DeriveAsset;
   parentSrc: string;
 }>();
+
+const taskStatus = computed(() => normalizeTaskStatus(props.item.status ?? props.item.state, "pending"));
+const isActive = computed(() => ["queued", "submitting", "processing"].includes(taskStatus.value));
 
 const emit = defineEmits<{
   generate: [item: DeriveAsset];

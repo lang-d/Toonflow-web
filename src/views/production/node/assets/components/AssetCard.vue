@@ -10,8 +10,8 @@
       </t-image>
     </div>
     <div v-else class="assetImageWrap assetImagePlaceholder">
-      <t-loading v-if="asset.state == '生成中'" size="small" />
-      <span v-else-if="asset.state == '生成失败'" style="color: red">{{ $t("workbench.production.node.assets.generateFailed") }}</span>
+      <t-loading v-if="isActive" size="small" />
+      <span v-else-if="taskStatus === 'failed' || taskStatus === 'cancelled'" style="color: red">{{ $t("workbench.production.node.assets.generateFailed") }}</span>
       <t-empty v-else size="small" :title="$t('workbench.production.node.assets.notGenerated')" />
     </div>
     <div class="cardInfo">
@@ -26,8 +26,12 @@
 
 <script setup lang="ts">
 import type { AssetItem } from "../../../utils/flowBuilder";
+import { normalizeTaskStatus } from "@/stores/taskCenter";
 
-defineProps<{
+const props = defineProps<{
   asset: AssetItem;
 }>();
+
+const taskStatus = computed(() => normalizeTaskStatus(props.asset.status ?? props.asset.state, "pending"));
+const isActive = computed(() => ["queued", "submitting", "processing"].includes(taskStatus.value));
 </script>
