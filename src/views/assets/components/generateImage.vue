@@ -77,14 +77,14 @@
                 v-for="(img, index) in resultImages"
                 :key="index"
                 class="resultImage"
-                :class="{ 'is-selected': selectedImageIndex === index, 'is-disabled': img.state !== '已完成' }"
-                @click="img.state === '已完成' ? selectImage(index) : null"
+                :class="{ 'is-selected': selectedImageIndex === index, 'is-disabled': !isImageCompleted(img) }"
+                @click="isImageCompleted(img) ? selectImage(index) : null"
                 @mouseenter="hoveredImageIndex = index"
                 @mouseleave="hoveredImageIndex = null">
-                <div v-if="img.state === '生成中'" class="generating-overlay f ac jc">
+                <div v-if="isImageActive(img)" class="generating-overlay f ac jc">
                   <t-loading :text="$t('workbench.assets.gen.generatingLabel')" />
                 </div>
-                <div v-else-if="img.state === '生成失败' && !img.src" class="failed-overlay f ac jc">
+                <div v-else-if="isImageFailed(img) && !img.src" class="failed-overlay f ac jc">
                   <div style="text-align: center">
                     <i-close-one theme="filled" size="40" fill="#d0021b" />
                     <div style="margin-top: 10px; color: #d0021b; font-weight: bold">{{ $t("workbench.assets.gen.genFailed") }}</div>
@@ -95,10 +95,10 @@
                     <t-loading />
                   </template>
                 </t-image>
-                <div class="preview" v-show="hoveredImageIndex === index && img.state === '已完成'">
+                <div class="preview" v-show="hoveredImageIndex === index && isImageCompleted(img)">
                   <i-preview-open theme="outline" size="25" fill="#ffffff" @click.stop="handlePreview(img.originalSrc || img.src)" />
                 </div>
-                <div class="selected" v-show="selectedImageIndex === index && img.state === '已完成'">
+                <div class="selected" v-show="selectedImageIndex === index && isImageCompleted(img)">
                   <i-check-one theme="filled" size="25" fill="#000" />
                 </div>
                 <div class="delImage" v-show="hoveredImageIndex === index">
@@ -143,7 +143,7 @@ import modelSelect from "@/components/modelSelect.vue";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 import axios from "@/utils/axios";
-import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 const props = defineProps<{
@@ -281,6 +281,7 @@ type GeneratedImageItem = {
   src: string;
   originalSrc?: string;
   state: string;
+  status?: RuntimeTask["status"];
   selected?: boolean;
   taskId?: string;
   legacyTaskId?: string | number;
@@ -289,6 +290,23 @@ type GeneratedImageItem = {
 const resultImages = ref<GeneratedImageItem[]>([]);
 const taskCenter = useTaskCenterStore();
 let releaseCurrentImageTask: (() => void) | null = null;
+
+function getImageStatus(item: GeneratedImageItem) {
+  return normalizeTaskStatus(item.status ?? item.state, "pending");
+}
+
+function isImageActive(item: GeneratedImageItem) {
+  return ["queued", "submitting", "processing"].includes(getImageStatus(item));
+}
+
+function isImageCompleted(item: GeneratedImageItem) {
+  return getImageStatus(item) === "completed";
+}
+
+function isImageFailed(item: GeneratedImageItem) {
+  const status = getImageStatus(item);
+  return status === "failed" || status === "cancelled";
+}
 //预览图片
 const visible = ref(false);
 const trigger = ref();
@@ -327,7 +345,7 @@ function applyImageTask(task: RuntimeTask) {
   }
 }
 
-function bindImageTask(taskId?: string, legacyTaskId?: string | number) {
+function bindImageTask(taskId?: string, legacyTaskId?: string | number, status?: RuntimeTask["status"]) {
   if (!props.formData.id || (!taskId && !legacyTaskId)) return;
   releaseImageTask();
   releaseCurrentImageTask = taskCenter.registerTask(
@@ -339,7 +357,7 @@ function bindImageTask(taskId?: string, legacyTaskId?: string | number) {
       targetType: "asset",
       targetId: props.formData.id,
       projectId: Number(project.value?.id),
-      status: "processing",
+      status: status && ["queued", "submitting", "processing"].includes(status) ? status : "processing",
     },
     applyImageTask,
   );
@@ -356,6 +374,7 @@ async function fetchGeneratedImages() {
       src: media ? getMediaPreviewUrl(media) : getThumbnailImageUrl(fallbackPreview),
       originalSrc: media ? getMediaOriginalUrl(media) : getOriginalImageUrl(fallbackOriginal),
       state: item.state,
+      status: normalizeTaskStatus(item.status ?? item.state, "pending"),
       selected: item.selected ?? false,
       taskId: item.taskId,
       legacyTaskId: item.legacyTaskId,
@@ -366,14 +385,14 @@ async function fetchGeneratedImages() {
   if (selectedIdx !== -1) {
     selectedImageIndex.value = selectedIdx;
   }
-  const generating = images.find((img: { state: string; taskId?: string; legacyTaskId?: string | number }) => img.state === "生成中" && (img.taskId || img.legacyTaskId));
-  if (generating && generateImageShow.value) bindImageTask(generating.taskId, generating.legacyTaskId);
+  const generating = images.find((img: GeneratedImageItem) => isImageActive(img) && (img.taskId || img.legacyTaskId));
+  if (generating && generateImageShow.value) bindImageTask(generating.taskId, generating.legacyTaskId, generating.status);
 }
 
 //选择图片
 function selectImage(index: number) {
   const img = resultImages.value[index];
-  if (img.state === "已完成") {
+  if (isImageCompleted(img)) {
     selectedImageIndex.value = index;
     window.$message.success($t("workbench.assets.gen.imageSelected"));
   }

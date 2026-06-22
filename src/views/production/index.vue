@@ -2,7 +2,11 @@
   <VueFlow
     v-if="hasProject"
     class="flowMain"
-    :class="{ 'is-interacting': isInteracting && otherSetting.interacting, 'space-dragging': isSpacePressed }"
+    :class="{
+      'is-interacting': isInteracting && otherSetting.interacting,
+      'is-layouting': loading,
+      'space-dragging': isSpacePressed,
+    }"
     id="mainFlowBox"
     @mousedown="onSpaceMouseDown"
     :nodes="episodesId ? nodes : []"
@@ -12,7 +16,7 @@
     :elements-selectable="!isSpacePressed"
     :only-render-visible-elements="false"
     :max-zoom="10"
-    :min-zoom="0.1"
+    :min-zoom="0.02"
     :nodes-focusable="false"
     :edges-focusable="false"
     :edges-updatable="false"
@@ -26,7 +30,6 @@
     :delete-key-code="null"
     :zoom-activation-key-code="null"
     :pan-activation-key-code="null"
-    fit-view-on-init
     :pan-on-scroll="canvasWheelEvent == 'scroll' ? true : false"
     :zoom-on-scroll="canvasWheelEvent == 'zoom' ? true : false"
     :selection-key-code="null"
@@ -240,15 +243,12 @@ function goProjectList() {
 
 interface ProductionCanvasMemory {
   episodesId?: number;
-  viewport?: {
-    x: number;
-    y: number;
-    zoom: number;
-  };
 }
 
 const isBootstrapping = ref(true);
 const canvasMemoryKey = computed(() => `productionCanvasMemory:${project.value?.id ?? "unknown"}`);
+let episodeLoadRequestId = 0;
+let layoutRequestId = 0;
 
 function readCanvasMemory(): ProductionCanvasMemory | null {
   try {
@@ -267,24 +267,9 @@ function writeCanvasMemory(memory: ProductionCanvasMemory) {
 
 function saveCurrentCanvasMemory() {
   if (!project.value?.id || !episodesId.value) return;
-  const viewport = getViewport();
   writeCanvasMemory({
     episodesId: episodesId.value,
-    viewport: {
-      x: viewport.x,
-      y: viewport.y,
-      zoom: viewport.zoom,
-    },
   });
-}
-
-async function restoreSavedViewport(memory: ProductionCanvasMemory | null) {
-  if (!memory?.viewport || memory.episodesId !== episodesId.value) return false;
-  const nodesReady = await waitForNodesReady();
-  if (!nodesReady) return false;
-  await nextTick();
-  setViewport(memory.viewport);
-  return true;
 }
 
 // 节点位置
@@ -299,6 +284,15 @@ const nodePositions = ref<Record<string, { x: number; y: number }>>({
 });
 const { nodes, edges } = useFlowBuilder(flowData, nodePositions);
 
+function getRenderedNodeDimensions(id: string) {
+  const element = document.querySelector<HTMLElement>(`.vue-flow__node[data-id="${id}"]`);
+  const node = findNode(id);
+  return {
+    width: element?.offsetWidth || node?.dimensions?.width || 0,
+    height: element?.offsetHeight || node?.dimensions?.height || 0,
+  };
+}
+
 // 用户拖拽节点后，同步位置到 nodePositions，防止 flowData 更新时位置被复原
 onNodeDragStop(async ({ nodes: draggedNodes }) => {
   await nextTick();
@@ -308,12 +302,13 @@ onNodeDragStop(async ({ nodes: draggedNodes }) => {
   }
 });
 
-async function waitForNodesReady(maxRetries = 60, delay = 100) {
+async function waitForNodesReady(maxRetries = 60, delay = 100, isCurrent: () => boolean = () => true) {
   while (maxRetries-- > 0) {
+    if (!isCurrent()) return false;
     const nodes = getNodes.value;
     if (nodes.length > 0) {
       // 等待所有节点的 DOM 尺寸都已被 VueFlow 测量完成
-      const allMeasured = nodes.every((n) => n.dimensions?.width && n.dimensions.width > 0);
+      const allMeasured = nodes.every((node) => getRenderedNodeDimensions(node.id).width > 0);
       if (allMeasured) return true;
     }
     await new Promise((resolve) => setTimeout(resolve, delay));
@@ -332,7 +327,7 @@ onMounted(async () => {
     isBootstrapping.value = false;
     return;
   }
-  await loadEpisodeFlow({ restoreViewport: true });
+  await loadEpisodeFlow();
   isBootstrapping.value = false;
 });
 
@@ -363,131 +358,190 @@ async function getScriptData() {
   }
 }
 
-async function layoutGraph(direction: "LR" | "TB" = "LR") {
-  // 等待 DOM 渲染完成
-  await nextTick();
+interface LayoutGraphOptions {
+  isCurrent?: () => boolean;
+  manageLoading?: boolean;
+  stabilizationPass?: number;
+}
 
-  // 强制 VueFlow 重新测量所有节点尺寸
-  const nodeIds = getNodes.value.map((n) => n.id);
-  updateNodeInternals(nodeIds);
-  await nextTick();
+async function layoutGraph(direction: "LR" | "TB" = "LR", options: LayoutGraphOptions = {}) {
+  const requestId = ++layoutRequestId;
+  const isCurrent = () => requestId === layoutRequestId && (options.isCurrent?.() ?? true);
+  const manageLoading = options.manageLoading ?? true;
+  if (manageLoading) loading.value = true;
 
-  // 等待所有节点的 dimensions 都已被 VueFlow 正确测量且尺寸稳定
-  let retries = 30;
-  let lastSnapshot = "";
-  let stableCount = 0;
-  while (retries-- > 0) {
-    const allMeasured = nodeIds.every((id) => {
-      const node = findNode(id);
-      return node?.dimensions?.width && node.dimensions.width > 0;
-    });
-    if (allMeasured) {
-      // 检查尺寸是否稳定（连续两次相同才算就绪）
-      const snapshot = nodeIds
-        .map((id) => {
-          const node = findNode(id);
-          return `${id}:${node?.dimensions?.width}x${node?.dimensions?.height}`;
-        })
-        .join(",");
-      if (snapshot === lastSnapshot) {
-        stableCount++;
-        if (stableCount >= 2) break;
-      } else {
-        stableCount = 0;
-        lastSnapshot = snapshot;
+  try {
+    // 等待 DOM 渲染完成
+    await nextTick();
+
+    // 强制 VueFlow 重新测量所有节点尺寸
+    if (!isCurrent()) return false;
+    if (!(await waitForNodesReady(60, 100, isCurrent))) return false;
+    const nodeIds = getNodes.value.map((n) => n.id);
+    updateNodeInternals(nodeIds);
+    await nextTick();
+    if (!isCurrent()) return false;
+
+    // 等待所有节点的 dimensions 都已被 VueFlow 正确测量且尺寸稳定
+    let retries = 30;
+    let lastSnapshot = "";
+    let stableCount = 0;
+    while (retries-- > 0) {
+      if (!isCurrent()) return false;
+      const allMeasured = nodeIds.every((id) => {
+        return getRenderedNodeDimensions(id).width > 0;
+      });
+      if (allMeasured) {
+        // 检查尺寸是否稳定（连续两次相同才算就绪）
+        const snapshot = nodeIds
+          .map((id) => {
+            const dimensions = getRenderedNodeDimensions(id);
+            return `${id}:${dimensions.width}x${dimensions.height}`;
+          })
+          .join(",");
+        if (snapshot === lastSnapshot) {
+          stableCount++;
+          if (stableCount >= 2) break;
+        } else {
+          stableCount = 0;
+          lastSnapshot = snapshot;
+        }
       }
-    }
-    await new Promise((r) => setTimeout(r, 80));
-  }
-
-  const oldData = toObject();
-
-  // 从 VueFlow 内部获取已测量的尺寸（流坐标系，无需 zoom 换算）
-  const dims = new Map<string, { w: number; h: number }>();
-  for (const n of oldData.nodes) {
-    const vNode = findNode(n.id);
-    dims.set(n.id, {
-      w: vNode?.dimensions?.width ?? 150,
-      h: vNode?.dimensions?.height ?? 50,
-    });
-  }
-
-  const gap = 80; // 节点之间的最小留白
-
-  if (direction === "LR") {
-    // 手动布局：主链从左到右排列，assets 放在 script 正下方
-    const mainChain = ["script", "scriptPlan", "storyboardTable", "storyboard", "workbench", "poster"];
-    const chainNodes = mainChain.filter((id) => oldData.nodes.some((n) => n.id === id));
-
-    // 逐个排列主链节点，x 基于前一个节点的右边缘 + gap，顶部对齐
-    let curX = 0;
-    for (const id of chainNodes) {
-      const node = oldData.nodes.find((n) => n.id === id);
-      const dim = dims.get(id);
-      if (!node || !dim) continue;
-      node.position.x = curX;
-      node.position.y = 0;
-      curX += dim.w + gap;
+      await new Promise((r) => setTimeout(r, 80));
     }
 
-    // assets 放在 script 正下方
-    const scriptNode = oldData.nodes.find((n) => n.id === "script");
-    const assetsNode = oldData.nodes.find((n) => n.id === "assets");
-    const scriptDim = dims.get("script");
-    if (scriptNode && assetsNode && scriptDim) {
-      assetsNode.position.x = scriptNode.position.x;
-      assetsNode.position.y = scriptNode.position.y + scriptDim.h + gap;
+    if (!isCurrent()) return false;
+    const oldData = toObject();
+
+    // 从 VueFlow 内部获取已测量的尺寸（流坐标系，无需 zoom 换算）
+    const dims = new Map<string, { w: number; h: number }>();
+    for (const n of oldData.nodes) {
+      const dimensions = getRenderedNodeDimensions(n.id);
+      dims.set(n.id, {
+        w: dimensions.width || 150,
+        h: dimensions.height || 50,
+      });
     }
 
-    // 确保 assets 不与主链中其他节点重叠（检查水平方向）
-    if (assetsNode) {
-      const assetsDim = dims.get("assets");
-      if (assetsDim) {
-        const assetsRight = assetsNode.position.x + assetsDim.w;
-        const assetsTop = assetsNode.position.y;
-        const assetsBottom = assetsTop + assetsDim.h;
-        for (const id of chainNodes) {
-          if (id === "script") continue;
-          const node = oldData.nodes.find((n) => n.id === id);
-          const dim = dims.get(id);
-          if (!node || !dim) continue;
-          const nodeTop = node.position.y;
-          const nodeBottom = nodeTop + dim.h;
-          // 检查垂直范围是否有交集
-          const vertOverlap = assetsTop < nodeBottom && assetsBottom > nodeTop;
-          if (vertOverlap && node.position.x < assetsRight) {
-            // 将该节点及其后续都右移
-            const shift = assetsRight + gap - node.position.x;
-            const idx = chainNodes.indexOf(id);
-            for (let i = idx; i < chainNodes.length; i++) {
-              const shiftNode = oldData.nodes.find((n) => n.id === chainNodes[i]);
-              if (shiftNode) shiftNode.position.x += shift;
+    const gap = 80; // 节点之间的最小留白
+
+    if (direction === "LR") {
+      // 手动布局：主链从左到右排列，assets 放在 script 正下方
+      const mainChain = ["script", "scriptPlan", "storyboardTable", "storyboard", "workbench", "poster"];
+      const chainNodes = mainChain.filter((id) => oldData.nodes.some((n) => n.id === id));
+
+      // 逐个排列主链节点，x 基于前一个节点的右边缘 + gap，顶部对齐
+      let curX = 0;
+      for (const id of chainNodes) {
+        const node = oldData.nodes.find((n) => n.id === id);
+        const dim = dims.get(id);
+        if (!node || !dim) continue;
+        node.position.x = curX;
+        node.position.y = 0;
+        curX += dim.w + gap;
+      }
+
+      // assets 放在 script 正下方
+      const scriptNode = oldData.nodes.find((n) => n.id === "script");
+      const assetsNode = oldData.nodes.find((n) => n.id === "assets");
+      const scriptDim = dims.get("script");
+      if (scriptNode && assetsNode && scriptDim) {
+        assetsNode.position.x = scriptNode.position.x;
+        assetsNode.position.y = scriptNode.position.y + scriptDim.h + gap;
+      }
+
+      // 确保 assets 不与主链中其他节点重叠（检查水平方向）
+      if (assetsNode) {
+        const assetsDim = dims.get("assets");
+        if (assetsDim) {
+          const assetsRight = assetsNode.position.x + assetsDim.w;
+          const assetsTop = assetsNode.position.y;
+          const assetsBottom = assetsTop + assetsDim.h;
+          for (const id of chainNodes) {
+            if (id === "script") continue;
+            const node = oldData.nodes.find((n) => n.id === id);
+            const dim = dims.get(id);
+            if (!node || !dim) continue;
+            const nodeTop = node.position.y;
+            const nodeBottom = nodeTop + dim.h;
+            // 检查垂直范围是否有交集
+            const vertOverlap = assetsTop < nodeBottom && assetsBottom > nodeTop;
+            if (vertOverlap && node.position.x < assetsRight) {
+              // 将该节点及其后续都右移
+              const shift = assetsRight + gap - node.position.x;
+              const idx = chainNodes.indexOf(id);
+              for (let i = idx; i < chainNodes.length; i++) {
+                const shiftNode = oldData.nodes.find((n) => n.id === chainNodes[i]);
+                if (shiftNode) shiftNode.position.x += shift;
+              }
+              break;
             }
-            break;
           }
         }
       }
+    } else {
+      // TB 方向使用 dagre 自动布局
+      const widths = [...dims.values()].map((d) => d.w);
+      const heights = [...dims.values()].map((d) => d.h);
+      const avgWidth = widths.length ? widths.reduce((a, b) => a + b, 0) / widths.length : 150;
+      const avgHeight = heights.length ? heights.reduce((a, b) => a + b, 0) / heights.length : 50;
+      const ranksep = avgHeight * 0.5 + gap;
+      const nodesep = avgWidth * 0.3 + gap;
+      oldData.nodes = layout(oldData.nodes, oldData.edges, direction, nodesep, ranksep);
     }
-  } else {
-    // TB 方向使用 dagre 自动布局
-    const widths = [...dims.values()].map((d) => d.w);
-    const heights = [...dims.values()].map((d) => d.h);
-    const avgWidth = widths.length ? widths.reduce((a, b) => a + b, 0) / widths.length : 150;
-    const avgHeight = heights.length ? heights.reduce((a, b) => a + b, 0) / heights.length : 50;
-    const ranksep = avgHeight * 0.5 + gap;
-    const nodesep = avgWidth * 0.3 + gap;
-    oldData.nodes = layout(oldData.nodes, oldData.edges, direction, nodesep, ranksep);
+
+    if (!isCurrent()) return false;
+    await fromObject(oldData);
+    await nextTick();
+    if (!isCurrent()) return false;
+
+    // 富文本和图片节点可能在位置更新后继续改变尺寸，最终 fitView 前再次等待稳定。
+    updateNodeInternals(nodeIds);
+    let finalRetries = 30;
+    let finalSnapshot = "";
+    let finalStableCount = 0;
+    while (finalRetries-- > 0) {
+      if (!isCurrent()) return false;
+      const snapshot = nodeIds
+        .map((id) => {
+          const dimensions = getRenderedNodeDimensions(id);
+          return `${id}:${dimensions.width}x${dimensions.height}`;
+        })
+        .join(",");
+      if (snapshot === finalSnapshot) {
+        finalStableCount++;
+        if (finalStableCount >= 8) break;
+      } else {
+        finalStableCount = 0;
+        finalSnapshot = snapshot;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    const dimensionsChanged = oldData.nodes.some((node) => {
+      const previous = dims.get(node.id);
+      const current = getRenderedNodeDimensions(node.id);
+      if (!previous || !current.width || !current.height) return false;
+      return Math.abs(previous.w - current.width) > 1 || Math.abs(previous.h - current.height) > 1;
+    });
+    const stabilizationPass = options.stabilizationPass ?? 0;
+    if (dimensionsChanged && stabilizationPass < 4) {
+      return layoutGraph(direction, {
+        ...options,
+        stabilizationPass: stabilizationPass + 1,
+      });
+    }
+
+    // 布局后同步新位置到 nodePositions，防止后续 flowData 变化时回跳
+    for (const node of getNodes.value) {
+      nodePositions.value[node.id] = { x: node.position.x, y: node.position.y };
+    }
+
+    await fitView({ duration: 300, padding: "5%" });
+    return true;
+  } finally {
+    if (manageLoading && requestId === layoutRequestId) loading.value = false;
   }
-
-  await fromObject(oldData);
-  await nextTick();
-
-  // 布局后同步新位置到 nodePositions，防止后续 flowData 变化时回跳
-  for (const node of getNodes.value) {
-    nodePositions.value[node.id] = { x: node.position.x, y: node.position.y };
-  }
-
-  fitView({ duration: 300 });
 }
 
 const title = computed(() => {
@@ -500,27 +554,32 @@ watch(
   async (newVal) => {
     if (!newVal || newVal < 0) return;
     if (isBootstrapping.value) return;
-    await loadEpisodeFlow({ restoreViewport: false });
+    await loadEpisodeFlow();
   },
 );
 
 async function refFlowData() {
-  if (!hasProject.value) return;
-  await agentStore.getFlowData();
-  await layoutGraph();
-  saveCurrentCanvasMemory();
+  await loadEpisodeFlow();
 }
 
-async function loadEpisodeFlow({ restoreViewport }: { restoreViewport: boolean }) {
-  if (!hasProject.value) return;
-  await agentStore.getFlowData();
-  agentStore.updateContext();
-  await agentStore.getHistory();
-  const restored = restoreViewport ? await restoreSavedViewport(readCanvasMemory()) : false;
-  if (!restored) {
-    await layoutGraph();
+async function loadEpisodeFlow() {
+  const scriptId = episodesId.value;
+  if (!hasProject.value || !scriptId) return;
+
+  const requestId = ++episodeLoadRequestId;
+  const isCurrent = () => requestId === episodeLoadRequestId && episodesId.value === scriptId;
+  loading.value = true;
+  try {
+    await agentStore.getFlowData(scriptId);
+    if (!isCurrent()) return;
+    agentStore.updateContext(scriptId);
+    await agentStore.getHistory(scriptId);
+    if (!isCurrent()) return;
+    await layoutGraph("LR", { isCurrent, manageLoading: false });
+    if (isCurrent()) saveCurrentCanvasMemory();
+  } finally {
+    if (isCurrent()) loading.value = false;
   }
-  saveCurrentCanvasMemory();
 }
 
 const current = useLocalStorage("productionCurrent", 0);
@@ -697,6 +756,12 @@ onBeforeUnmount(() => {
   :deep(.imageToolsWrap),
   :deep(.addBetween) {
     display: none !important;
+  }
+}
+
+.flowMain.is-layouting {
+  :deep(.assetItemBox) {
+    content-visibility: visible;
   }
 }
 $handelSize: 12px;

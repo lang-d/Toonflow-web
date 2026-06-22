@@ -14,7 +14,7 @@
               </t-tag>
             </div>
             <div
-              v-if="getStoryboardImageUrl(item, 'display') && item.state === '已完成'"
+              v-if="getStoryboardImageUrl(item, 'display') && isStoryboardCompleted(item)"
               class="frameImgWrap"
               :style="{ aspectRatio: getImageRatio(getStoryboardImageUrl(item, 'display')) }"
               @click="emit('editStoryboardImage', item, [getStoryboardImageUrl(item, 'preview')])">
@@ -25,8 +25,8 @@
                 @load="emit('imageLoad', getStoryboardImageUrl(item, 'display'), $event)" />
             </div>
             <div v-else class="generatingPlaceholder" :style="{ aspectRatio: defaultImageRatio }" @click="emit('editStoryboardImage', item, [])">
-              <t-loading v-if="item.state === '生成中'" size="small" />
-              <t-tooltip v-else-if="item.state === '生成失败'" :content="item.reason">
+              <t-loading v-if="isStoryboardActive(item)" size="small" />
+              <t-tooltip v-else-if="isStoryboardFailed(item)" :content="item.reason">
                 <span style="color: #ff4d4f">{{ $t("workbench.production.node.storyboard.genFailed") }}</span>
               </t-tooltip>
               <t-empty v-else size="small" :title="$t('workbench.production.node.storyboard.notGenerated')" />
@@ -59,6 +59,9 @@ defineProps<{
   tagColors: string[];
   getImageRatio: (src: string) => string;
   getStoryboardImageUrl: (row: any, purpose?: "preview" | "display") => string;
+  isStoryboardActive: (row: any) => boolean;
+  isStoryboardCompleted: (row: any) => boolean;
+  isStoryboardFailed: (row: any) => boolean;
 }>();
 
 const emit = defineEmits<{

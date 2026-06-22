@@ -26,7 +26,7 @@ const visible = defineModel<boolean>("visible", { default: false });
 defineProps<{
   historyLoading: boolean;
   historyItems: any[];
-  historySelectedId: number | null;
+  historySelectedId: number | string | null;
 }>();
 
 const emit = defineEmits<{

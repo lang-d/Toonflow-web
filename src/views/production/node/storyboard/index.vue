@@ -39,6 +39,9 @@
         :get-grouped-references="getGroupedReferences"
         :get-image-ratio="getImageRatio"
         :get-storyboard-image-url="getStoryboardImageUrl"
+        :is-storyboard-active="isStoryboardActive"
+        :is-storyboard-completed="isStoryboardCompleted"
+        :is-storyboard-failed="isStoryboardFailed"
         @toggle-group="toggleGroup"
         @generate-group="generateGroup"
         @toggle-select="toggleSelect"
@@ -61,6 +64,9 @@
         :tag-colors="tagColors"
         :get-image-ratio="getImageRatio"
         :get-storyboard-image-url="getStoryboardImageUrl"
+        :is-storyboard-active="isStoryboardActive"
+        :is-storyboard-completed="isStoryboardCompleted"
+        :is-storyboard-failed="isStoryboardFailed"
         @update:selected-ids="selectedIds = $event"
         @edit-storyboard-image="editStoryboaryImage"
         @regenerate-single-image="regenerateSingleImage"
@@ -159,7 +165,8 @@ import StoryboardHistoryDialog from "./components/StoryboardHistoryDialog.vue";
 import { openImageLightbox } from "@/composables/useImageLightbox";
 import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 import { getMediaOriginalUrl, getMediaPathForGeneration, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
-import type { MediaRef } from "@/types/api";
+import type { MediaRef, TaskStatus } from "@/types/api";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { useStoryboardPreview } from "./composables/useStoryboardPreview";
 import type { ImageHistoryItem, ReferenceView } from "./types";
 import type {
@@ -177,6 +184,7 @@ import "./styles.scss";
 const { project } = storeToRefs(projectStore());
 const productionStore = productionAgentStore();
 const { episodesId } = storeToRefs(productionStore);
+const taskCenter = useTaskCenterStore();
 const { open, onChange, onCancel } = useFileDialog({ multiple: false, reset: true, accept: ".png,.jpg,.jpeg,.webp" });
 
 const props = defineProps<{
@@ -203,7 +211,7 @@ const timelineIndex = ref(0);
 const historyVisible = ref(false);
 const historyLoading = ref(false);
 const historyItems = ref<ImageHistoryItem[]>([]);
-const historySelectedId = ref<number | null>(null);
+const historySelectedId = ref<number | string | null>(null);
 const currentHistoryItem = ref<Storyboard | null>(null);
 const promptEditorVisible = ref(false);
 const promptEditorLoading = ref(false);
@@ -240,9 +248,10 @@ const promptFactDraft = ref<StoryboardFactDraft>(createEmptyStoryboardFacts());
 const promptDraftReferences = ref<ReferenceImage[]>([]);
 const promptPrimaryNodeId = ref("");
 const promptNodeOptions = ref<{ label: string; value: string }[]>([]);
-const promptFlowSnapshot = ref<{ nodes: NodeType[]; edges: any[] } | null>(null);
+const promptFlowSnapshot = shallowRef<{ nodes: NodeType[]; edges: ReturnType<typeof cleanEdges> } | null>(null);
 const collapsedGroupKeys = ref<string[]>([]);
 const imageRatioMap = reactive<Record<string, string>>({});
+const storyboardFlowTaskReleases = new Map<number, () => void>();
 
 const currentRow = ref<{
   flowId?: number | null;
@@ -400,6 +409,30 @@ function assetTypeLabel(type?: string) {
     image: $t("workbench.production.node.storyboard.assetLocal"),
   };
   return map[type || ""] || $t("workbench.production.node.storyboard.assetOther");
+}
+
+function getStoryboardStatus(row: Storyboard, fallback: TaskStatus = "pending") {
+  return normalizeTaskStatus(row.status ?? row.state, fallback);
+}
+
+function isStoryboardActive(row: Storyboard) {
+  return ["queued", "submitting", "processing"].includes(getStoryboardStatus(row));
+}
+
+function isStoryboardCompleted(row: Storyboard) {
+  return getStoryboardStatus(row) === "completed";
+}
+
+function isStoryboardFailed(row: Storyboard) {
+  const status = getStoryboardStatus(row);
+  return status === "failed" || status === "cancelled";
+}
+
+function toStoryboardState(status: TaskStatus): Storyboard["state"] {
+  if (status === "completed") return "已完成";
+  if (status === "failed" || status === "cancelled") return "生成失败";
+  if (status === "queued" || status === "submitting" || status === "processing") return "生成中";
+  return "未生成";
 }
 
 function findAssetById(assetId: number) {
@@ -607,6 +640,11 @@ watch(promptPrimaryNodeId, (nodeId) => {
   if (nodeId && promptEditorVisible.value && !promptEditorLoading.value) loadPromptDraftFromNode(nodeId);
 });
 
+onBeforeUnmount(() => {
+  storyboardFlowTaskReleases.forEach((release) => release());
+  storyboardFlowTaskReleases.clear();
+});
+
 async function openPromptEditor(row: Storyboard) {
   currentPromptTarget.value = row;
   promptDraft.value = row.prompt || "";
@@ -623,7 +661,10 @@ async function openPromptEditor(row: Storyboard) {
     const { data } = await axios.post("/production/editImage/getImageFlow", { id: row.flowId });
     const nodes = (Array.isArray(data?.nodes) ? data.nodes : []) as NodeType[];
     const edges = Array.isArray(data?.edges) ? data.edges : [];
-    promptFlowSnapshot.value = { nodes, edges };
+    promptFlowSnapshot.value = {
+      nodes: cleanNodes(nodes) as NodeType[],
+      edges: cleanEdges(edges),
+    };
     const generatedNodes = nodes.filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated");
     promptNodeOptions.value = generatedNodes.map((node, index) => ({
       label: `${$t("workbench.production.node.storyboard.canvasNode")} ${index + 1}`,
@@ -853,6 +894,227 @@ function buildPromptFlow(row: Storyboard) {
   return { nodes, edges, primary };
 }
 
+function sameMediaRef(left: unknown, right: unknown) {
+  const leftPath = getMediaPathForGeneration(normalizeMediaRef(left, "image"));
+  const rightPath = getMediaPathForGeneration(normalizeMediaRef(right, "image"));
+  return Boolean(leftPath && rightPath && leftPath === rightPath);
+}
+
+function nodeMatchesStoryboardImage(node: Extract<NodeType, { type: "generated" }>, row: Storyboard) {
+  const media = normalizeMediaRef((row as any).media ?? row, "image");
+  const image = media ?? row.originalUrl ?? row.imageUrl ?? row.url ?? row.src ?? "";
+  return Boolean(
+    image &&
+      (sameMediaRef(node.data.resultMedia, image) ||
+        sameMediaRef(node.data.selectedResult?.media, image) ||
+        sameMediaRef(node.data.selectedResult?.url, image) ||
+        sameMediaRef(node.data.generatedImage, image)),
+  );
+}
+
+function resolveStoryboardPrimaryNode(nodes: NodeType[], row: Storyboard) {
+  const generatedNodes = nodes.filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated");
+  const imageMatched = generatedNodes.find((node) => nodeMatchesStoryboardImage(node, row));
+  return imageMatched ?? generatedNodes.find((node) => node.data.isPrimary) ?? (generatedNodes.length === 1 ? generatedNodes[0] : undefined);
+}
+
+function markPrimaryNode(nodes: NodeType[], primary: Extract<NodeType, { type: "generated" }>) {
+  nodes.forEach((node) => {
+    if (node.type === "generated") node.data.isPrimary = node.id === primary.id;
+  });
+}
+
+function getPrimaryNodeOrThrow(nodes: NodeType[], row: Storyboard) {
+  const primary = resolveStoryboardPrimaryNode(nodes, row);
+  if (!primary) throw new Error($t("workbench.production.node.storyboard.selectPrimaryRequired"));
+  markPrimaryNode(nodes, primary);
+  return primary;
+}
+
+function applyHistoryToPrimaryNode(nodes: NodeType[], item: ImageHistoryItem, row: Storyboard) {
+  const media = normalizeMediaRef(item.media ?? item.url ?? item, "image");
+  const selectedMediaPath = getMediaPathForGeneration(media);
+  if (!media || !selectedMediaPath) throw new Error($t("workbench.production.editImage.historyLoadFailed"));
+  const primary = getPrimaryNodeOrThrow(nodes, row);
+  const historyId = typeof item.id === "number" ? item.id : null;
+  primary.data = {
+    ...primary.data,
+    resultMedia: media,
+    generatedImage: getMediaPreviewUrl(media),
+    selectedResult: {
+      id: historyId,
+      url: getMediaOriginalUrl(media),
+      media,
+      prompt: item.prompt ?? primary.data.prompt,
+      model: item.model ?? primary.data.model,
+      ratio: item.ratio ?? primary.data.ratio,
+      quality: item.quality ?? primary.data.quality,
+      createTime: item.createTime,
+    },
+    historyId,
+    status: "completed",
+    state: "success",
+    taskId: null,
+    unifiedTaskId: null,
+    legacyTaskId: null,
+    reason: "",
+    isPrimary: true,
+  };
+  return { media, selectedMediaPath, primary };
+}
+
+async function loadStoryboardFlow(row: Storyboard) {
+  if (!row.flowId) throw new Error($t("workbench.production.node.storyboard.selectPrimaryRequired"));
+  const { data } = await axios.post("/production/editImage/getImageFlow", { id: row.flowId });
+  return {
+    nodes: structuredClone((Array.isArray(data?.nodes) ? data.nodes : []) as NodeType[]),
+    edges: cleanEdges(Array.isArray(data?.edges) ? data.edges : []),
+  };
+}
+
+function getPrimaryReferenceMediaPaths(nodes: NodeType[], edges: ReturnType<typeof cleanEdges>, primaryId: string) {
+  const refs = [...getIncomingReferences(nodes, edges, primaryId)];
+  const primary = nodes.find((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated" && node.id === primaryId);
+  refs.push(...(primary?.data.references ?? []));
+  return [
+    ...new Set(
+      refs
+        .map((item) => getMediaPathForGeneration(item.media ?? normalizeMediaRef(item, "image")))
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function releaseStoryboardFlowTask(storyboardId: number) {
+  storyboardFlowTaskReleases.get(storyboardId)?.();
+  storyboardFlowTaskReleases.delete(storyboardId);
+}
+
+function applyStoryboardFlowTask(storyboardId: number, nodeId: string, task: RuntimeTask) {
+  const row = storyboard.value.find((item) => item.id === storyboardId);
+  if (!row) {
+    releaseStoryboardFlowTask(storyboardId);
+    return;
+  }
+  row.status = task.status;
+  row.state = toStoryboardState(task.status);
+  row.reason = task.status === "completed" ? "" : (task.reason ?? "");
+  row.taskId = task.unifiedTaskId ?? String(task.legacyTaskId ?? task.taskId ?? row.taskId ?? "");
+  row.unifiedTaskId = task.unifiedTaskId ?? null;
+  row.legacyTaskId = task.legacyTaskId ?? null;
+
+  const media = normalizeMediaRef((task.result as any)?.media ?? task.result, "image");
+  if (media) {
+    row.media = media;
+    row.src = getMediaPreviewUrl(media);
+  }
+
+  if (task.status === "completed") {
+    queueMicrotask(() => {
+      void finalizeStoryboardFlowTask(row, nodeId, media).catch((error) => {
+        window.$message.error((error as any)?.message || $t("workbench.production.editImage.saveFailed"));
+      });
+      releaseStoryboardFlowTask(storyboardId);
+    });
+  } else if (task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseStoryboardFlowTask(storyboardId));
+  }
+}
+
+function bindStoryboardFlowTask(row: Storyboard, primaryNodeId: string, task: { taskId?: string | number; unifiedTaskId?: string; legacyTaskId?: string | number; status?: TaskStatus }) {
+  if (!row.id) return;
+  releaseStoryboardFlowTask(row.id);
+  const taskId = task.unifiedTaskId ?? task.legacyTaskId ?? task.taskId;
+  const release = taskCenter.registerTask(
+    {
+      key: createTaskKey("flowImage", Number(project.value?.id), row.id, primaryNodeId, task.unifiedTaskId),
+      domain: "flowImage",
+      taskId,
+      unifiedTaskId: task.unifiedTaskId,
+      legacyTaskId: task.legacyTaskId,
+      targetType: "storyboard",
+      targetId: row.id,
+      projectId: Number(project.value?.id),
+      scriptId: Number(episodesId.value),
+      nodeId: primaryNodeId,
+      status: task.status && ["queued", "submitting", "processing"].includes(task.status) ? task.status : "processing",
+    },
+    (runtimeTask) => applyStoryboardFlowTask(row.id!, primaryNodeId, runtimeTask),
+  );
+  storyboardFlowTaskReleases.set(row.id, release);
+}
+
+async function finalizeStoryboardFlowTask(row: Storyboard, nodeId: string, media?: MediaRef) {
+  if (!row.id || !row.flowId || !media) return;
+  const { nodes, edges } = await loadStoryboardFlow(row);
+  const primary = nodes.find((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated" && node.id === nodeId) ?? getPrimaryNodeOrThrow(nodes, row);
+  markPrimaryNode(nodes, primary);
+  const selectedMediaPath = getMediaPathForGeneration(primary.data.resultMedia ?? media);
+  if (!selectedMediaPath) return;
+  await axios.post("/production/editImage/saveImageFlow", {
+    flowId: row.flowId,
+    projectId: Number(project.value?.id),
+    scriptId: Number(episodesId.value),
+    targetType: "storyboard",
+    targetId: row.id,
+    nodes: cleanNodes(nodes),
+    edges,
+    selectedMediaPath,
+  });
+  row.status = "completed";
+  row.state = "已完成";
+  row.reason = "";
+  row.media = media;
+  row.src = getMediaPreviewUrl(media);
+}
+
+async function generateStoryboardViaFlow(row: Storyboard) {
+  if (!row.id || isStoryboardActive(row)) return;
+  const { nodes, edges } = await loadStoryboardFlow(row);
+  const primary = getPrimaryNodeOrThrow(nodes, row);
+  primary.data.model ||= project.value?.imageModel ?? "";
+  primary.data.quality ||= project.value?.imageQuality ?? "";
+  primary.data.ratio ||= project.value?.videoRatio ?? "16:9";
+  if (!primary.data.model) throw new Error($t("workbench.production.editImage.selectModel"));
+  if (!primary.data.quality) throw new Error($t("workbench.production.editImage.selectQuality"));
+  if (!primary.data.ratio) throw new Error($t("workbench.production.editImage.selectRatio"));
+
+  await axios.post("/production/editImage/saveImageFlow", {
+    flowId: row.flowId,
+    projectId: Number(project.value?.id),
+    scriptId: Number(episodesId.value),
+    targetType: "storyboard",
+    targetId: row.id,
+    nodes: cleanNodes(nodes),
+    edges,
+  });
+  row.status = "processing";
+  row.state = "生成中";
+  row.reason = "";
+
+  const { data } = await axios.post("/production/editImage/generateFlowImageTask", {
+    referenceMediaPaths: getPrimaryReferenceMediaPaths(nodes, edges, primary.id),
+    model: primary.data.model,
+    quality: primary.data.quality,
+    ratio: primary.data.ratio,
+    prompt: primary.data.prompt || row.prompt || "",
+    projectId: Number(project.value?.id),
+    scriptId: Number(episodesId.value),
+    flowId: row.flowId,
+    nodeId: primary.id,
+    targetType: "storyboard",
+    targetId: row.id,
+  });
+  const legacyTaskId = data?.legacyTaskId ?? (data?.unifiedTaskId ? data?.taskId : data?.taskId ?? data?.id);
+  const unifiedTaskId = data?.unifiedTaskId ?? (typeof data?.taskId === "string" && !/^\d+$/.test(data.taskId) ? data.taskId : undefined);
+  row.taskId = unifiedTaskId ?? String(legacyTaskId ?? data?.taskId ?? "");
+  row.unifiedTaskId = unifiedTaskId ?? null;
+  row.legacyTaskId = legacyTaskId ?? null;
+  row.status = normalizeTaskStatus(data?.status, "processing");
+  row.state = toStoryboardState(row.status);
+  bindStoryboardFlowTask(row, primary.id, { taskId: row.taskId, unifiedTaskId, legacyTaskId, status: row.status });
+}
+
 async function savePromptEditor() {
   const row = currentPromptTarget.value;
   if (!row?.id || promptEditorSaving.value) return;
@@ -867,7 +1129,6 @@ async function savePromptEditor() {
       targetId: row.id,
       nodes: cleanNodes(nodes),
       edges: cleanEdges(edges),
-      selectedMediaPath: getMediaPathForGeneration(normalizeMediaRef((row as any).media ?? row, "image")),
     });
     const flowId = data?.flowId ?? data?.id;
     if (!flowId) throw new Error($t("workbench.production.editImage.saveFailed"));
@@ -889,7 +1150,10 @@ async function savePromptEditor() {
     notifyStoryboardIssues(editResult);
 
     await productionStore.getFlowData();
-    promptFlowSnapshot.value = { nodes, edges };
+    promptFlowSnapshot.value = {
+      nodes: cleanNodes(nodes) as NodeType[],
+      edges: cleanEdges(edges),
+    };
     promptPrimaryNodeId.value = primary.id;
     promptEditorVisible.value = false;
     window.$message.success($t("common.editSuccess"));
@@ -901,28 +1165,39 @@ async function savePromptEditor() {
 }
 
 async function regenerateSingleImage(row: Storyboard) {
-  if (!row.id || row.state === "生成中") return;
-  row.state = "生成中";
-  row.reason = "";
+  if (!row.id || isStoryboardActive(row)) return;
   try {
-    await productionStore.batchGenerateStoryboard([row.id], true);
+    await generateStoryboardViaFlow(row);
   } catch (e) {
+    row.status = "failed";
     row.state = "生成失败";
     row.reason = (e as any)?.message ?? "";
+    window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.batchGenerateFailed"));
   }
 }
 
 async function generateGroup(rows: Storyboard[]) {
-  const ids = rows.map((item) => item.id!).filter(Boolean);
-  if (!ids.length) return;
-  await productionStore.batchGenerateStoryboard(ids, true);
+  const items = rows.filter((item) => item.id && !isStoryboardActive(item));
+  for (const item of items) {
+    try {
+      await generateStoryboardViaFlow(item);
+    } catch (e) {
+      item.status = "failed";
+      item.state = "生成失败";
+      item.reason = (e as any)?.message ?? "";
+      window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.batchGenerateFailed"));
+    }
+  }
 }
 
 async function batchGenerateImage() {
   if (!selectedIds.value.length) return window.$message.warning($t("workbench.production.node.storyboard.pleaseSelectImage"));
   generateLoading.value = true;
   try {
-    await productionStore.batchGenerateStoryboard(selectedIds.value, true);
+    const selectedRows = storyboard.value.filter((item) => item.id && selectedIds.value.includes(item.id));
+    for (const row of selectedRows) {
+      await generateStoryboardViaFlow(row);
+    }
     window.$message.success($t("workbench.production.node.storyboard.batchGenerateSuccess"));
     selectedIds.value = [];
   } catch (e) {
@@ -979,6 +1254,7 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
       dialogue: "",
       sound: sourceFrame?.sound,
       visibleEmotion: "",
+      status: "completed",
       state: "已完成",
     };
     const { data } = await axios.post("/production/storyboard/addStoryboard", {
@@ -995,11 +1271,12 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
   const target = storyboard.value.find((s) => s.id === id);
   if (target) {
     target.flowId = flowId;
-    if (imageUrl) {
-      target.src = imageUrl;
-      target.media = media;
-      target.state = "已完成";
-    }
+      if (imageUrl) {
+        target.src = imageUrl;
+        target.media = media;
+        target.status = "completed";
+        target.state = "已完成";
+      }
     if (primaryNodeId) {
       const referenceFields = splitStoryboardReferences(references);
       try {
@@ -1045,7 +1322,7 @@ function onImageLoad(src: string, event: Event) {
 
 function openImageViewer(row: Storyboard) {
   const group = storyboardGroups.value.find((item) => item.items.some((story) => story.id === row.id));
-  const sourceItems = (group?.items ?? storyboard.value).filter((item) => getStoryboardImageUrl(item, "display") && item.state === "已完成");
+  const sourceItems = (group?.items ?? storyboard.value).filter((item) => getStoryboardImageUrl(item, "display") && isStoryboardCompleted(item));
   openImageLightbox({
     images: sourceItems.map((item) => {
       const src = getStoryboardImageUrl(item, "preview");
@@ -1150,29 +1427,38 @@ async function selectHistoryItem(item: ImageHistoryItem) {
   if (!currentHistoryItem.value?.id) return;
   historySelectedId.value = item.id;
   const target = currentHistoryItem.value;
-  let nodes: unknown[] = [];
-  let edges: unknown[] = [];
-  if (target.flowId) {
-    const { data: flow } = await axios.post("/production/editImage/getImageFlow", { id: target.flowId });
-    nodes = flow?.nodes ?? [];
-    edges = flow?.edges ?? [];
+  historyLoading.value = true;
+  try {
+    let nodes: NodeType[] = [];
+    let edges: ReturnType<typeof cleanEdges> = [];
+    if (target.flowId) {
+      const { data: flow } = await axios.post("/production/editImage/getImageFlow", { id: target.flowId });
+      nodes = structuredClone((Array.isArray(flow?.nodes) ? flow.nodes : []) as NodeType[]);
+      edges = cleanEdges(Array.isArray(flow?.edges) ? flow.edges : []);
+    }
+    const { media, selectedMediaPath } = applyHistoryToPrimaryNode(nodes, item, target);
+    const { data } = await axios.post("/production/editImage/saveImageFlow", {
+      flowId: target.flowId ?? null,
+      projectId: Number(project.value?.id),
+      scriptId: Number(episodesId.value),
+      targetType: "storyboard",
+      targetId: target.id,
+      nodes: cleanNodes(nodes),
+      edges,
+      selectedMediaPath,
+    });
+    target.flowId = data?.flowId ?? data?.id;
+    target.src = getMediaPreviewUrl(media);
+    target.media = media;
+    target.status = "completed";
+    target.state = "已完成";
+    historyVisible.value = false;
+    window.$message.success($t("workbench.production.node.storyboard.historySelected"));
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
+  } finally {
+    historyLoading.value = false;
   }
-  const { data } = await axios.post("/production/editImage/saveImageFlow", {
-    flowId: target.flowId ?? null,
-    projectId: Number(project.value?.id),
-    scriptId: Number(episodesId.value),
-    targetType: "storyboard",
-    targetId: target.id,
-    nodes,
-    edges,
-    selectedMediaPath: getMediaPathForGeneration(item.media ?? normalizeMediaRef(item, "image")),
-  });
-  target.flowId = data?.flowId ?? data?.id;
-  target.src = item.url;
-  target.media = item.media;
-  target.state = "已完成";
-  historyVisible.value = false;
-  window.$message.success($t("workbench.production.node.storyboard.historySelected"));
 }
 
 function handleDeleteSelected() {

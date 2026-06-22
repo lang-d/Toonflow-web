@@ -84,7 +84,7 @@
               <t-card shadow class="card" @click="openDrawer(item)">
                 <div class="imageBox">
                   <t-checkbox class="selectBox" :checked="selectedIds.includes(item.id)" @click.stop @change="toggleSelect(item.id)" />
-                  <div class="cancelGeneration" @click.stop="cancelGenerationFn(item)" v-if="item.state === '生成中'">
+                  <div class="cancelGeneration" @click.stop="cancelGenerationFn(item)" v-if="isImageTaskActive(item)">
                     <t-tag theme="danger" size="small">
                       {{ $t("workbench.cornerScape.cancelGeneration") }}
                     </t-tag>
@@ -96,17 +96,16 @@
                       </t-button>
                     </t-tooltip>
                   </div>
-                  <t-empty v-if="!item.state && item.promptState !== '生成中'" type="maintenance" :title="$t('workbench.cornerScape.waitingGen')" />
-                  <div v-else-if="isAssetBusy(item)" class="generatingBox">
+                  <div v-if="isAssetBusy(item)" class="generatingBox">
                     <t-loading />
                     <span class="generatingText">
-                      {{ item.audioBindState === "生成中" ? $t("workbench.cornerScape.audioState") : $t("workbench.cornerScape.generating") }}
+                      {{ isAudioTaskActive(item) ? $t("workbench.cornerScape.audioState") : $t("workbench.cornerScape.generating") }}
                     </span>
                   </div>
-                  <t-popup :content="item.errorReason" v-else-if="item.state === '生成失败'">
+                  <t-popup :content="item.errorReason" v-else-if="isImageTaskFailed(item)">
                     <t-empty type="fail" :title="$t('workbench.cornerScape.genFailed')" />
                   </t-popup>
-                  <t-image v-else class="image" :src="item.filePath ?? undefined" fit="contain" :preview="true" :lazy="true">
+                  <t-image v-else-if="item.filePath" class="image" :src="item.filePath" fit="contain" :preview="true" :lazy="true">
                     <template #error>
                       <t-empty type="fail" :title="$t('workbench.cornerScape.imageError')" />
                     </template>
@@ -116,6 +115,7 @@
                       </div>
                     </template>
                   </t-image>
+                  <t-empty v-else type="maintenance" :title="$t('workbench.cornerScape.waitingGen')" />
                 </div>
                 <div class="infoBox">
                   <div class="title ac jb">
@@ -143,22 +143,21 @@
                   <div class="imageBox">
                     <t-checkbox class="selectBox" :checked="selectedIds.includes(child.id)" @click.stop @change="toggleSelect(child.id)" />
                     <t-tag class="derivedBadge" size="small" theme="warning" variant="light">{{ $t("workbench.production.node.assets.derived") }}</t-tag>
-                    <div class="cancelGeneration" @click.stop="cancelGenerationFn(child)" v-if="child.state === '生成中'">
+                    <div class="cancelGeneration" @click.stop="cancelGenerationFn(child)" v-if="isImageTaskActive(child)">
                       <t-tag theme="danger" size="small">
                         {{ $t("workbench.cornerScape.cancelGeneration") }}
                       </t-tag>
                     </div>
-                    <t-empty v-if="!child.state && child.promptState !== '生成中'" type="maintenance" :title="$t('workbench.cornerScape.waitingGen')" />
-                    <div v-else-if="isAssetBusy(child)" class="generatingBox">
+                    <div v-if="isAssetBusy(child)" class="generatingBox">
                       <t-loading />
                       <span class="generatingText">
-                        {{ child.audioBindState === "生成中" ? $t("workbench.cornerScape.audioState") : $t("workbench.cornerScape.generating") }}
+                        {{ isAudioTaskActive(child) ? $t("workbench.cornerScape.audioState") : $t("workbench.cornerScape.generating") }}
                       </span>
                     </div>
-                    <t-popup :content="child.errorReason" v-else-if="child.state === '生成失败'">
+                    <t-popup :content="child.errorReason" v-else-if="isImageTaskFailed(child)">
                       <t-empty type="fail" :title="$t('workbench.cornerScape.genFailed')" />
                     </t-popup>
-                    <t-image v-else class="image" :src="child.filePath ?? undefined" fit="contain" :preview="true" :lazy="true">
+                    <t-image v-else-if="child.filePath" class="image" :src="child.filePath" fit="contain" :preview="true" :lazy="true">
                       <template #error>
                         <t-empty type="fail" :title="$t('workbench.cornerScape.imageError')" />
                       </template>
@@ -168,6 +167,7 @@
                         </div>
                       </template>
                     </t-image>
+                    <t-empty v-else type="maintenance" :title="$t('workbench.cornerScape.waitingGen')" />
                   </div>
                   <div class="infoBox">
                     <div class="title ac jb">
@@ -214,12 +214,11 @@
           </div>
         </template>
         <div v-if="currentItem" class="drawerImageBox">
-          <t-empty v-if="!currentItem.state" type="maintenance" :title="$t('workbench.cornerScape.waitingGen')" />
-          <div v-else-if="currentItem.state === '生成中'" class="generatingBox">
+          <div v-if="isImageTaskActive(currentItem)" class="generatingBox">
             <t-loading />
             <span class="generatingText">{{ $t("workbench.cornerScape.generating") }}</span>
           </div>
-          <t-empty v-else-if="currentItem.state === '生成失败'" type="fail" :title="$t('workbench.cornerScape.genFailed')" />
+          <t-empty v-else-if="isImageTaskFailed(currentItem)" type="fail" :title="$t('workbench.cornerScape.genFailed')" />
           <t-image v-else-if="currentItem.filePath" class="image" :src="currentItem.filePath" fit="contain">
             <template #error>
               <t-empty type="fail" :title="$t('workbench.cornerScape.imageError')" />
@@ -234,16 +233,19 @@
         </div>
         <t-form v-if="currentItem" labelAlign="top">
           <t-form-item :label="$t('workbench.cornerScape.history')">
-            <div class="historyImageList f">
-              <div
-                v-for="item in currentItem.historyImages"
-                :key="item.id"
-                class="historyImageItem"
-                :class="{ selected: selectedHistoryId === item.id }"
-                @click.stop="toggleHistorySelect(item.id)">
-                <t-image :src="item.filePath" :style="{ width: '100px', minWidth: '100px', height: '100px' }" :lazy="true" fit="contain" />
+            <t-loading :loading="historyLoading" style="width: 100%">
+              <div class="historyImageList f">
+                <div
+                  v-for="item in currentItem.historyImages"
+                  :key="item.id"
+                  class="historyImageItem"
+                  :class="{ selected: selectedHistoryId === item.id }"
+                  @click.stop="toggleHistorySelect(item.id)">
+                  <t-image :src="item.filePath" :style="{ width: '100px', minWidth: '100px', height: '100px' }" :lazy="true" fit="contain" />
+                </div>
+                <t-empty v-if="!currentItem.historyImages.length && !historyLoading" size="small" />
               </div>
-            </div>
+            </t-loading>
           </t-form-item>
           <t-form-item :label="$t('workbench.cornerScape.genModel')">
             <modelSelect v-model="selectValue" :type="`image`" />
@@ -252,7 +254,7 @@
             <t-select v-model="editForm.resolution" :placeholder="$t('workbench.cornerScape.resolutionPh')" :options="resolutionOptions" />
           </t-form-item>
           <t-form-item :label="$t('workbench.cornerScape.promptLabel')">
-            <t-loading style="width: 100%" :loading="currentItem.promptState == '生成中'">
+            <t-loading style="width: 100%" :loading="isPromptTaskActive(currentItem)">
               <t-textarea
                 v-model="editForm.prompt"
                 :placeholder="$t('workbench.cornerScape.promptPh')"
@@ -292,11 +294,11 @@
                 variant="outline"
                 :loading="polishing"
                 @click="polishPrompts"
-                :disabled="currentItem.promptState == '生成中' ? true : false">
+                :disabled="isPromptTaskActive(currentItem)">
                 <template #icon><t-icon name="edit" /></template>
                 {{ $t("workbench.cornerScape.aiPolish") }}
               </t-button>
-              <t-button theme="primary" @click="regenerateItem" :disabled="currentItem.state == '生成中' ? true : false">
+              <t-button theme="primary" @click="regenerateItem" :disabled="isImageTaskActive(currentItem)">
                 <template #icon><t-icon name="refresh" /></template>
                 {{ $t("workbench.cornerScape.regenerate") }}
               </t-button>
@@ -340,8 +342,8 @@ import projectStore from "@/stores/project";
 import modelSelect from "@/components/modelSelect.vue";
 import settingStore from "@/stores/setting";
 import openAssetsSelector from "@/utils/assetsCheck";
-import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
-import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
+import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 import { useFileDialog } from "@vueuse/core";
@@ -349,7 +351,10 @@ import { useFileDialog } from "@vueuse/core";
 const { otherSetting } = storeToRefs(settingStore());
 interface Image {
   filePath: string;
+  originalPath: string;
   id: number;
+  media?: MediaRef;
+  selected?: boolean;
 }
 interface DataItem {
   id: number;
@@ -360,6 +365,7 @@ interface DataItem {
   prompt: string;
   filePath: string | null;
   state: string;
+  status?: string;
   model: string;
   resolution: string;
   describe: string;
@@ -488,13 +494,39 @@ function getTypeLabel(type?: string | null) {
 }
 
 function isAssetBusy(item: DataItem) {
-  return item.state === "生成中" || item.promptState === "生成中" || item.audioBindState === "生成中";
+  return isImageTaskActive(item) || isPromptTaskActive(item) || isAudioTaskActive(item);
+}
+
+function isActiveTaskStatus(status: ReturnType<typeof normalizeTaskStatus>) {
+  return status === "queued" || status === "submitting" || status === "processing";
+}
+
+function isFailedTaskStatus(status: ReturnType<typeof normalizeTaskStatus>) {
+  return status === "failed" || status === "cancelled";
+}
+
+function getImageTaskStatus(item: DataItem) {
+  return normalizeTaskStatus(item.status ?? item.state, "pending");
+}
+
+function isImageTaskActive(item: DataItem) {
+  return isActiveTaskStatus(getImageTaskStatus(item));
+}
+
+function isImageTaskFailed(item: DataItem) {
+  return isFailedTaskStatus(getImageTaskStatus(item));
+}
+
+function isPromptTaskActive(item: DataItem) {
+  return isActiveTaskStatus(normalizeTaskStatus(item.promptState, "pending"));
+}
+
+function isAudioTaskActive(item: DataItem) {
+  return isActiveTaskStatus(normalizeTaskStatus(item.audioBindState, "pending"));
 }
 
 function normalizeHistoryImages(item: DataItem): Image[] {
-  const history = Array.isArray(item.historyImages) ? item.historyImages : [];
-  if (history.length || !item.imageId || !item.filePath) return history;
-  return [{ id: item.imageId, filePath: item.filePath }];
+  return Array.isArray(item.historyImages) ? item.historyImages : [];
 }
 
 function normalizeDataItem(row: any): DataItem {
@@ -689,25 +721,63 @@ async function cancelGenerationFn(item: DataItem) {
 const drawerVisible = ref(false);
 const currentItem = ref<DataItem | null>(null);
 const selectedHistoryId = ref<number | null>(null);
+const historyLoading = ref(false);
+
+async function loadAssetImageHistory(assetId: number) {
+  historyLoading.value = true;
+  try {
+    const { data } = await axios.post("/assets/getImage", { assetsId: assetId });
+    const historyImages = (data?.tempAssets ?? [])
+      .map((item: any): Image | null => {
+        const status = normalizeTaskStatus(item.status ?? item.state, "pending");
+        const media = normalizeMediaRef(item.media ?? item, "image");
+        if (status !== "completed" || !media) return null;
+        return {
+          id: Number(item.id),
+          filePath: getMediaPreviewUrl(media),
+          originalPath: getMediaOriginalUrl(media),
+          media,
+          selected: Boolean(item.selected),
+        };
+      })
+      .filter((item: Image | null): item is Image => Boolean(item));
+    mergeAssetPatch(assetId, { historyImages });
+    if (currentItem.value?.id === assetId) {
+      selectedHistoryId.value = historyImages.find((item: Image) => item.selected)?.id ?? null;
+    }
+    return historyImages;
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+async function refreshAssetWithHistory(assetId: number) {
+  await refreshAssetDetail(assetId);
+  await loadAssetImageHistory(assetId);
+}
 
 async function toggleHistorySelect(id: number) {
-  selectedHistoryId.value = selectedHistoryId.value === id ? null : id;
   if (!currentItem.value) return;
-  const selectedImage = currentItem.value.historyImages.find((img) => img.id === selectedHistoryId.value);
+  const assetId = currentItem.value.id;
+  const selectedImage = currentItem.value.historyImages.find((img) => img.id === id);
+  if (!selectedImage) return;
+  selectedHistoryId.value = id;
   try {
     await axios.post("/assets/saveAssets", {
-      id: currentItem.value.id,
+      id: assetId,
       type: currentItem.value.type,
       projectId: project.value?.id,
       prompt: currentItem.value.prompt,
-      imageId: selectedImage?.id,
+      imageId: selectedImage.id,
     });
-    //拿选中的图片替换当前图片
-    if (selectedImage) {
-      currentItem.value.filePath = selectedImage.filePath;
-      currentItem.value.state = "已完成";
-    }
-    getFilteredData();
+    mergeAssetPatch(assetId, {
+      imageId: selectedImage.id,
+      filePath: selectedImage.filePath,
+      media: selectedImage.media,
+      state: "已完成",
+      status: "completed",
+    });
+    await refreshAssetWithHistory(assetId);
     window.$message.success($t("workbench.cornerScape.msg.replaceSuccess"));
   } catch (e) {
     window.$message.error($t("workbench.cornerScape.msg.replaceFailed"));
@@ -785,16 +855,16 @@ async function openDrawer(item: DataItem) {
   currentItem.value = item;
   syncEditFormFromItem(item);
   drawerVisible.value = true;
-  // 重新获取最新数据（含历史图片）
+  // 重新获取最新资产数据和当前资产的图片历史。
   try {
-    await refreshAssetDetail(item.id);
+    await refreshAssetWithHistory(item.id);
   } catch (e) {
     console.error("刷新资产详情失败:", e);
   }
 }
 
 function setItemState(id: number, state: string) {
-  mergeAssetPatch(id, { state });
+  mergeAssetPatch(id, { state, status: normalizeTaskStatus(state, "pending") });
 }
 
 function regenerateItem() {
@@ -834,7 +904,10 @@ function regenerateItem() {
     .then(({ data }) => {
       item.taskId = data?.taskId;
       item.legacyTaskId = data?.legacyTaskId;
-      item.state = data?.status ? "生成中" : item.state;
+      if (data?.status) {
+        item.status = normalizeTaskStatus(data.status, "queued");
+        item.state = "生成中";
+      }
       window.$message.success($t("workbench.cornerScape.msg.genSuccess", { name: item.name }));
       syncRuntimeTasks();
     })
@@ -911,7 +984,7 @@ async function uploadLocalAssetImage() {
       base64,
     });
     window.$message.success($t("workbench.assets.uploadSuccess"));
-    await refreshAssetDetail(currentItem.value.id);
+    await refreshAssetWithHistory(currentItem.value.id);
   } catch (e: any) {
     window.$message.error(e?.message || $t("workbench.production.editImage.uploadFailed"));
   } finally {
@@ -1074,6 +1147,7 @@ async function batchGenerationImage() {
       item.id,
       {
         state: item.state,
+        status: item.status,
         taskId: item.taskId,
         legacyTaskId: item.legacyTaskId,
         imageId: item.imageId,
@@ -1084,7 +1158,7 @@ async function batchGenerationImage() {
   items.forEach((item) => {
     releaseImageTask(item.id);
     taskCenter.removeTask(createTaskKey("assetImage", Number(project.value?.id), item.id, undefined, item.taskId));
-    mergeAssetPatch(item.id, { state: "生成中", taskId: undefined, legacyTaskId: undefined, errorReason: "" });
+    mergeAssetPatch(item.id, { state: "生成中", status: "processing", taskId: undefined, legacyTaskId: undefined, errorReason: "" });
   });
 
   window.$message.success(
@@ -1105,7 +1179,17 @@ async function batchGenerationImage() {
       })),
     });
     const rows = Array.isArray(data) ? data : (data?.tasks ?? (data ? [data] : []));
-    rows.forEach((row: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number; imageId?: number; state?: string }) => {
+    rows.forEach(
+      (row: {
+        assetId?: number;
+        assetsId?: number;
+        id?: number;
+        taskId?: string;
+        legacyTaskId?: number;
+        imageId?: number;
+        state?: string;
+        status?: string;
+      }) => {
       const id = row.assetId ?? row.assetsId ?? row.id;
       if (!id) return;
       mergeAssetPatch(id, {
@@ -1113,8 +1197,10 @@ async function batchGenerationImage() {
         legacyTaskId: row.legacyTaskId,
         ...(row.imageId ? { imageId: row.imageId } : {}),
         ...(row.state !== undefined ? { state: row.state } : {}),
+        ...(row.status !== undefined ? { status: normalizeTaskStatus(row.status, "queued") } : {}),
       });
-    });
+      },
+    );
     syncRuntimeTasks();
     selectedIds.value = [];
   } catch (e: any) {
@@ -1154,6 +1240,10 @@ function releaseAllRuntimeTasks() {
 function refreshFinishedItem(id: number, field: "historyImages" | "relepedAudio") {
   queueMicrotask(async () => {
     try {
+      if (field === "historyImages") {
+        await refreshAssetWithHistory(id);
+        return;
+      }
       const fresh = await refreshAssetDetail(id);
       if (fresh) mergeAssetPatch(id, { [field]: (fresh as any)[field] } as Partial<DataItem>);
     } catch (e) {
@@ -1172,7 +1262,7 @@ function applyPromptRuntimeTask(id: number, task: RuntimeTask) {
   if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || $t("workbench.cornerScape.msg.promptGenFail"));
   if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
     queueMicrotask(() => releasePromptTask(id));
-    if (task.status === "completed") refreshFinishedItem(id, "historyImages");
+    if (task.status === "completed") queueMicrotask(() => void refreshAssetDetail(id));
   }
 }
 
@@ -1181,6 +1271,7 @@ function applyImageRuntimeTask(id: number, task: RuntimeTask) {
   const media = normalizeMediaRef(record.media ?? record, "image");
   mergeAssetPatch(id, {
     state: task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中",
+    status: task.status,
     errorReason: task.reason ?? "",
     ...(media ? { media, filePath: getMediaPreviewUrl(media) } : {}),
   });
@@ -1207,7 +1298,7 @@ function syncRuntimeTasks() {
   const activePromptIds = new Set<number>();
   const activeAudioIds = new Set<number>();
   visibleAssetItems.value.forEach((item) => {
-    if (item.state === "生成中") {
+    if (isImageTaskActive(item)) {
       activeImageIds.add(item.id);
       const key = createTaskKey("assetImage", Number(project.value?.id), item.id, undefined, item.taskId);
       const existing = taskCenter.getTask(key);
@@ -1224,14 +1315,14 @@ function syncRuntimeTasks() {
               targetType: "asset",
               targetId: item.id,
               projectId: Number(project.value?.id),
-              status: "processing",
+              status: getImageTaskStatus(item),
             },
             (task) => applyImageRuntimeTask(item.id, task),
           ),
         );
       }
     }
-    if (item.promptState === "生成中") {
+    if (isPromptTaskActive(item)) {
       activePromptIds.add(item.id);
       const key = createTaskKey("assetPrompt", Number(project.value?.id), item.id, undefined, item.promptTaskId);
       const existing = taskCenter.getTask(key);
@@ -1248,14 +1339,14 @@ function syncRuntimeTasks() {
               targetType: "assetPrompt",
               targetId: item.id,
               projectId: Number(project.value?.id),
-              status: "processing",
+              status: normalizeTaskStatus(item.promptState, "processing"),
             },
             (task) => applyPromptRuntimeTask(item.id, task),
           ),
         );
       }
     }
-    if (item.audioBindState === "生成中") {
+    if (isAudioTaskActive(item)) {
       activeAudioIds.add(item.id);
       const key = createTaskKey("audioBind", Number(project.value?.id), item.id, undefined, item.audioTaskId);
       const existing = taskCenter.getTask(key);
@@ -1272,7 +1363,7 @@ function syncRuntimeTasks() {
               targetType: "audioBind",
               targetId: item.id,
               projectId: Number(project.value?.id),
-              status: "processing",
+              status: normalizeTaskStatus(item.audioBindState, "processing"),
             },
             (task) => applyAudioRuntimeTask(item.id, task),
           ),

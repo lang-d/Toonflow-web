@@ -1,6 +1,7 @@
 import { computed, type Ref, watch } from "vue";
 import type { Storyboard } from "../../../utils/flowBuilder";
 import type { StoryboardGroup } from "../types";
+import { normalizeTaskStatus } from "@/stores/taskCenter";
 
 export function useStoryboardPreview(options: {
   storyboard: Ref<Storyboard[]>;
@@ -37,7 +38,10 @@ export function useStoryboardPreview(options: {
   });
 
   const isFinished = (item: Storyboard) =>
-    Boolean((item.media || item.src || item.url || item.imageUrl || item.thumbnail || item.thumb) && item.state === "已完成");
+    Boolean(
+      (item.media || item.src || item.url || item.imageUrl || item.thumbnail || item.thumb) &&
+        normalizeTaskStatus(item.status ?? item.state, "pending") === "completed",
+    );
   const previewItems = computed(() => options.storyboard.value.filter(isFinished));
   const sliceStoryboardPages = (items: Storyboard[]) => {
     const pages: Storyboard[][] = [];

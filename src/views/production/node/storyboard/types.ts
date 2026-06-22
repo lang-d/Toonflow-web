@@ -2,7 +2,7 @@ import type { Storyboard } from "../../utils/flowBuilder";
 import type { MediaRef } from "@/types/api";
 
 export interface ImageHistoryItem {
-  id: number;
+  id: number | string;
   url: string;
   previewUrl?: string;
   media?: MediaRef;

@@ -54,6 +54,7 @@ import type { MediaRef } from "@/types/api";
 interface ImageHistoryItem {
   id: number;
   url: string;
+  previewUrl?: string;
   media?: MediaRef;
   prompt?: string;
   model?: string;
@@ -347,6 +348,7 @@ async function openHistory() {
         return {
         id: item.id,
         url: media ? getMediaOriginalUrl(media) : item.url ?? item.src,
+        previewUrl: media ? getMediaPreviewUrl(media) : item.previewUrl ?? item.thumbnail ?? item.thumb ?? item.url ?? item.src,
         media,
         prompt: item.prompt,
         model: item.model,

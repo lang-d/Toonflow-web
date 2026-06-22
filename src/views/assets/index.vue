@@ -92,9 +92,9 @@
                             <t-loading size="small" />
                             <span class="generatingLabel">{{ $t("workbench.assets.generating") }}</span>
                           </div>
-                          <t-image-viewer v-else :images="[subRow.src]" :closeOnEscKeydown="true" :closeOnOverlay="true">
+                          <t-image-viewer v-else :images="[getAssetOriginalUrl(subRow)]" :closeOnEscKeydown="true" :closeOnOverlay="true">
                             <template #trigger="{ open }">
-                              <div class="imageTrigger" @click="subRow.src && getBigImageUrl(subRow, open())">
+                              <div class="imageTrigger" @click="subRow.src && getBigImageUrl(subRow, open)">
                                 <img v-if="subRow.src" :src="subRow.src" :alt="subRow.name" class="previewImage" />
                                 <div v-else class="noImage">
                                   <t-icon name="image" size="24px" />
@@ -141,9 +141,9 @@
                 </template>
                 <template #preview="{ row }">
                   <div class="previewCell">
-                    <t-image-viewer :images="[row.src]" :closeOnEscKeydown="true" :closeOnOverlay="true">
+                    <t-image-viewer :images="[getAssetOriginalUrl(row)]" :closeOnEscKeydown="true" :closeOnOverlay="true">
                       <template #trigger="{ open }">
-                        <div class="imageTrigger" @click="row.src && getBigImageUrl(row, open())">
+                        <div class="imageTrigger" @click="row.src && getBigImageUrl(row, open)">
                           <img v-if="row.src" :src="row.src" :alt="row.name" class="previewImage" />
                           <div v-else class="noImage">
                             <t-icon name="image" size="24px" />
@@ -169,9 +169,9 @@
                       <t-loading size="small" />
                       <span class="generatingLabel">{{ $t("workbench.assets.generating") }}</span>
                     </div>
-                    <t-image-viewer v-else :images="[row.src]" :closeOnEscKeydown="true" :closeOnOverlay="true">
+                    <t-image-viewer v-else :images="[getAssetOriginalUrl(row)]" :closeOnEscKeydown="true" :closeOnOverlay="true">
                       <template #trigger="{ open }">
-                        <div class="imageTrigger" @click="row.src && getBigImageUrl(row, open())">
+                        <div class="imageTrigger" @click="row.src && getBigImageUrl(row, open)">
                           <img v-if="row.src" :src="row.src" :alt="row.name" class="previewImage" />
                           <div v-else class="noImage">
                             <t-icon name="image" size="24px" />
@@ -443,7 +443,7 @@ import generateImage from "./components/generateImage.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
-import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 const { otherSetting } = storeToRefs(settingStore());
@@ -751,7 +751,7 @@ async function handleBatchGeneratePrompt() {
         describe: item.describe ? item.describe : $t("workbench.assets.noDescription"),
       })),
     });
-    const taskRows = Array.isArray(data) ? data : data?.tasks ?? [];
+    const taskRows = Array.isArray(data) ? data : (data?.tasks ?? []);
     taskRows.forEach((item: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number }) => {
       const target = findAssetById(item.assetId ?? item.assetsId ?? item.id ?? 0);
       if (target) {
@@ -1119,7 +1119,10 @@ const subAudioColumns: TableProps["columns"] = [
 function syncVisibleSelectionFromCache() {
   if (!props.selectorMode) return;
   selectedRowKeys.value = tableData.value.filter((item) => selectedParentAssetMap.value.has(item.id)).map((item) => item.id);
-  selectedSubRowKeys.value = tableData.value.flatMap((item) => item.sonAssets ?? []).filter((item) => selectedSubAssetMap.value.has(item.id)).map((item) => item.id);
+  selectedSubRowKeys.value = tableData.value
+    .flatMap((item) => item.sonAssets ?? [])
+    .filter((item) => selectedSubAssetMap.value.has(item.id))
+    .map((item) => item.id);
 }
 
 function clearSelectionCache() {
@@ -1420,14 +1423,24 @@ function syncAssetRuntimeTasks() {
   });
 }
 
-async function getBigImageUrl(row: Asset, fn: Function) {
-  const { data } = await axios.post("/common/getBigImage", {
-    url: row.src,
-  });
-  row.src = data;
-  nextTick(() => {
-    fn();
-  });
+function getAssetOriginalUrl(row: Asset) {
+  const media = normalizeMediaRef(row.media ?? row, "image");
+  return media ? getMediaOriginalUrl(media) : row.src || row.filePath || "";
+}
+
+async function getBigImageUrl(row: Asset, open: () => void) {
+  try {
+    const { data } = await axios.post("/common/getBigImage", {
+      url: row.media?.path || row.src,
+    });
+    const media = normalizeMediaRef(data?.media ?? data, "image");
+    if (!media) throw new Error("图片预览地址无效");
+    row.media = media;
+    await nextTick();
+    open();
+  } catch (error) {
+    window.$message.error((error as any)?.message || "图片预览加载失败");
+  }
 }
 </script>
 

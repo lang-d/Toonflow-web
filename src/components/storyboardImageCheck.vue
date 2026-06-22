@@ -42,10 +42,14 @@
               @page-change="handlePageChange">
               <template #preview="{ row }">
                 <div class="previewCell">
-                  <t-image-viewer :images="[row.src]" :closeOnEscKeydown="true" :closeOnOverlay="true">
+                  <t-image-viewer
+                    v-if="getStoryboardOriginalUrl(row)"
+                    :images="[getStoryboardOriginalUrl(row)]"
+                    :closeOnEscKeydown="true"
+                    :closeOnOverlay="true">
                     <template #trigger="{ open }">
-                      <div class="mediaTrigger" @click="row.src && open()">
-                        <img :src="row.src" :alt="row.name" />
+                      <div class="mediaTrigger" @click="open()">
+                        <img :src="getStoryboardPreviewUrl(row)" :alt="row.prompt || ''" />
                         <div class="mediaHoverOverlay">
                           <t-icon name="browse" size="20px" />
                           <span class="hoverText">{{ $t("components.storyboardImageCheck.preview") }}</span>
@@ -53,6 +57,9 @@
                       </div>
                     </template>
                   </t-image-viewer>
+                  <div v-else class="mediaTrigger noMedia">
+                    <t-icon name="image-error" size="22px" />
+                  </div>
                 </div>
               </template>
               <template #startTime="{ row }">
@@ -71,6 +78,17 @@ import dayjs from "dayjs";
 import axios from "@/utils/axios";
 import type { TableProps } from "tdesign-vue-next";
 import type { Storyboard } from "@/views/production/utils/flowBuilder";
+import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import type { MediaRef } from "@/types/api";
+
+type StoryboardListItem = Storyboard & {
+  media?: MediaRef;
+  filePath?: string;
+  imageUrl?: string;
+  originalUrl?: string;
+  thumbnail?: string;
+  thumb?: string;
+};
 const props = withDefaults(
   defineProps<{
     /** 限制显示的资产类型 */
@@ -124,7 +142,7 @@ const generatingImageIds = ref<Set<number>>(new Set());
 // 是否正在处于任意生成中（提示词或图片）
 const isGenerating = (id: number) => generatingIds.value.has(id) || generatingImageIds.value.has(id);
 
-const tableData = ref<Storyboard[]>([]);
+const tableData = ref<StoryboardListItem[]>([]);
 // 分页配置
 const pagination = ref({
   page: 1,
@@ -177,6 +195,25 @@ function handleSearch() {
   pagination.value.page = 1;
   getFilteredData();
 }
+
+function normalizeStoryboardItem(item: StoryboardListItem): StoryboardListItem {
+  const media = normalizeMediaRef(item.media ?? item, "image");
+  return {
+    ...item,
+    ...(media ? { media } : {}),
+  };
+}
+
+function getStoryboardPreviewUrl(row: StoryboardListItem) {
+  const media = normalizeMediaRef(row.media ?? row, "image");
+  return media ? getMediaPreviewUrl(media) : row.thumbnail || row.thumb || row.src || row.imageUrl || row.filePath || row.originalUrl || "";
+}
+
+function getStoryboardOriginalUrl(row: StoryboardListItem) {
+  const media = normalizeMediaRef(row.media ?? row, "image");
+  return media ? getMediaOriginalUrl(media) : row.originalUrl || row.imageUrl || row.src || row.filePath || "";
+}
+
 async function getFilteredData() {
   try {
     loading.value = true;
@@ -187,7 +224,7 @@ async function getFilteredData() {
       limit: pagination.value.pageSize,
     });
 
-    tableData.value = data.data || [];
+    tableData.value = (data.data || []).map(normalizeStoryboardItem);
     pagination.value.total = data.total || 0;
     return tableData.value;
   } catch (error) {

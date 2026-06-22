@@ -18,7 +18,7 @@
           class="historyCard"
           :class="{ active: selectedHistoryId === item.id }"
           @click="emit('selectHistory', item)">
-            <img :src="item.url" class="historyThumb" alt="" />
+            <img :src="item.previewUrl || item.url" class="historyThumb" alt="" />
             <span class="historyMeta">
               <span class="historyPrompt">{{ item.prompt }}</span>
               <span class="historyTime">{{ item.createTime }}</span>

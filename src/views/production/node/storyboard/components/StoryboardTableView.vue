@@ -87,7 +87,7 @@
         <template #image="{ row }">
           <div class="tableImageCell">
             <div
-              v-if="getStoryboardImageUrl(row, 'display') && row.state === '已完成'"
+              v-if="getStoryboardImageUrl(row, 'display') && isStoryboardCompleted(row)"
               class="storyboardThumbWrap"
               :style="{ aspectRatio: getImageRatio(getStoryboardImageUrl(row, 'display')) }"
               @click="emit('openImageViewer', row)">
@@ -98,15 +98,15 @@
                 @load="emit('imageLoad', getStoryboardImageUrl(row, 'display'), $event)" />
             </div>
             <div v-else class="thumbPlaceholder">
-              <t-loading v-if="row.state === '生成中'" size="small" />
-              <t-tooltip v-else-if="row.state === '生成失败'" :content="row.reason">
+              <t-loading v-if="isStoryboardActive(row)" size="small" />
+              <t-tooltip v-else-if="isStoryboardFailed(row)" :content="row.reason">
                 <span class="stateError">{{ $t("workbench.production.node.storyboard.genFailed") }}</span>
               </t-tooltip>
               <span v-else class="statePending">{{ $t("workbench.production.node.storyboard.notGenerated") }}</span>
             </div>
             <div class="imageActions">
               <t-tooltip :content="$t('workbench.production.node.storyboard.regenerate')">
-                <t-button size="small" shape="circle" variant="text" :disabled="row.state === '生成中'" @click="emit('regenerateSingleImage', row)">
+                <t-button size="small" shape="circle" variant="text" :disabled="isStoryboardActive(row)" @click="emit('regenerateSingleImage', row)">
                   <template #icon><i-play-one /></template>
                 </t-button>
               </t-tooltip>
@@ -162,6 +162,9 @@ defineProps<{
   getGroupedReferences: (row: any) => any[];
   getImageRatio: (src: string) => string;
   getStoryboardImageUrl: (row: any, purpose?: "preview" | "display") => string;
+  isStoryboardActive: (row: any) => boolean;
+  isStoryboardCompleted: (row: any) => boolean;
+  isStoryboardFailed: (row: any) => boolean;
 }>();
 
 const emit = defineEmits<{

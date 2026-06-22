@@ -150,6 +150,10 @@ export interface Storyboard {
   thumbnail?: string | null;
   thumb?: string | null;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
+  status?: TaskStatus;
+  taskId?: string;
+  unifiedTaskId?: string | null;
+  legacyTaskId?: number | string | null;
   flowId?: number;
   reason?: string;
   videoDesc: string;

@@ -365,6 +365,7 @@ function makeProductionAgentStore(projectId: string) {
           normalizeAssetLike({
             ...item,
             factStatus: normalizeFactStatus(item?.factStatus),
+            status: normalizeTaskStatus(item?.status ?? item?.state, "pending"),
           }),
         ),
       };
@@ -831,6 +832,7 @@ function makeProductionAgentStore(projectId: string) {
       }
 
       const record = (task.result ?? {}) as any;
+      item.status = task.status;
       item.state =
         task.status === "completed"
           ? ("已完成" as any)
@@ -888,7 +890,7 @@ function makeProductionAgentStore(projectId: string) {
     function syncStoryboardTasks(session: EpisodeSession) {
       const activeIds = new Set<number>();
       session.flowData.value.storyboard.forEach((item) => {
-        if (!item.id || normalizeTaskStatus(item.state, "pending") !== "processing") return;
+        if (!item.id || normalizeTaskStatus((item as any).status ?? item.state, "pending") !== "processing") return;
         const storyboardId = item.id;
         activeIds.add(storyboardId);
         const unifiedTaskId = (item as any).taskId;
@@ -947,6 +949,7 @@ function makeProductionAgentStore(projectId: string) {
             if (findData) {
               const normalized = normalizeAssetLike(findData);
               item.state = normalized.state;
+              (item as any).status = normalizeTaskStatus(findData.status ?? normalized.status ?? normalized.state, "processing");
               item.media = normalized.media as MediaRef | undefined;
               item.src = normalized.src;
               (item as any).taskId = findData.taskId;
