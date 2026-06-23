@@ -362,10 +362,14 @@ function batchGenVideo() {
     body: $t("workbench.generate.generateVideosInBatches"),
     onConfirm: async () => {
       dlg.destroy();
+      generateVideoLoad.value = true;
 
       const checkedTrackData = trackList.value.filter((track) => checkedTrackIds.value.includes(track.id));
       const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
-      if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
+      if (notHasPrompt.length) {
+        generateVideoLoad.value = false;
+        return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
+      }
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
         const uploadData = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track, true);
@@ -387,25 +391,32 @@ function batchGenVideo() {
       };
       try {
         const { data } = await axios.post("/production/workbench/batchGenerateVideo", requestData);
-        const videoRecord: Record<number, { videoId: number; taskId?: string; queueTaskId?: number }> = {};
+        const videoRecord: Record<number, { videoId: number; taskId?: string; queueTaskId?: number; status?: unknown }> = {};
         const rows = Array.isArray(data) ? data : data?.tasks ?? [];
-        rows.forEach((item: { videoId: number; trackId: number; taskId?: string; queueTaskId?: number }) => {
-          videoRecord[item.trackId] = { videoId: item.videoId, taskId: item.taskId, queueTaskId: item.queueTaskId };
+        rows.forEach((item: { videoId: number; trackId: number; taskId?: string; queueTaskId?: number; status?: unknown }) => {
+          videoRecord[item.trackId] = { videoId: item.videoId, taskId: item.taskId, queueTaskId: item.queueTaskId, status: item.status };
         });
-        checkedTrackData.forEach((i) => {
-          const record = videoRecord[i.id];
-          if (record)
-            i.videoList.push({
-              id: record.videoId,
-              state: "生成中",
-              status: normalizeTaskStatus((record as any).status, "queued"),
-              src: "",
-              taskId: record.taskId,
-              queueTaskId: record.queueTaskId,
-            });
+        let missingTarget = false;
+        trackData.forEach((item) => {
+          const record = videoRecord[item.trackId];
+          if (!record) return;
+          const targetTrack = trackList.value.find((track) => track.id === item.trackId);
+          if (!targetTrack) {
+            missingTarget = true;
+            return;
+          }
+          targetTrack.videoList.push({
+            id: record.videoId,
+            state: "生成中",
+            status: normalizeTaskStatus(record.status, "queued"),
+            src: "",
+            taskId: record.taskId,
+            queueTaskId: record.queueTaskId,
+          });
         });
         checkedTrackIds.value = [];
         window.$message.success($t("workbench.generate.generateStarted"));
+        if (missingTarget) emit("getData");
       } catch (e) {
         window.$message.error(getReviewMessage(e) || $t("workbench.generate.generateError"));
       } finally {

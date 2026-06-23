@@ -106,15 +106,6 @@
     </div>
     <t-guide v-model="current" :steps="steps" @finish="() => (current = -1)" />
     <t-tag variant="outline" class="fps" v-if="!openShowVisible">{{ fps }}</t-tag>
-    <div v-if="showPerfPanel" class="taskPerfPanel">
-      <strong>Task Center</strong>
-      <span>active {{ activeTaskCount }}</span>
-      <span>requests {{ inFlightRequests }}</span>
-      <span>transport {{ activeTransport }}</span>
-      <span>polls {{ totalPollCount }}</span>
-      <span>listeners {{ registeredListenerCount }}</span>
-      <span>long task {{ lastLongTask }}ms</span>
-    </div>
   </VueFlow>
   <div v-else class="productionEmptyState c">
     <div class="emptyCard">
@@ -230,9 +221,6 @@ import productionAgentStore from "@/stores/productionAgent";
 const agentStore = productionAgentStore();
 const taskCenter = useTaskCenterStore();
 const { episodesId, flowData } = storeToRefs(agentStore);
-const { activeTaskCount, inFlightRequests, activeTransport, lastLongTask, pollCount, registeredListenerCount } = storeToRefs(taskCenter);
-const totalPollCount = computed(() => Object.values(pollCount.value).reduce((sum, count) => sum + count, 0));
-const showPerfPanel = import.meta.env.DEV;
 provide("episodesId", episodesId);
 
 const loading = ref(false);
@@ -697,22 +685,6 @@ onBeforeUnmount(() => {
   }
 }
 
-.taskPerfPanel {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  z-index: 20;
-  display: grid;
-  grid-template-columns: repeat(2, auto);
-  gap: 4px 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--td-border-level-1-color);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--td-bg-color-container) 92%, transparent);
-  color: var(--td-text-color-secondary);
-  font-size: 12px;
-  pointer-events: none;
-}
 // 拖拽/平移时优化渲染性能
 .productionEmptyState {
   width: 100%;

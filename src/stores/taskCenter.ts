@@ -39,6 +39,12 @@ export interface RuntimeTask {
   source?: TaskSource;
   updatedAt: number;
 }
+
+export interface TaskSnapshotWarning {
+  taskKey: string;
+  missingCount: number;
+  lastCheckedAt: number;
+}
 export type { TaskStatusEvent };
 
 export interface TaskSourceAdapter {
@@ -58,6 +64,7 @@ const ALL_DOMAINS: TaskDomain[] = ["flowImage", "assetImage", "assetPrompt", "st
 const LEGACY_BATCH_SIZE = 20;
 const FLOW_IMAGE_CONCURRENCY = 3;
 const TASK_RETENTION_MS = 60_000;
+const SNAPSHOT_MISSING_THRESHOLD = 2;
 const TRANSPORT_STORAGE_KEY = "taskTransport";
 
 function normalizeDomain(value: TaskStatusEvent["taskType"] | TaskDomain, targetType?: string): TaskDomain {
@@ -123,6 +130,7 @@ export default defineStore("taskCenter", () => {
   const tasks = shallowReactive(new Map<string, RuntimeTask>());
   const listeners = new Map<string, Set<TaskListener>>();
   const cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const snapshotReconciliations = shallowReactive(new Map<string, TaskSnapshotWarning>());
   const requestControllers = new Set<AbortController>();
   const running = ref(false);
   const interacting = ref(false);
@@ -165,6 +173,16 @@ export default defineStore("taskCenter", () => {
 
   const activeTasks = computed(() => Array.from(tasks.values()).filter((task) => ACTIVE_STATUSES.has(task.status)));
   const activeTaskCount = computed(() => activeTasks.value.length);
+  const knownTasks = computed(() => Array.from(tasks.values()));
+  const snapshotWarnings = computed(
+    () =>
+      new Map(
+        Array.from(snapshotReconciliations.entries()).filter(
+          ([, warning]) => warning.missingCount >= SNAPSHOT_MISSING_THRESHOLD,
+        ),
+      ),
+  );
+  const snapshotWarningCount = computed(() => snapshotWarnings.value.size);
 
   function buildSocketNamespaceUrl() {
     const configured = settingStore().baseUrl || "";
@@ -231,6 +249,7 @@ export default defineStore("taskCenter", () => {
     if (!isNewerTaskEvent(current, task)) return current;
     const next = { ...current, ...task };
     tasks.set(next.key, next);
+    if (TERMINAL_STATUSES.has(next.status)) snapshotReconciliations.delete(next.key);
     notify(next);
     if (TERMINAL_STATUSES.has(next.status)) scheduleCleanup(next.key);
     return next;
@@ -317,6 +336,7 @@ export default defineStore("taskCenter", () => {
     registeredListenerCount.value -= listeners.get(resolvedKey)?.size ?? 0;
     listeners.delete(resolvedKey);
     adapterForCurrentTransport().unregister(resolvedKey);
+    snapshotReconciliations.delete(resolvedKey);
     if (!task || TERMINAL_STATUSES.has(task.status)) tasks.delete(resolvedKey);
   }
 
@@ -325,6 +345,7 @@ export default defineStore("taskCenter", () => {
     registeredListenerCount.value -= listeners.get(resolvedKey)?.size ?? 0;
     listeners.delete(resolvedKey);
     tasks.delete(resolvedKey);
+    snapshotReconciliations.delete(resolvedKey);
     const cleanupTimer = cleanupTimers.get(resolvedKey);
     if (cleanupTimer) clearTimeout(cleanupTimer);
     cleanupTimers.delete(resolvedKey);
@@ -506,8 +527,34 @@ export default defineStore("taskCenter", () => {
 
   function applyUnifiedEvent(event: TaskStatusEvent, source: TaskSource = "socket") {
     const task = findTaskForEvent(event);
-    if (!task) return;
     const updatedAt = Number(event.updatedAt) || Date.now();
+    if (!task) {
+      const domain = normalizeDomain(event.taskType, event.targetType);
+      const discovered = normalizeTaskInput({
+        key: createTaskKey(domain, Number(event.projectId), event.targetId ?? event.taskId, event.nodeId, event.taskId),
+        domain,
+        taskId: event.taskId,
+        unifiedTaskId: event.taskId,
+        legacyTaskId: event.legacyTaskId,
+        targetType: event.targetType,
+        targetId: event.targetId ?? event.taskId,
+        projectId: Number(event.projectId),
+        scriptId: event.scriptId,
+        nodeId: event.nodeId,
+        status: normalizeTaskStatus(event.status),
+        result: normalizeTaskResult(event.result ?? event, mediaFallbackType(domain)),
+        reason: event.reason ?? "",
+        phase: event.phase,
+        progress: event.progress,
+        version: event.version,
+        source,
+        updatedAt,
+      });
+      setTask(discovered);
+      if (ACTIVE_STATUSES.has(discovered.status)) start();
+      return;
+    }
+    snapshotReconciliations.delete(task.key);
     if (!isNewerTaskEvent(task, { version: event.version, updatedAt })) return;
     updateTask(task.key, {
       unifiedTaskId: event.taskId ?? task.unifiedTaskId,
@@ -522,6 +569,23 @@ export default defineStore("taskCenter", () => {
       version: event.version ?? task.version,
       source,
       updatedAt,
+    });
+  }
+
+  function reconcileSnapshotMissing(expectedTasks: RuntimeTask[], records: TaskStatusEvent[]) {
+    const returnedIds = new Set(records.map((record) => String(record.taskId)));
+    expectedTasks.forEach((task) => {
+      if (!task.unifiedTaskId || returnedIds.has(String(task.unifiedTaskId))) {
+        snapshotReconciliations.delete(task.key);
+        return;
+      }
+      const previous = snapshotReconciliations.get(task.key);
+      const missingCount = (previous?.missingCount ?? 0) + 1;
+      snapshotReconciliations.set(task.key, {
+        taskKey: task.key,
+        missingCount,
+        lastCheckedAt: Date.now(),
+      });
     });
   }
 
@@ -541,9 +605,10 @@ export default defineStore("taskCenter", () => {
     unifiedSocket.on("task:status", (event: TaskStatusEvent) => applyUnifiedEvent(event, "socket"));
   }
 
-  async function refreshUnified() {
+  async function refreshUnifiedTasks(tasksToRefresh: RuntimeTask[]) {
     const groups = new Map<string, RuntimeTask[]>();
-    activeTasks.value.forEach((task) => {
+    tasksToRefresh.forEach((task) => {
+      if (!task.unifiedTaskId) return;
       const key = `${task.projectId}:${task.scriptId ?? ""}`;
       groups.set(key, [...(groups.get(key) ?? []), task]);
     });
@@ -554,15 +619,51 @@ export default defineStore("taskCenter", () => {
           {
             projectId: group[0].projectId,
             scriptId: group[0].scriptId,
-            taskIds: group.map((task) => task.unifiedTaskId ?? (typeof task.taskId === "string" ? task.taskId : "")).filter(Boolean),
+            taskIds: group.map((task) => task.unifiedTaskId!).filter(Boolean),
           },
           { signal, suppressNetworkErrorNotify: true } as any,
         ),
       );
       const snapshot = (response as any)?.data?.data ?? (response as any)?.data ?? response;
-      const records = Array.isArray(snapshot) ? snapshot : snapshot?.tasks ?? [];
+      const records = (Array.isArray(snapshot) ? snapshot : snapshot?.tasks ?? []) as TaskStatusEvent[];
       records.forEach((record: TaskStatusEvent) => applyUnifiedEvent(record, "snapshot"));
+      reconcileSnapshotMissing(group, records);
     }
+  }
+
+  async function refreshUnified() {
+    await refreshUnifiedTasks(activeTasks.value);
+  }
+
+  async function resyncTask(key: string) {
+    const task = findTaskByKey(key);
+    if (!task?.unifiedTaskId) throw new Error("Task cannot be synced without unified taskId");
+    await refreshUnifiedTasks([task]);
+  }
+
+  async function syncProjectTasks(projectId: number, scriptId?: number) {
+    if (!projectId) return;
+    const response = await trackedRequest("media", (signal) =>
+      axios.post(
+        "/task/status/snapshot",
+        {
+          projectId,
+          ...(scriptId != null ? { scriptId } : {}),
+        },
+        { signal, suppressNetworkErrorNotify: true } as any,
+      ),
+    );
+    const snapshot = (response as any)?.data?.data ?? (response as any)?.data ?? response;
+    const records = (Array.isArray(snapshot) ? snapshot : snapshot?.tasks ?? []) as TaskStatusEvent[];
+    records.forEach((record) => applyUnifiedEvent(record, "snapshot"));
+
+    const knownProjectTasks = activeTasks.value.filter(
+      (task) =>
+        task.projectId === projectId &&
+        (scriptId == null || task.scriptId === scriptId) &&
+        Boolean(task.unifiedTaskId),
+    );
+    await refreshUnifiedTasks(knownProjectTasks);
   }
 
   const unifiedAdapter: TaskSourceAdapter = {
@@ -714,8 +815,10 @@ export default defineStore("taskCenter", () => {
         reason: data?.message ?? "",
         result: data,
         source: "snapshot",
+        version: task.version !== undefined ? task.version + 1 : undefined,
         updatedAt: Date.now(),
       });
+      snapshotReconciliations.delete(task.key);
       return data;
     } catch (error: any) {
       const status = error?.status ?? error?.response?.status ?? error?.code;
@@ -735,6 +838,7 @@ export default defineStore("taskCenter", () => {
     stop();
     tasks.clear();
     listeners.clear();
+    snapshotReconciliations.clear();
     registeredListenerCount.value = 0;
     cleanupTimers.forEach((cleanupTimer) => clearTimeout(cleanupTimer));
     cleanupTimers.clear();
@@ -751,6 +855,9 @@ export default defineStore("taskCenter", () => {
 
   return {
     tasks,
+    knownTasks,
+    snapshotWarnings,
+    snapshotWarningCount,
     activeTasks,
     activeTaskCount,
     running,
@@ -768,6 +875,8 @@ export default defineStore("taskCenter", () => {
     getTask,
     updateTask,
     cancelTask,
+    resyncTask,
+    syncProjectTasks,
     getRuntimeDiagnostics,
     refresh,
     start,

@@ -841,10 +841,50 @@ onMounted(() => {
   modelParmas.value.mode = project.value?.mode || "";
   void getGenerateData();
 });
+
+type VideoUploadDataItem = { id: number; sources: WorkbenchReferenceSource };
+
+function buildVideoUploadData(mode: string, items: UploadItem[]): VideoUploadDataItem[] {
+  const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
+  const preSliced = frameMode.includes(mode)
+    ? items.slice(0, 2)
+    : mode === "singleImage"
+      ? items.slice(0, 1)
+      : items;
+  const filtered = preSliced
+    .filter((item): item is UploadItem & { id: number; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.src) && Boolean(item.sources))
+    .map(({ id, sources }) => ({ id, sources }));
+  if (frameMode.includes(mode)) return filtered.slice(0, 2);
+  if (mode === "singleImage") return filtered.slice(0, 1);
+  return filtered;
+}
+
+function createVideoGenerationSnapshot() {
+  const track = currentTrack.value;
+  if (!track?.id) return null;
+  const mode = modelParmas.value.mode;
+  return {
+    projectId: project.value?.id,
+    scriptId: episodesId.value,
+    trackId: track.id,
+    trackRef: track,
+    rawPrompt: track.prompt,
+    prompt: composePrompt(track.prompt),
+    uploadData: mode === "text" ? [] : buildVideoUploadData(mode, imageList.value),
+    model: modelParmas.value.model,
+    mode,
+    resolution: modelParmas.value.resolution,
+    duration: modelParmas.value.duration,
+    audio: modelParmas.value.audio,
+  };
+}
+
 /** 单个轨道生成视频 */
 async function generateVideo() {
   if (!ensureCurrentTrackStoryboardReady()) return;
-  if (!currentTrack.value?.prompt?.trim()) {
+  const snapshot = createVideoGenerationSnapshot();
+  if (!snapshot) return;
+  if (!snapshot.rawPrompt?.trim()) {
     window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
     return;
   }
@@ -855,35 +895,26 @@ async function generateVideo() {
       dlg.destroy();
       try {
         const { data } = await axios.post("/production/workbench/generateVideo", {
-          projectId: project.value?.id,
-          scriptId: episodesId.value,
-          uploadData:
-            modelParmas.value.mode === "text"
-              ? []
-              : (() => {
-                  const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-                  const preSliced = frameMode.includes(modelParmas.value.mode)
-                    ? imageList.value.slice(0, 2)
-                    : modelParmas.value.mode === "singleImage"
-                      ? imageList.value.slice(0, 1)
-                      : imageList.value;
-                  const filtered = preSliced.filter((item) => Boolean(item.src) && item.id).map(({ id, sources }) => ({ id, sources }));
-                  if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
-                  if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
-                  return filtered;
-                })(),
-          prompt: composePrompt(currentTrack.value.prompt),
-          model: modelParmas.value.model,
-          mode: modelParmas.value.mode,
-          resolution: modelParmas.value.resolution,
-          duration: modelParmas.value.duration,
-          audio: modelParmas.value.audio,
-          trackId: currentTrack.value.id,
+          projectId: snapshot.projectId,
+          scriptId: snapshot.scriptId,
+          uploadData: snapshot.uploadData,
+          prompt: snapshot.prompt,
+          model: snapshot.model,
+          mode: snapshot.mode,
+          resolution: snapshot.resolution,
+          duration: snapshot.duration,
+          audio: snapshot.audio,
+          trackId: snapshot.trackId,
         });
         window.$message.success($t("workbench.generate.generateStarted"));
         const videoId = typeof data === "object" ? data.videoId : data;
         const taskId = typeof data === "object" ? data.taskId : undefined;
-        currentTrack.value.videoList.push({
+        const targetTrack = trackList.value.find((track) => track.id === snapshot.trackId);
+        if (!targetTrack) {
+          await getGenerateData();
+          return;
+        }
+        targetTrack.videoList.push({
           id: videoId,
           state: "生成中",
           status: normalizeTaskStatus(typeof data === "object" ? data.status : undefined, "queued"),

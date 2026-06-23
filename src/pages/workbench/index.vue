@@ -84,6 +84,7 @@
   <setting />
   <WorkspaceSetupWizard />
   <WorkspaceMaintenanceOverlay />
+  <GlobalTaskCenter />
 </template>
 
 <script setup lang="ts">
@@ -92,6 +93,7 @@ import setting from "@/components/setting/index.vue";
 import hello from "@/components/hello.vue";
 import WorkspaceSetupWizard from "@/components/workspace/WorkspaceSetupWizard.vue";
 import WorkspaceMaintenanceOverlay from "@/components/workspace/WorkspaceMaintenanceOverlay.vue";
+import GlobalTaskCenter from "@/components/taskCenter/GlobalTaskCenter.vue";
 import projectStore from "@/stores/project";
 import useWorkspaceStore from "@/stores/workspace";
 import { handleDynamicImportFailure } from "@/utils/moduleRecovery";
