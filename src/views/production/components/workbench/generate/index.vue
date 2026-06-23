@@ -39,11 +39,11 @@
         <t-tag size="small" variant="light">
           引用 {{ currentReferenceCount }}
         </t-tag>
-        <t-tag v-if="currentTrack.reviewState" size="small" :theme="currentTrack.reviewState === 'blocked' ? 'danger' : currentTrack.reviewState === 'hasIssues' ? 'warning' : 'success'" variant="light">
-          {{ currentTrack.reviewState }}
+        <t-tag v-if="currentTrack.reviewState" size="small" :theme="getReviewStateTheme(currentTrack.reviewState)" variant="light">
+          {{ $t(getReviewStateI18nKey(currentTrack.reviewState)) }}
         </t-tag>
         <t-tag v-if="currentReviewCounts.total" size="small" theme="warning" variant="light">
-          Review {{ currentReviewCounts.total }}
+          {{ $t("workbench.productionReview.summary.open") }} {{ currentReviewCounts.total }}
         </t-tag>
         <t-tag v-if="currentTrack.musicPlan" size="small" theme="primary" variant="light">
           BGM {{ currentTrack.musicPlan.mood || "ready" }}
@@ -63,7 +63,7 @@
         <t-card :title="'#' + (activeTrackIndex + 1) + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
           <template #actions>
             <t-button size="small" variant="outline" :loading="reviewLoading" @click="reviewCurrentTrack">
-              Review
+              {{ $t("workbench.productionReview.action.review") }}
             </t-button>
             <t-button size="small" class="genTextbtn" :loading="currentTrack.state == '生成中'" :disabled="hasUnreadyStoryboardForCurrentTrack" @click="genText">
               {{ $t("workbench.generate.generateText") }}
@@ -86,7 +86,7 @@
       </div>
       <div class="reviewAside" v-if="currentTrack">
         <ProductionReviewPanel
-          title="Track review"
+          :title="$t('workbench.productionReview.trackTitle')"
           mode="videoPromptBatch"
           :reviews="currentTrack.reviewIssues || []"
           :music-plan="currentTrack.musicPlan"
@@ -132,7 +132,7 @@ import {
   reviewVideoTracks,
 } from "@/api/productionReview";
 import type { ProductionReviewSuggestion } from "@/types/productionReview";
-import { countOpenReviews, getReviewMessage, isTrackBlocked } from "@/utils/productionReview";
+import { countOpenReviews, getReviewMessage, getReviewStateI18nKey, getReviewStateTheme } from "@/utils/productionReview";
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -846,11 +846,6 @@ async function generateVideo() {
   if (!ensureCurrentTrackStoryboardReady()) return;
   if (!currentTrack.value?.prompt?.trim()) {
     window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
-    return;
-  }
-  if (isTrackBlocked(currentTrack.value)) {
-    const blocking = currentTrack.value.reviewIssues?.find((review) => review.status === "open" && review.severity === "blocking");
-    window.$message.error(blocking?.message || "Video generation is blocked by open production review issues");
     return;
   }
   const dlg = DialogPlugin.confirm({

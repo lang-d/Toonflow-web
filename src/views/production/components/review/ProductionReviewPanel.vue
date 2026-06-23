@@ -3,12 +3,18 @@
     <div class="reviewHeader">
       <div>
         <div class="reviewTitle">{{ title }}</div>
-        <div class="reviewSummary">Open {{ counts.total }} · Blocking {{ counts.blocking }} · Warning {{ counts.warning }}</div>
+        <div class="reviewSummary">
+          {{ $t("workbench.productionReview.summary.open") }} {{ counts.total }} ·
+          {{ $t("workbench.productionReview.summary.highPriority") }} {{ counts.blocking }} ·
+          {{ $t("workbench.productionReview.summary.warning") }} {{ counts.warning }}
+        </div>
       </div>
       <div class="reviewActions">
-        <t-button size="small" variant="outline" :loading="loading" @click="emit('refresh')">Refresh</t-button>
+        <t-button size="small" variant="outline" :loading="loading" @click="emit('refresh')">
+          {{ $t("workbench.productionReview.action.refresh") }}
+        </t-button>
         <t-button v-if="showApply" size="small" theme="primary" :disabled="!acceptedIds.length" :loading="applying" @click="emit('apply', acceptedIds)">
-          Apply
+          {{ $t("workbench.productionReview.action.apply") }}
         </t-button>
       </div>
     </div>
@@ -32,26 +38,30 @@
       theme="warning"
       class="blockingAlert"
       message="当前轨道使用旧分镜描述兼容解析，建议重新生成或审校分镜表。" />
-    <t-alert v-if="blockingReview" theme="error" class="blockingAlert" :message="blockingReview.message" />
+    <t-alert
+      v-if="blockingReview"
+      theme="error"
+      class="blockingAlert"
+      :message="$t('workbench.productionReview.highPriorityHint')" />
 
     <div v-if="!reviews.length" class="emptyReview">
-      <t-empty size="small" description="No review suggestions" />
+      <t-empty size="small" :description="$t('workbench.productionReview.noSuggestions')" />
     </div>
 
     <div v-else class="reviewList">
       <div
-        v-for="review in reviews"
+        v-for="review in displayedReviews"
         :key="review.id"
         class="reviewCard"
         :class="[`severity-${review.severity}`, `status-${review.status}`, { selected: selectedIds.includes(review.id) }]">
         <div class="reviewCardHeader">
           <div class="reviewMeta">
             <t-tag size="small" :theme="getSeverityTheme(review.severity)" variant="light">
-              {{ getSeverityLabel(review.severity) }}
+              {{ $t(getSeverityI18nKey(review.severity)) }}
             </t-tag>
             <span>{{ getIssueTypeLabel(review) }}</span>
           </div>
-          <t-tag size="small" variant="outline">{{ review.status }}</t-tag>
+          <t-tag size="small" variant="outline">{{ $t(getReviewStatusI18nKey(review.status)) }}</t-tag>
         </div>
 
         <div class="reviewMessage">{{ review.message }}</div>
@@ -66,53 +76,85 @@
             variant="default-filled"
             size="small"
             @change="handleDecisionChange(review.id, $event)">
-            <t-radio-button value="accept">采纳</t-radio-button>
-            <t-radio-button value="revise">按我的意见</t-radio-button>
-            <t-radio-button value="ignore">忽略</t-radio-button>
+            <t-radio-button value="accept">{{ $t("workbench.productionReview.action.accept") }}</t-radio-button>
+            <t-radio-button value="revise">{{ $t("workbench.productionReview.action.revise") }}</t-radio-button>
+            <t-radio-button value="ignore">{{ $t("workbench.productionReview.action.ignore") }}</t-radio-button>
           </t-radio-group>
-          <t-button v-if="decisionMap[review.id]" size="small" variant="text" @click="clearDecision(review.id)">清除</t-button>
+          <t-button v-if="decisionMap[review.id]" size="small" variant="text" @click="clearDecision(review.id)">
+            {{ $t("workbench.productionReview.action.clear") }}
+          </t-button>
         </div>
 
         <div v-if="!isVideoPromptBatch" class="reviewCardActions">
-          <t-button size="small" theme="primary" :disabled="review.status !== 'open'" @click="emit('accept', review)">Accept</t-button>
-          <t-button size="small" variant="outline" :disabled="review.status !== 'open'" @click="emit('ignore', review)">Ignore</t-button>
-          <t-button size="small" variant="text" @click="openFeedback(review)">Feedback</t-button>
-          <t-button size="small" variant="text" @click="emit('recalculate', review)">Recalculate</t-button>
-          <t-button size="small" variant="text" :disabled="review.status !== 'accepted'" @click="emit('rollback', review)">Rollback</t-button>
+          <t-button size="small" theme="primary" :disabled="review.status !== 'open'" @click="emit('accept', review)">
+            {{ $t("workbench.productionReview.action.accept") }}
+          </t-button>
+          <t-button size="small" variant="outline" :disabled="review.status !== 'open'" @click="emit('ignore', review)">
+            {{ $t("workbench.productionReview.action.ignore") }}
+          </t-button>
+          <t-button size="small" variant="text" @click="openFeedback(review)">
+            {{ $t("workbench.productionReview.action.feedback") }}
+          </t-button>
+          <t-button size="small" variant="text" @click="emit('recalculate', review)">
+            {{ $t("workbench.productionReview.action.recalculate") }}
+          </t-button>
+          <t-button size="small" variant="text" :disabled="review.status !== 'accepted'" @click="emit('rollback', review)">
+            {{ $t("workbench.productionReview.action.rollback") }}
+          </t-button>
         </div>
       </div>
     </div>
 
     <div v-if="isVideoPromptBatch && reviews.length" class="batchReviewActions">
       <div class="batchSelection">
-        待提交 {{ selectedIds.length }} 条 · 采纳 {{ acceptIds.length }} · 按意见 {{ reviseIds.length }} · 忽略 {{ ignoreIds.length }}
+        {{ $t("workbench.productionReview.batchSummary", {
+          selected: selectedIds.length,
+          accepted: acceptIds.length,
+          revised: reviseIds.length,
+          ignored: ignoreIds.length,
+        }) }}
       </div>
       <t-textarea
         v-if="reviseIds.length"
         v-model="userInstruction"
         class="batchInstruction"
         :autosize="{ minRows: 3, maxRows: 7 }"
-        placeholder="写下你希望 AI 如何结合标记为“按我的意见”的建议修订当前视频提示词" />
+        :placeholder="$t('workbench.productionReview.instructionPlaceholder')" />
       <div class="batchButtons">
         <t-button size="small" theme="primary" :disabled="!canSubmitMixedBatch || applying" :loading="applying" @click="submitMixedBatch">
-          提交处理
+          {{ $t("workbench.productionReview.action.submit") }}
         </t-button>
-        <t-button size="small" variant="outline" :disabled="!openReviewIds.length || applying" @click="markAllOpen('accept')">全部采纳</t-button>
-        <t-button size="small" variant="outline" :disabled="!openReviewIds.length || applying" @click="markAllOpen('ignore')">全部忽略</t-button>
-        <t-button size="small" variant="text" :disabled="!selectedIds.length || applying" @click="clearAllDecisions">清空</t-button>
+        <t-button size="small" variant="outline" :disabled="!openReviewIds.length || applying" @click="markAllOpen('accept')">
+          {{ $t("workbench.productionReview.action.acceptAll") }}
+        </t-button>
+        <t-button size="small" variant="outline" :disabled="!openReviewIds.length || applying" @click="markAllOpen('ignore')">
+          {{ $t("workbench.productionReview.action.ignoreAll") }}
+        </t-button>
+        <t-button size="small" variant="text" :disabled="!selectedIds.length || applying" @click="clearAllDecisions">
+          {{ $t("workbench.productionReview.action.clearAll") }}
+        </t-button>
       </div>
-      <div class="batchHint">采纳和“按我的意见”的建议会交给 AI 统一修订；忽略的建议只更新状态，不参与修订。</div>
+      <div class="batchHint">{{ $t("workbench.productionReview.batchHint") }}</div>
     </div>
 
-    <t-dialog v-model:visible="feedbackVisible" header="Review feedback" width="520px" @confirm="submitFeedback">
-      <t-textarea v-model="feedbackText" :autosize="{ minRows: 4, maxRows: 8 }" placeholder="Describe what should be adjusted" />
+    <t-dialog v-model:visible="feedbackVisible" :header="$t('workbench.productionReview.feedbackTitle')" width="520px" @confirm="submitFeedback">
+      <t-textarea
+        v-model="feedbackText"
+        :autosize="{ minRows: 4, maxRows: 8 }"
+        :placeholder="$t('workbench.productionReview.feedbackPlaceholder')" />
     </t-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import type { ProductionReviewSuggestion, TrackBgmSuggestion } from "@/types/productionReview";
-import { countOpenReviews, getBlockingReview, getSeverityLabel, getSeverityTheme } from "@/utils/productionReview";
+import {
+  countOpenReviews,
+  getBlockingReview,
+  getReviewStatusI18nKey,
+  getSeverityI18nKey,
+  getSeverityTheme,
+} from "@/utils/productionReview";
 
 type ReviewDecision = "accept" | "revise" | "ignore";
 
@@ -127,7 +169,7 @@ const props = withDefaults(
     mode?: "legacy" | "videoPromptBatch";
   }>(),
   {
-    title: "Production review",
+    title: "",
     reviews: () => [],
     musicPlan: null,
     loading: false,
@@ -162,6 +204,13 @@ const userInstruction = ref("");
 const isVideoPromptBatch = computed(() => props.mode === "videoPromptBatch");
 const counts = computed(() => countOpenReviews(props.reviews));
 const blockingReview = computed(() => getBlockingReview({ reviewIssues: props.reviews }));
+const displayedReviews = computed(() => {
+  const severityRank = { blocking: 0, warning: 1, info: 2 } as const;
+  return props.reviews
+    .map((review, index) => ({ review, index }))
+    .sort((a, b) => severityRank[a.review.severity] - severityRank[b.review.severity] || a.index - b.index)
+    .map(({ review }) => review);
+});
 const fallbackFactReview = computed(() => props.reviews.find((review) => review.status === "open" && review.issueType === "video_prompt_fact_fallback"));
 const acceptedIds = computed(() => props.reviews.filter((review) => review.status === "accepted").map((review) => review.id));
 const openReviewIds = computed(() => props.reviews.filter((review) => review.status === "open").map((review) => review.id));

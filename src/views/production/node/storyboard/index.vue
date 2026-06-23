@@ -176,7 +176,13 @@ import type {
   ReferenceImage,
   UploadNodeData,
 } from "../../utils/editImageType";
-import { DEFAULT_EDGE_OPTIONS, cleanEdges, cleanNodes, createGeneratedData } from "../../utils/editImageType";
+import {
+  DEFAULT_EDGE_OPTIONS,
+  cleanEdges,
+  cleanNodes,
+  createGeneratedData,
+  resolvePrimaryGeneratedNode,
+} from "../../utils/editImageType";
 import { v4 as uuid } from "uuid";
 import "./styles.scss";
 
@@ -352,14 +358,16 @@ function getStoryboardFacts(row: Storyboard): StoryboardFactDraft {
 
 function getStoryboardFactPayload(row: Storyboard) {
   return storyboardFactKeys.reduce<Record<string, string | null>>((payload, key) => {
-    payload[key] = String(row[key] ?? "").trim() || null;
+    const value = String(row[key] ?? "").trim();
+    payload[key] = key === "sceneContinuityId" ? value || null : value;
     return payload;
   }, {});
 }
 
 function getStoryboardFactDraftPayload(facts: StoryboardFactDraft) {
   return storyboardFactKeys.reduce<Record<string, string | null>>((payload, key) => {
-    payload[key] = facts[key]?.trim() || null;
+    const value = facts[key]?.trim() || "";
+    payload[key] = key === "sceneContinuityId" ? value || null : value;
     return payload;
   }, {});
 }
@@ -610,17 +618,22 @@ function enrichLegacyReferences(references: ReferenceImage[], row: Storyboard) {
   });
 }
 
-function resolvePrimaryNode(nodes: NodeType[], row: Storyboard) {
-  const generatedNodes = nodes.filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated");
-  const selectedImage = getStoryboardImageUrl(row, "preview");
-  const imageMatched = selectedImage
-    ? generatedNodes.find(
-        (node) =>
-          getOriginalImageUrl(node.data.selectedResult?.url || "") === getOriginalImageUrl(selectedImage) ||
-          getOriginalImageUrl(node.data.generatedImage || "") === getOriginalImageUrl(selectedImage),
-      )
-    : undefined;
-  return imageMatched ?? generatedNodes.find((node) => node.data.isPrimary) ?? (generatedNodes.length === 1 ? generatedNodes[0] : undefined);
+function getStoryboardSelectedMedia(row: Storyboard) {
+  return normalizeMediaRef((row as any).media ?? row, "image")
+    ?? row.originalUrl
+    ?? row.imageUrl
+    ?? row.url
+    ?? row.src
+    ?? "";
+}
+
+function resolveStoryboardPrimaryNode(nodes: NodeType[], row: Storyboard, preferredNodeId = "") {
+  return resolvePrimaryGeneratedNode(nodes, {
+    preferredNodeId,
+    selectedMedia: getStoryboardSelectedMedia(row),
+    prompt: row.prompt,
+    fallbackToLast: true,
+  });
 }
 
 function loadPromptDraftFromNode(nodeId: string) {
@@ -670,7 +683,7 @@ async function openPromptEditor(row: Storyboard) {
       label: `${$t("workbench.production.node.storyboard.canvasNode")} ${index + 1}`,
       value: node.id,
     }));
-    const primary = resolvePrimaryNode(nodes, row);
+    const primary = resolveStoryboardPrimaryNode(nodes, row);
     if (primary) {
       promptPrimaryNodeId.value = primary.id;
       loadPromptDraftFromNode(primary.id);
@@ -894,40 +907,9 @@ function buildPromptFlow(row: Storyboard) {
   return { nodes, edges, primary };
 }
 
-function sameMediaRef(left: unknown, right: unknown) {
-  const leftPath = getMediaPathForGeneration(normalizeMediaRef(left, "image"));
-  const rightPath = getMediaPathForGeneration(normalizeMediaRef(right, "image"));
-  return Boolean(leftPath && rightPath && leftPath === rightPath);
-}
-
-function nodeMatchesStoryboardImage(node: Extract<NodeType, { type: "generated" }>, row: Storyboard) {
-  const media = normalizeMediaRef((row as any).media ?? row, "image");
-  const image = media ?? row.originalUrl ?? row.imageUrl ?? row.url ?? row.src ?? "";
-  return Boolean(
-    image &&
-      (sameMediaRef(node.data.resultMedia, image) ||
-        sameMediaRef(node.data.selectedResult?.media, image) ||
-        sameMediaRef(node.data.selectedResult?.url, image) ||
-        sameMediaRef(node.data.generatedImage, image)),
-  );
-}
-
-function resolveStoryboardPrimaryNode(nodes: NodeType[], row: Storyboard) {
-  const generatedNodes = nodes.filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated");
-  const imageMatched = generatedNodes.find((node) => nodeMatchesStoryboardImage(node, row));
-  return imageMatched ?? generatedNodes.find((node) => node.data.isPrimary) ?? (generatedNodes.length === 1 ? generatedNodes[0] : undefined);
-}
-
-function markPrimaryNode(nodes: NodeType[], primary: Extract<NodeType, { type: "generated" }>) {
-  nodes.forEach((node) => {
-    if (node.type === "generated") node.data.isPrimary = node.id === primary.id;
-  });
-}
-
 function getPrimaryNodeOrThrow(nodes: NodeType[], row: Storyboard) {
   const primary = resolveStoryboardPrimaryNode(nodes, row);
   if (!primary) throw new Error($t("workbench.production.node.storyboard.selectPrimaryRequired"));
-  markPrimaryNode(nodes, primary);
   return primary;
 }
 
@@ -1047,8 +1029,7 @@ function bindStoryboardFlowTask(row: Storyboard, primaryNodeId: string, task: { 
 async function finalizeStoryboardFlowTask(row: Storyboard, nodeId: string, media?: MediaRef) {
   if (!row.id || !row.flowId || !media) return;
   const { nodes, edges } = await loadStoryboardFlow(row);
-  const primary = nodes.find((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated" && node.id === nodeId) ?? getPrimaryNodeOrThrow(nodes, row);
-  markPrimaryNode(nodes, primary);
+  const primary = resolveStoryboardPrimaryNode(nodes, row, nodeId) ?? getPrimaryNodeOrThrow(nodes, row);
   const selectedMediaPath = getMediaPathForGeneration(primary.data.resultMedia ?? media);
   if (!selectedMediaPath) return;
   await axios.post("/production/editImage/saveImageFlow", {
@@ -1088,23 +1069,36 @@ async function generateStoryboardViaFlow(row: Storyboard) {
     nodes: cleanNodes(nodes),
     edges,
   });
+  const previousTaskState = {
+    status: row.status,
+    state: row.state,
+    reason: row.reason,
+  };
   row.status = "processing";
   row.state = "生成中";
   row.reason = "";
 
-  const { data } = await axios.post("/production/editImage/generateFlowImageTask", {
-    referenceMediaPaths: getPrimaryReferenceMediaPaths(nodes, edges, primary.id),
-    model: primary.data.model,
-    quality: primary.data.quality,
-    ratio: primary.data.ratio,
-    prompt: primary.data.prompt || row.prompt || "",
-    projectId: Number(project.value?.id),
-    scriptId: Number(episodesId.value),
-    flowId: row.flowId,
-    nodeId: primary.id,
-    targetType: "storyboard",
-    targetId: row.id,
-  });
+  let data: any;
+  try {
+    ({ data } = await axios.post("/production/editImage/generateFlowImageTask", {
+      referenceMediaPaths: getPrimaryReferenceMediaPaths(nodes, edges, primary.id),
+      model: primary.data.model,
+      quality: primary.data.quality,
+      ratio: primary.data.ratio,
+      prompt: primary.data.prompt || row.prompt || "",
+      projectId: Number(project.value?.id),
+      scriptId: Number(episodesId.value),
+      flowId: row.flowId,
+      nodeId: primary.id,
+      targetType: "storyboard",
+      targetId: row.id,
+    }));
+  } catch (error) {
+    row.status = previousTaskState.status;
+    row.state = previousTaskState.state;
+    row.reason = previousTaskState.reason;
+    throw error;
+  }
   const legacyTaskId = data?.legacyTaskId ?? (data?.unifiedTaskId ? data?.taskId : data?.taskId ?? data?.id);
   const unifiedTaskId = data?.unifiedTaskId ?? (typeof data?.taskId === "string" && !/^\d+$/.test(data.taskId) ? data.taskId : undefined);
   row.taskId = unifiedTaskId ?? String(legacyTaskId ?? data?.taskId ?? "");
@@ -1169,9 +1163,6 @@ async function regenerateSingleImage(row: Storyboard) {
   try {
     await generateStoryboardViaFlow(row);
   } catch (e) {
-    row.status = "failed";
-    row.state = "生成失败";
-    row.reason = (e as any)?.message ?? "";
     window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.batchGenerateFailed"));
   }
 }
@@ -1182,9 +1173,6 @@ async function generateGroup(rows: Storyboard[]) {
     try {
       await generateStoryboardViaFlow(item);
     } catch (e) {
-      item.status = "failed";
-      item.state = "生成失败";
-      item.reason = (e as any)?.message ?? "";
       window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.batchGenerateFailed"));
     }
   }

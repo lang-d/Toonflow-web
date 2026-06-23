@@ -1,6 +1,6 @@
 import type { TaskStatus } from "@/types/api";
 import type { MediaRef } from "@/types/api";
-import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { getMediaOriginalUrl, getMediaPathForGeneration, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 
 // ===== 节点数据类型 =====
 export interface ReferenceImage {
@@ -120,6 +120,14 @@ export interface NodeDirectorStageData {
 }
 
 export type NodeType = NodeUploadData | NodeGeneratedData | NodeDirectorStageData;
+export type GeneratedNode = Extract<NodeType, { type: "generated" }>;
+
+export interface ResolvePrimaryGeneratedNodeOptions {
+  preferredNodeId?: string;
+  selectedMedia?: unknown;
+  prompt?: string;
+  fallbackToLast?: boolean;
+}
 
 export const ACTIVE_IMAGE_TASK_STATUSES: readonly TaskStatus[] = ["queued", "submitting", "processing"];
 export const TERMINAL_IMAGE_TASK_STATUSES: readonly TaskStatus[] = ["completed", "failed", "cancelled"];
@@ -205,6 +213,56 @@ export function normalizeGeneratedNodeData(data: GeneratedNodeData): GeneratedNo
   }
 
   return normalized;
+}
+
+function sameGeneratedMedia(left: unknown, right: unknown) {
+  const leftPath = getMediaPathForGeneration(normalizeMediaRef(left, "image"));
+  const rightPath = getMediaPathForGeneration(normalizeMediaRef(right, "image"));
+  return Boolean(leftPath && rightPath && leftPath === rightPath);
+}
+
+function generatedNodeMatchesMedia(node: GeneratedNode, media: unknown) {
+  return [
+    node.data.resultMedia,
+    node.data.selectedResult?.media,
+    node.data.selectedResult?.url,
+    node.data.generatedImage,
+  ].some((candidate) => sameGeneratedMedia(candidate, media));
+}
+
+function findUniqueGeneratedNode(nodes: GeneratedNode[], predicate: (node: GeneratedNode) => boolean) {
+  const matches = nodes.filter(predicate);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+export function resolvePrimaryGeneratedNode(
+  nodes: NodeType[],
+  options: ResolvePrimaryGeneratedNodeOptions = {},
+): GeneratedNode | undefined {
+  const generatedNodes = nodes.filter((node): node is GeneratedNode => node.type === "generated");
+  if (!generatedNodes.length) return undefined;
+
+  const preferred = options.preferredNodeId
+    ? generatedNodes.find((node) => node.id === options.preferredNodeId)
+    : undefined;
+  const imageMatched = options.selectedMedia
+    ? findUniqueGeneratedNode(generatedNodes, (node) => generatedNodeMatchesMedia(node, options.selectedMedia))
+    : undefined;
+  const marked = findUniqueGeneratedNode(generatedNodes, (node) => node.data.isPrimary === true);
+  const normalizedPrompt = options.prompt?.trim();
+  const promptMatched = normalizedPrompt
+    ? findUniqueGeneratedNode(generatedNodes, (node) => node.data.prompt?.trim() === normalizedPrompt)
+    : undefined;
+  const single = generatedNodes.length === 1 ? generatedNodes[0] : undefined;
+  const fallback = options.fallbackToLast === false ? undefined : generatedNodes.at(-1);
+  const primary = preferred ?? imageMatched ?? marked ?? promptMatched ?? single ?? fallback;
+
+  if (primary) {
+    generatedNodes.forEach((node) => {
+      node.data.isPrimary = node.id === primary.id;
+    });
+  }
+  return primary;
 }
 
 // ===== 精简后用于传输的类型 =====

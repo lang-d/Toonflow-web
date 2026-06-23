@@ -30,7 +30,7 @@
           :data="data"
           :projectId="+project!.id"
           :flowId="localFlowId"
-          :saveFlow="persistFlow"
+          :saveFlow="() => persistFlow('', id)"
           :targetType="flowData.targetType"
           :targetId="flowData.targetId"
           @keep="sureNode"
@@ -116,6 +116,7 @@ import {
   isActiveImageTask,
   normalizeGeneratedNodeData,
   normalizeDirectorStageData,
+  resolvePrimaryGeneratedNode as resolvePrimaryGeneratedNodeFromFlow,
 } from "../../utils/editImageType";
 import { useLayout } from "../../utils/dagre";
 import { v4 as uuid } from "uuid";
@@ -378,7 +379,12 @@ function getFlowTarget() {
   return { projectId, scriptId, targetType, targetId };
 }
 
-async function persistFlowNow(selectedImageUrl = "") {
+async function persistFlowNow(selectedImageUrl = "", preferredNodeId = "") {
+  resolvePrimaryGeneratedNodeFromFlow(nodes.value, {
+    preferredNodeId,
+    selectedMedia: selectedImageUrl,
+    fallbackToLast: true,
+  });
   const selectedMedia = normalizeMediaRef(
     nodes.value
       .filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated")
@@ -400,8 +406,8 @@ async function persistFlowNow(selectedImageUrl = "") {
   return localFlowId.value;
 }
 
-function persistFlow(selectedImageUrl = "") {
-  const save = saveQueue.catch(() => localFlowId.value).then(() => persistFlowNow(selectedImageUrl));
+function persistFlow(selectedImageUrl = "", preferredNodeId = "") {
+  const save = saveQueue.catch(() => localFlowId.value).then(() => persistFlowNow(selectedImageUrl, preferredNodeId));
   saveQueue = save;
   return save;
 }
@@ -410,32 +416,13 @@ function sameImageUrl(left = "", right = "") {
   return Boolean(left && right && getOriginalImageUrl(left) === getOriginalImageUrl(right));
 }
 
-function resolvePrimaryGeneratedNode(imageUrl = "", preferredNodeId = "") {
-  const generatedNodes = nodes.value.filter((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated");
-  const preferred = preferredNodeId ? generatedNodes.find((node) => node.id === preferredNodeId) : undefined;
-  const imageMatched = imageUrl
-    ? generatedNodes.find(
-        (node) =>
-          sameImageUrl(node.data.selectedResult?.url, imageUrl) ||
-          sameImageUrl(node.data.generatedImage, imageUrl) ||
-          sameImageUrl(node.data.resultMedia ? getMediaOriginalUrl(node.data.resultMedia) : "", imageUrl),
-      )
-    : undefined;
-  const marked = generatedNodes.find((node) => node.data.isPrimary);
-  const single = generatedNodes.length === 1 ? generatedNodes[0] : undefined;
-  const primary = preferred ?? imageMatched ?? marked ?? single;
-
-  if (primary) {
-    generatedNodes.forEach((node) => {
-      node.data.isPrimary = node.id === primary.id;
-    });
-  }
-  return primary;
-}
-
 function getPrimarySnapshot(imageUrl = "", preferredNodeId = "") {
   _doSyncReferences();
-  const primary = resolvePrimaryGeneratedNode(imageUrl, preferredNodeId);
+  const primary = resolvePrimaryGeneratedNodeFromFlow(nodes.value, {
+    preferredNodeId,
+    selectedMedia: imageUrl,
+    fallbackToLast: true,
+  });
   const nodeMap = new Map(nodes.value.map((node) => [node.id, node]));
   const references: ReferenceImage[] = [];
   if (primary) {
@@ -454,7 +441,11 @@ function getPrimarySnapshot(imageUrl = "", preferredNodeId = "") {
 }
 
 function emitSave(imageUrl: string, flowId: number, preferredNodeId = "") {
-  const primary = resolvePrimaryGeneratedNode(imageUrl, preferredNodeId);
+  const primary = resolvePrimaryGeneratedNodeFromFlow(nodes.value, {
+    preferredNodeId,
+    selectedMedia: imageUrl,
+    fallbackToLast: true,
+  });
   emit("save", {
     imageUrl,
     media: primary?.data.resultMedia ?? normalizeMediaRef(imageUrl, "image"),
@@ -466,9 +457,13 @@ function emitSave(imageUrl: string, flowId: number, preferredNodeId = "") {
 async function selectFinalImage(imageUrl: string, nodeId = "") {
   if (!imageUrl) return;
   selectedImageUrl.value = imageUrl;
-  resolvePrimaryGeneratedNode(imageUrl, nodeId);
+  resolvePrimaryGeneratedNodeFromFlow(nodes.value, {
+    preferredNodeId: nodeId,
+    selectedMedia: imageUrl,
+    fallbackToLast: true,
+  });
   try {
-    const flowId = await persistFlow(imageUrl);
+    const flowId = await persistFlow(imageUrl, nodeId);
     emitSave(imageUrl, flowId, nodeId);
   } catch (e) {
     window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
@@ -510,8 +505,12 @@ async function rebuildEmptyFlow() {
 async function sureNode(imageUrl: string, nodeId = "") {
   try {
     selectedImageUrl.value = imageUrl;
-    resolvePrimaryGeneratedNode(imageUrl, nodeId);
-    const flowId = await persistFlow(imageUrl);
+    resolvePrimaryGeneratedNodeFromFlow(nodes.value, {
+      preferredNodeId: nodeId,
+      selectedMedia: imageUrl,
+      fallbackToLast: true,
+    });
+    const flowId = await persistFlow(imageUrl, nodeId);
     emitSave(imageUrl, flowId, nodeId);
     visible.value = false;
   } catch (e) {
@@ -553,7 +552,10 @@ onMounted(async () => {
     });
     const selectedMedia = normalizeMediaRef(data.selectedMedia ?? props.flowData.resultImages[0], "image");
     selectedImageUrl.value = selectedMedia ? getMediaOriginalUrl(selectedMedia) : props.flowData.resultImages[0]?.src || "";
-    resolvePrimaryGeneratedNode(selectedImageUrl.value);
+    resolvePrimaryGeneratedNodeFromFlow(nodes.value, {
+      selectedMedia: selectedImageUrl.value,
+      fallbackToLast: true,
+    });
     await nextTick();
     setTimeout(() => fitView({ duration: 300 }), 100);
   } catch (e) {

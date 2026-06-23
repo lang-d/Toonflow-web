@@ -9,7 +9,7 @@
         <div class="right f ac">
           <t-button size="small" variant="outline" @click="batchDownloadVideo">{{ $t("workbench.generate.batchDownloadVideo") }}</t-button>
           <t-button size="small" variant="outline" :loading="reviewLoading" :disabled="!checkedTrackIds.length" @click="emit('reviewTracks', checkedTrackIds)">
-            Review
+            {{ $t("workbench.productionReview.action.review") }}
           </t-button>
           <t-button size="small" variant="outline" @click="batchGenText" :loading="generateTextLoad">
             {{ $t("workbench.generate.batchGenerateText") }}
@@ -37,8 +37,9 @@
             @click.stop
             @change="(val: boolean) => toggleCheck(track.id, val)" />
           <t-tag class="indexTag" size="small">#{{ index + 1 }}</t-tag>
-          <t-tag v-if="track.reviewState === 'blocked'" class="reviewTag" theme="danger" size="small">Blocked</t-tag>
-          <t-tag v-else-if="track.reviewState === 'hasIssues'" class="reviewTag" theme="warning" size="small">Review</t-tag>
+          <t-tag v-if="track.reviewState" class="reviewTag" :theme="getReviewStateTheme(track.reviewState)" size="small">
+            {{ $t(getReviewStateI18nKey(track.reviewState)) }}
+          </t-tag>
           <t-tag v-if="track.groupName" class="groupTag" size="small" variant="light">{{ track.groupName }}</t-tag>
           <t-tag class="selectTag" theme="success" size="small" v-if="track.selectVideoId">已选择</t-tag>
           <!-- 优先展示选中视频的首帧 -->
@@ -90,7 +91,7 @@ import imageListCacheStore from "@/stores/imageListCache";
 import JSZip from "jszip";
 import settingStore from "@/stores/setting";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus } from "@/stores/taskCenter";
-import { getReviewMessage, isTrackBlocked } from "@/utils/productionReview";
+import { getReviewMessage, getReviewStateI18nKey, getReviewStateTheme } from "@/utils/productionReview";
 
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
@@ -352,6 +353,10 @@ function getTrackUploadInfo(track: TrackItem, filterEmpty = false) {
 const generateVideoLoad = ref(false);
 /** 批量为已勾选轨道生成视频 */
 function batchGenVideo() {
+  if (!checkedTrackIds.value.length) {
+    window.$message.warning($t("workbench.generate.selectTrackFirst"));
+    return;
+  }
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.generateConfirm"),
     body: $t("workbench.generate.generateVideosInBatches"),
@@ -361,12 +366,6 @@ function batchGenVideo() {
       const checkedTrackData = trackList.value.filter((track) => checkedTrackIds.value.includes(track.id));
       const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
       if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
-      const blockedTrack = checkedTrackData.find(isTrackBlocked);
-      if (blockedTrack) {
-        const blocking = blockedTrack.reviewIssues?.find((review) => review.status === "open" && review.severity === "blocking");
-        return window.$message.error(blocking?.message || "Video generation is blocked by open production review issues");
-      }
-
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
         const uploadData = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track, true);
