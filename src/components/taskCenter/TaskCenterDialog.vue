@@ -4,6 +4,7 @@
     :header="$t('workbench.globalTaskCenter.title')"
     width="760px"
     :footer="false"
+    :z-index="7500"
     attach="body">
     <div class="taskDialog">
       <div class="taskToolbar">

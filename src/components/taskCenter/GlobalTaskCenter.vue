@@ -34,6 +34,7 @@
         type="button"
         :title="$t('workbench.globalTaskCenter.collapse')"
         @pointerdown.stop
+        @pointerup.stop
         @mousedown.stop
         @click.stop="collapse()">
         {{ collapseSide === "left" ? "<" : ">" }}
@@ -126,7 +127,7 @@ onBeforeUnmount(() => document.removeEventListener("visibilitychange", handleVis
 <style scoped lang="scss">
 .taskFloating {
   position: fixed;
-  z-index: 6500;
+  z-index: 7600;
   width: 220px;
   height: 68px;
   display: grid;
@@ -221,7 +222,7 @@ onBeforeUnmount(() => document.removeEventListener("visibilitychange", handleVis
 }
 .taskSideTab {
   position: fixed;
-  z-index: 6500;
+  z-index: 7600;
   width: 46px;
   min-height: 86px;
   display: grid;
