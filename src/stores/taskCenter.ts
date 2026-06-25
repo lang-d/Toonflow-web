@@ -74,8 +74,8 @@ function normalizeDomain(value: TaskStatusEvent["taskType"] | TaskDomain, target
   if (hint.includes("novelevent") || hint.includes("novel_event")) return "novelEvent";
   if (hint.includes("video") && hint.includes("prompt")) return "videoPrompt";
   if (hint.includes("storyboard")) return "storyboardImage";
-  if (hint.includes("deriveasset") || hint.includes("productionasset") || hint.includes("image:asset") || hint.includes("image:assets")) return "assetImage";
-  if (hint.includes("flow") || hint.includes("editimage") || hint.includes("node") || hint.includes("canvas")) return "flowImage";
+  if (hint.includes("productionasset") || hint.includes("image:asset") || hint.includes("image:assets")) return "assetImage";
+  if (hint.includes("deriveasset") || hint.includes("flow") || hint.includes("editimage") || hint.includes("node") || hint.includes("canvas")) return "flowImage";
   if (value === "image") return targetType ? "assetImage" : "flowImage";
   if (value === "asset") return "assetImage";
   if (value === "storyboard") return "storyboardImage";

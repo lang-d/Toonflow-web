@@ -385,7 +385,7 @@ function selectHistory(item: ImageHistoryItem) {
 onMounted(() => {
   props.data.model ||= project.value?.imageModel ?? "";
   props.data.quality ||= project.value?.imageQuality ?? "";
-  props.data.ratio ||= project.value?.videoRatio ?? "16:9";
+  props.data.ratio ||= props.targetType === "storyboard" ? (project.value?.videoRatio ?? "16:9") : "16:9";
   Object.assign(props.data, normalizeGeneratedNodeData(props.data));
   if (isActiveImageTask(props.data)) {
     bindTask({ unifiedTaskId: props.data.unifiedTaskId, legacyTaskId: props.data.legacyTaskId ?? props.data.taskId, status: props.data.status });

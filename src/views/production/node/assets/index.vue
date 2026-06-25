@@ -25,6 +25,7 @@ import type { ImageFlowSavePayload } from "../../utils/editImageType";
 import axios from "@/utils/axios";
 import useProjectStore from "@/stores/project";
 import productionAgentStore from "@/stores/productionAgent";
+import { normalizeTaskStatus } from "@/stores/taskCenter";
 import AssetsGrid from "./components/AssetsGrid.vue";
 import AddDeriveAssetDialog from "./components/AddDeriveAssetDialog.vue";
 import "./styles.scss";
@@ -76,26 +77,14 @@ function openEdit(row: DeriveAsset, referanceImageUrl: string) {
 }
 
 async function generateDeriveAsset(row: DeriveAsset) {
-  if (!row.id || row.state === "生成中") return;
+  if (!row.id || ["queued", "submitting", "processing"].includes(normalizeTaskStatus(row.status ?? row.state, "pending"))) return;
   row.errorReason = "";
   try {
-    await persistDeriveAssetPrompt(row);
     await productionStore.batchGenerateAssets([row.id]);
   } catch (e) {
     row.errorReason = (e as any)?.message ?? "";
     window.$message.error(row.errorReason || $t("workbench.novel.genFailed"));
   }
-}
-
-async function persistDeriveAssetPrompt(row: DeriveAsset) {
-  await axios.post("/assets/updateAssets", {
-    id: row.id,
-    name: row.name,
-    describe: row.desc ?? "",
-    type: row.type,
-    remark: "",
-    prompt: row.prompt ?? "",
-  });
 }
 
 function openAddDialog(asset: AssetItem) {
@@ -127,6 +116,8 @@ async function submitAddDerive() {
       desc: data.desc ?? addForm.desc.trim(),
       src: data.src ?? "",
       flowId: data.flowId,
+      nodeId: data.nodeId,
+      promptMode: data.promptMode,
       state: data.state ?? "未生成",
       type: data.type ?? parent.type,
       errorReason: data.errorReason ?? "",
@@ -140,16 +131,15 @@ async function submitAddDerive() {
   }
 }
 
-async function save({ imageUrl, media, flowId, prompt }: ImageFlowSavePayload) {
+async function save({ imageUrl, media, flowId, primaryNodeId, prompt }: ImageFlowSavePayload) {
   const targetId = currentRow.value.targetId ?? currentAssetsId.value;
   if (!targetId || !flowId) return;
-  let targetAsset: DeriveAsset | null = null;
 
   for (const asset of assets.value) {
     const target = asset.derive.find((item) => item.id === targetId);
     if (!target) continue;
-    targetAsset = target;
     target.flowId = flowId;
+    target.nodeId = primaryNodeId ?? target.nodeId;
     if (prompt !== undefined) target.prompt = prompt;
     if (imageUrl) {
       target.src = imageUrl;
@@ -158,6 +148,7 @@ async function save({ imageUrl, media, flowId, prompt }: ImageFlowSavePayload) {
       target.state = "已完成";
       target.errorReason = "";
       delete target.taskId;
+      delete target.unifiedTaskId;
       delete target.legacyTaskId;
       delete target.imageId;
     }
@@ -175,13 +166,6 @@ async function save({ imageUrl, media, flowId, prompt }: ImageFlowSavePayload) {
         prompt: prompt ?? currentRow.value.resultImages[0]?.prompt ?? "",
       },
     ];
-  }
-  if (targetAsset && prompt !== undefined) {
-    try {
-      await persistDeriveAssetPrompt(targetAsset);
-    } catch (e) {
-      window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
-    }
   }
 }
 

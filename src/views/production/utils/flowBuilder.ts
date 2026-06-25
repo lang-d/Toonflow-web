@@ -25,6 +25,10 @@ export interface DeriveAsset {
   src: string;
   media?: MediaRef;
   flowId?: number;
+  nodeId?: string | null;
+  unifiedTaskId?: string | null;
+  promptMode?: "preserve" | "replace";
+  ratio?: string;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   status?: TaskStatus;
   type: "role" | "tool" | "scene" | "clip" | "props";

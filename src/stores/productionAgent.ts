@@ -6,7 +6,6 @@ import type { DeriveAsset, FlowData, Storyboard, StoryboardGenerationLastFailure
 import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
-import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 import type { Ref, WatchStopHandle } from "vue";
 
@@ -36,9 +35,42 @@ interface ProductionAssetTaskBinding {
   episodeId: number;
   assetId: number;
   taskId: string;
+  unifiedTaskId?: string;
   legacyTaskId?: number;
   imageId?: number;
+  flowId?: number;
+  nodeId?: string | null;
   createdAt: number;
+}
+
+interface ProductionAssetBatchTask {
+  assetId: number | string;
+  taskId?: string | number | null;
+  unifiedTaskId?: string | null;
+  legacyTaskId?: number | string | null;
+  imageId?: number;
+  flowId?: number;
+  nodeId?: string | null;
+  status?: string;
+  state?: string;
+  prompt?: string;
+  model?: string;
+  quality?: string;
+  ratio?: string;
+}
+
+interface ProductionAssetBatchError {
+  assetId: number | string;
+  error?: string;
+  message?: string;
+}
+
+interface ProductionAssetBatchResult {
+  total: number;
+  successCount: number;
+  failedCount: number;
+  tasks: ProductionAssetBatchTask[];
+  errors: ProductionAssetBatchError[];
 }
 
 const CHAT_TERMINAL_STATUSES = new Set(["complete", "error", "stop"]);
@@ -99,6 +131,34 @@ function removeProductionAssetTaskBinding(projectId: number, episodeId: number, 
   const bindings = readProductionAssetTaskBindings(projectId, episodeId);
   const next = bindings.filter((item) => item.assetId !== assetId || (taskId !== undefined && item.taskId !== taskId));
   if (next.length !== bindings.length) writeProductionAssetTaskBindings(projectId, episodeId, next);
+}
+
+function normalizeNumericIds(ids: unknown): number[] {
+  const values = Array.isArray(ids) ? ids : [ids];
+  return Array.from(
+    new Set(
+      values
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  );
+}
+
+function normalizeBatchGenerateAssetsResult(value: any): ProductionAssetBatchResult {
+  const result = value?.tasks || value?.errors ? value : value?.data;
+  const tasks = Array.isArray(result?.tasks) ? result.tasks : [];
+  const errors = Array.isArray(result?.errors) ? result.errors : [];
+  return {
+    total: Number(result?.total ?? tasks.length + errors.length),
+    successCount: Number(result?.successCount ?? tasks.length),
+    failedCount: Number(result?.failedCount ?? errors.length),
+    tasks,
+    errors,
+  };
+}
+
+function getBatchAssetErrorMessage(error: ProductionAssetBatchError) {
+  return error.error || error.message || "衍生资产生成任务创建失败";
 }
 
 function createEmptyFlowData(): FlowData {
@@ -388,8 +448,11 @@ function makeProductionAgentStore(projectId: string) {
           return;
         }
         derive.taskId = binding.taskId;
+        derive.unifiedTaskId = binding.unifiedTaskId ?? binding.taskId;
         derive.legacyTaskId = binding.legacyTaskId;
         derive.imageId = binding.imageId;
+        derive.flowId = binding.flowId ?? derive.flowId;
+        derive.nodeId = binding.nodeId ?? derive.nodeId;
         derive.status = "queued";
         derive.state = "生成中";
       });
@@ -611,6 +674,11 @@ function makeProductionAgentStore(projectId: string) {
             const item = deriveAssetList.find((derive) => derive.id === data.id);
             if (item) {
               item.name = data.name;
+              item.desc = data.describe ?? item.desc ?? "";
+              item.prompt = data.prompt ?? item.prompt ?? "";
+              item.promptMode = data.promptMode ?? item.promptMode;
+              item.flowId = data.flowId ?? item.flowId;
+              item.nodeId = data.nodeId ?? item.nodeId;
               item.type = assets.type;
               callback({ success: true, message: $t("storyboard.assets.derivativeUpdateSuccess") });
             } else {
@@ -620,7 +688,10 @@ function makeProductionAgentStore(projectId: string) {
                 name: data.name,
                 type: assets.type,
                 desc: data.describe,
-                prompt: "",
+                prompt: data.prompt ?? "",
+                promptMode: data.promptMode,
+                flowId: data.flowId,
+                nodeId: data.nodeId,
                 state: "未生成" as any,
                 src: "",
               });
@@ -808,15 +879,20 @@ function makeProductionAgentStore(projectId: string) {
       const record = (task.result ?? {}) as any;
       derive.status = task.status;
       derive.state = toLegacyAssetState(task.status);
+      derive.unifiedTaskId = task.unifiedTaskId ?? derive.unifiedTaskId;
+      derive.taskId = task.unifiedTaskId ?? task.taskId?.toString() ?? derive.taskId;
+      derive.legacyTaskId = typeof task.legacyTaskId === "number" ? task.legacyTaskId : Number(task.legacyTaskId) || derive.legacyTaskId;
+      derive.flowId = Number(record.flowId ?? derive.flowId) || derive.flowId;
+      derive.nodeId = record.nodeId ?? task.nodeId ?? derive.nodeId;
       const media = normalizeMediaRef(record.media ?? record, "image");
-      if (media) {
+      if (media && task.status === "completed") {
         derive.media = media;
         derive.src = getMediaPreviewUrl(media);
       }
       derive.errorReason = task.reason ?? "";
       if (record.prompt !== undefined) derive.prompt = record.prompt;
       if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
-        removeProductionAssetTaskBinding(Number(projectId), session.episodeId, deriveId, task.unifiedTaskId ?? derive.taskId);
+        removeProductionAssetTaskBinding(Number(projectId), session.episodeId, deriveId, task.unifiedTaskId ?? derive.unifiedTaskId ?? derive.taskId);
         queueMicrotask(() => releaseAssetTask(session, deriveId));
       }
     }
@@ -856,25 +932,30 @@ function makeProductionAgentStore(projectId: string) {
         asset.derive?.forEach((derive) => {
           const status = normalizeTaskStatus(derive.status ?? derive.state, "pending");
           if (!["queued", "submitting", "processing"].includes(status)) return;
-          const unifiedTaskId = derive.taskId;
-          if (!unifiedTaskId) return;
+          const unifiedTaskId = derive.unifiedTaskId ?? (derive.taskId && !/^\d+$/.test(String(derive.taskId)) ? derive.taskId : undefined);
+          const legacyTaskId = derive.legacyTaskId ?? (derive.taskId && /^\d+$/.test(String(derive.taskId)) ? Number(derive.taskId) : undefined);
+          if (!unifiedTaskId && !legacyTaskId && !derive.taskId) return;
           activeIds.add(derive.id);
+          const taskKey = createTaskKey("flowImage", Number(projectId), derive.id, derive.nodeId ?? undefined, unifiedTaskId);
           if (
             session.assetTaskBindings.has(derive.id) &&
-            taskCenter.getTask(createTaskKey("assetImage", Number(projectId), derive.id, undefined, unifiedTaskId))
+            taskCenter.getTask(taskKey)
           ) {
             return;
           }
           if (session.assetTaskBindings.has(derive.id)) releaseAssetTask(session, derive.id);
           const release = taskCenter.registerTask(
             {
-              key: createTaskKey("assetImage", Number(projectId), derive.id, undefined, unifiedTaskId),
-              domain: "assetImage",
+              key: taskKey,
+              domain: "flowImage",
+              taskId: derive.taskId,
               unifiedTaskId,
-              legacyTaskId: derive.legacyTaskId,
-              targetType: "productionAsset",
+              legacyTaskId,
+              targetType: "deriveAsset",
               targetId: derive.id,
               projectId: Number(projectId),
+              scriptId: session.episodeId,
+              nodeId: derive.nodeId ?? undefined,
               status,
             },
             (task) => applyAssetTask(session, derive.id, task),
@@ -963,18 +1044,21 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
-    async function batchGenerateAssets(allIds: number[], scriptId = episodesId.value) {
+    async function batchGenerateAssets(allIds: unknown[], scriptId = episodesId.value) {
       const session = getSession(scriptId);
       if (!session) throw new Error("Production session is unavailable");
+      const activeSession = session;
       const currentProject = projectStore().project;
       if (!currentProject?.imageModel || !currentProject.imageQuality) throw new Error("请先配置图片模型和清晰度");
 
-      const selectedIds = new Set(allIds);
+      const normalizedIds = normalizeNumericIds(allIds);
+      if (!normalizedIds.length) throw new Error("没有可提交的衍生资产 ID");
+
+      const selectedIds = new Set(normalizedIds);
       const selectedDeriveAssets = session.flowData.value.assets
         .flatMap((asset) => asset.derive ?? [])
         .filter((derive) => selectedIds.has(derive.id))
-        .map((derive) => ({ derive, type: normalizeAssetImageType(derive.type) }))
-        .filter((item): item is typeof item & { type: NonNullable<typeof item.type> } => !!item.type);
+        .map((derive) => ({ derive }));
 
       if (!selectedDeriveAssets.length) throw new Error("没有可生成图片的角色、场景或道具资产");
 
@@ -984,10 +1068,14 @@ function makeProductionAgentStore(projectId: string) {
           {
             state: derive.state,
             taskId: derive.taskId,
+            unifiedTaskId: derive.unifiedTaskId,
             legacyTaskId: derive.legacyTaskId,
             imageId: derive.imageId,
+            flowId: derive.flowId,
+            nodeId: derive.nodeId,
             errorReason: derive.errorReason,
             status: derive.status,
+            prompt: derive.prompt,
           },
         ]),
       );
@@ -997,11 +1085,22 @@ function makeProductionAgentStore(projectId: string) {
           .map((binding) => [binding.assetId, binding]),
       );
 
+      function restoreDeriveAsset(derive: DeriveAsset, errorReason?: string) {
+        releaseAssetTask(activeSession, derive.id);
+        const previous = previousState.get(derive.id);
+        if (previous) Object.assign(derive, previous);
+        if (errorReason) derive.errorReason = errorReason;
+        const previousBinding = previousBindings.get(derive.id);
+        if (previousBinding) upsertProductionAssetTaskBinding(previousBinding);
+      }
+
       selectedDeriveAssets.forEach(({ derive }) => {
         releaseAssetTask(session, derive.id);
+        taskCenter.removeTask(createTaskKey("flowImage", Number(projectId), derive.id, derive.nodeId ?? undefined, derive.unifiedTaskId ?? undefined));
         taskCenter.removeTask(createTaskKey("assetImage", Number(projectId), derive.id, undefined, derive.taskId));
         removeProductionAssetTaskBinding(Number(projectId), session.episodeId, derive.id);
         derive.taskId = undefined;
+        derive.unifiedTaskId = undefined;
         derive.legacyTaskId = undefined;
         derive.errorReason = "";
         derive.status = "submitting";
@@ -1009,57 +1108,92 @@ function makeProductionAgentStore(projectId: string) {
       });
 
       try {
-        const { data } = await axios.post("/assetsGenerate/batchGenerateImageAssets", {
+        const { data } = await axios.post("/production/assets/batchGenerateAssetsImage", {
           projectId: Number(projectId),
+          scriptId: session.episodeId,
+          assetIds: selectedDeriveAssets.map(({ derive }) => derive.id),
           model: currentProject.imageModel,
-          resolution: currentProject.imageQuality,
+          quality: currentProject.imageQuality,
+          ratio: "16:9",
           concurrentCount: settingStore().otherSetting.assetsBatchGenereateSize,
-          items: selectedDeriveAssets.map(({ derive, type }) => ({
-            id: derive.id,
-            type,
-            name: derive.name ?? "",
-            prompt: derive.prompt ?? "",
-            ...(derive.base64 ? { base64: derive.base64 } : {}),
-          })),
         });
-        const result = data?.tasks ? data : data?.data;
+        const result = normalizeBatchGenerateAssetsResult(data);
+        if (!result.tasks.length && !result.errors.length) {
+          throw new Error("后端未返回可识别的衍生资产生成任务结果");
+        }
         const deriveById = new Map(selectedDeriveAssets.map(({ derive }) => [derive.id, derive]));
         const returnedAssetIds = new Set<number>();
-        for (const task of result?.tasks ?? []) {
-          const derive = deriveById.get(task.assetId);
-          if (!derive || !task.taskId) continue;
+        const normalizedErrors: ProductionAssetBatchError[] = [...result.errors];
+        for (const task of result.tasks) {
+          const assetId = Number(task.assetId);
+          const derive = deriveById.get(assetId);
+          if (!derive) continue;
+          const unifiedTaskId =
+            task.unifiedTaskId ?? (typeof task.taskId === "string" && !/^\d+$/.test(task.taskId) ? task.taskId : undefined);
+          const rawLegacyTaskId =
+            task.legacyTaskId ?? (typeof task.taskId === "number" || (typeof task.taskId === "string" && /^\d+$/.test(task.taskId)) ? Number(task.taskId) : undefined);
+          const legacyTaskId = rawLegacyTaskId == null || !Number.isFinite(Number(rawLegacyTaskId)) ? undefined : Number(rawLegacyTaskId);
+          const taskId = unifiedTaskId ?? (task.taskId == null ? undefined : String(task.taskId)) ?? (legacyTaskId == null ? undefined : String(legacyTaskId));
+          if (!taskId) {
+            normalizedErrors.push({ assetId: derive.id, error: "后端返回的任务缺少 taskId" });
+            continue;
+          }
           returnedAssetIds.add(derive.id);
-          derive.taskId = task.taskId;
-          derive.legacyTaskId = task.legacyTaskId;
+          derive.taskId = taskId;
+          derive.unifiedTaskId = unifiedTaskId;
+          derive.legacyTaskId = legacyTaskId;
           derive.imageId = task.imageId;
-          derive.status = "queued";
-          derive.state = "生成中";
+          derive.flowId = task.flowId ?? derive.flowId;
+          derive.nodeId = task.nodeId ?? derive.nodeId;
+          derive.ratio = task.ratio ?? derive.ratio;
+          if (task.prompt !== undefined) derive.prompt = task.prompt;
+          derive.status = normalizeTaskStatus(task.status ?? task.state, "queued");
+          derive.state = toLegacyAssetState(derive.status);
           upsertProductionAssetTaskBinding({
             projectId: Number(projectId),
             episodeId: session.episodeId,
             assetId: derive.id,
-            taskId: task.taskId,
-            legacyTaskId: task.legacyTaskId,
+            taskId,
+            unifiedTaskId,
+            legacyTaskId,
             imageId: task.imageId,
+            flowId: derive.flowId,
+            nodeId: derive.nodeId,
             createdAt: Date.now(),
           });
         }
+        const erroredAssetIds = new Set<number>();
+        for (const error of normalizedErrors) {
+          const assetId = Number(error.assetId);
+          if (!Number.isFinite(assetId)) continue;
+          const derive = deriveById.get(assetId);
+          if (!derive) continue;
+          erroredAssetIds.add(derive.id);
+          if (returnedAssetIds.has(derive.id)) continue;
+          restoreDeriveAsset(derive, getBatchAssetErrorMessage(error));
+        }
         selectedDeriveAssets.forEach(({ derive }) => {
-          if (returnedAssetIds.has(derive.id)) return;
-          const previous = previousState.get(derive.id);
-          if (previous) Object.assign(derive, previous);
-          const previousBinding = previousBindings.get(derive.id);
-          if (previousBinding) upsertProductionAssetTaskBinding(previousBinding);
+          if (returnedAssetIds.has(derive.id) || erroredAssetIds.has(derive.id)) return;
+          restoreDeriveAsset(derive);
         });
         syncAssetTasks(session);
+        result.errors = normalizedErrors;
+        result.successCount = returnedAssetIds.size;
+        result.failedCount = normalizedErrors.length;
+        result.total = result.total || result.successCount + result.failedCount;
+        if (result.successCount === 0 && result.failedCount > 0) {
+          const businessError = new Error(getBatchAssetErrorMessage(result.errors[0]));
+          (businessError as any).productionAssetBusinessFailure = true;
+          throw businessError;
+        }
         return result;
       } catch (error) {
+        if ((error as any)?.productionAssetBusinessFailure) {
+          syncAssetTasks(session);
+          throw error;
+        }
         selectedDeriveAssets.forEach(({ derive }) => {
-          releaseAssetTask(session, derive.id);
-          const previous = previousState.get(derive.id);
-          if (previous) Object.assign(derive, previous);
-          const previousBinding = previousBindings.get(derive.id);
-          if (previousBinding) upsertProductionAssetTaskBinding(previousBinding);
+          restoreDeriveAsset(derive);
         });
         syncAssetTasks(session);
         throw error;
