@@ -189,6 +189,32 @@ export default defineStore(
       return operation;
     }
 
+    async function createWorkspace(targetPath: string) {
+      const response = await axios.post("/setting/storage/createWorkspace", { targetPath });
+      const data = (response as any).data || {};
+      await fetchStatus().catch(() => {});
+      if (status.value) {
+        status.value = {
+          ...status.value,
+          workspacePath: data.workspacePath || status.value.workspacePath || targetPath,
+          restartRequired: Boolean(data.restartRequired || status.value.restartRequired),
+        };
+      } else {
+        status.value = {
+          mode: "workspace",
+          workspacePath: data.workspacePath || targetPath,
+          projectCount: 0,
+          totalFiles: 0,
+          totalBytes: 0,
+          maintenance: false,
+          activeTaskCount: 0,
+          restartRequired: Boolean(data.restartRequired),
+          selectionRequired: false,
+        };
+      }
+      return data;
+    }
+
     async function prepareProjectCopy(projectId: number) {
       const response = await axios.post("/project/preparePortableCopy", { projectId });
       const data = (response as any).data || {};
@@ -303,6 +329,7 @@ export default defineStore(
       chooseWorkspaceTarget,
       initialize,
       startMigration,
+      createWorkspace,
       prepareProjectCopy,
       importPortableProject,
       chooseAndImportProject,

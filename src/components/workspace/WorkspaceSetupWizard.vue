@@ -77,8 +77,8 @@
         <t-alert v-if="errorMessage" theme="error" :message="errorMessage" />
 
         <div class="actions">
-          <t-button theme="primary" :loading="starting" :disabled="!canStart" @click="startMigration">
-            {{ $t("workspace.startMigration") }}
+          <t-button theme="primary" :loading="starting" :disabled="!canStart" @click="startWorkspaceAction">
+            {{ actionLabel }}
           </t-button>
         </div>
       </template>
@@ -89,6 +89,7 @@
 <script setup lang="ts">
 import useWorkspaceStore from "@/stores/workspace";
 import settingStore from "@/stores/setting";
+import { DialogPlugin } from "tdesign-vue-next";
 
 const workspace = useWorkspaceStore();
 const { isElectron } = storeToRefs(settingStore());
@@ -100,6 +101,7 @@ const errorMessage = ref("");
 const migrationTask = computed(() => workspace.migrationTask);
 const healthyCandidates = computed(() => workspace.legacyCandidates.filter((item) => item.healthy));
 const canStart = computed(() => Boolean(workspace.validation?.targetPath && (mode.value === "empty" || selectedSourcePath.value)));
+const actionLabel = computed(() => (mode.value === "empty" ? $t("workspace.createWorkspace") : $t("workspace.startMigration")));
 
 watch(
   healthyCandidates,
@@ -123,23 +125,50 @@ async function chooseTarget() {
   }
 }
 
-async function startMigration() {
+async function startWorkspaceAction() {
   if (!workspace.validation?.targetPath) return;
   starting.value = true;
   errorMessage.value = "";
   try {
+    if (mode.value === "empty") {
+      await workspace.createWorkspace(workspace.validation.targetPath);
+      showRestartConfirm();
+      return;
+    }
+    if (!selectedSourcePath.value) return;
     await workspace.startMigration({
       targetPath: workspace.validation.targetPath,
-      sourcePath: mode.value === "migrate" ? selectedSourcePath.value : undefined,
+      sourcePath: selectedSourcePath.value,
     });
   } catch (error: any) {
     const blockers = error?.data || error?.response?.data?.data;
     const blockerCount = blockers?.count;
     errorMessage.value =
-      blockerCount > 0 ? $t("workspace.activeTaskBlocker", { count: blockerCount }) : error?.message || $t("workspace.startFailed");
+      blockerCount > 0
+        ? $t("workspace.activeTaskBlocker", { count: blockerCount })
+        : error?.message || (mode.value === "empty" ? $t("workspace.createWorkspaceFailed") : $t("workspace.startFailed"));
   } finally {
     starting.value = false;
   }
+}
+
+function showRestartConfirm() {
+  const dialog = DialogPlugin.confirm({
+    header: $t("workspace.restartTitle"),
+    body: $t("workspace.workspaceCreatedRestart"),
+    confirmBtn: $t("workspace.restartNow"),
+    cancelBtn: $t("common.cancel"),
+    onConfirm: async () => {
+      try {
+        await handleRestart();
+      } finally {
+        dialog.destroy();
+      }
+    },
+    onClose: () => {
+      dialog.destroy();
+    },
+  });
 }
 
 async function handleRestart() {
