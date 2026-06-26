@@ -24,6 +24,18 @@
           <span style="margin-left: 5px; color: #fff">{{ $t("workbench.production.editImage.upload") }}</span>
         </div>
       </t-dropdown>
+      <t-tooltip theme="primary" :content="$t('workbench.production.editImage.annotateImage')">
+        <div
+          v-if="originalImage"
+          class="annotate ac"
+          :class="{ disabled: generating }"
+          @click.stop="emit('annotate')">
+          <i-edit theme="outline" size="18" fill="#fff" />
+          <span style="margin-left: 5px; color: #fff">
+          {{ $t("workbench.production.editImage.annotateShort") }}
+          </span>
+        </div>
+      </t-tooltip>
       <t-tooltip theme="primary" :content="$t('workbench.production.editImage.deleteNode')">
         <div class="remove ac" :class="{ disabled: generating }" @click.stop="!generating && emit('remove')">
           <i-delete theme="outline" size="18" fill="#fff" />
@@ -57,6 +69,7 @@ const originalImage = computed(() =>
 const emit = defineEmits<{
   toggleSelected: [];
   uploadOption: [option: DropdownOption];
+  annotate: [];
   remove: [];
 }>();
 </script>
@@ -84,14 +97,15 @@ const emit = defineEmits<{
 }
 
 .remove,
-.upload {
+.upload,
+.annotate {
   position: absolute;
-  top: 10px;
   z-index: 3;
   cursor: pointer;
 }
 
 .remove {
+  top: 10px;
   right: 10px;
   padding: 5px;
   border-radius: 8px;
@@ -102,11 +116,19 @@ const emit = defineEmits<{
   background-color: rgb(220, 50, 50);
 }
 
-.upload {
+.upload,
+.annotate {
+  top: 10px;
   left: 10px;
   padding: 5px 10px;
   border-radius: 8px;
   background-color: rgba(0, 0, 0, 0.55);
+}
+
+.annotate {
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 .disabled {

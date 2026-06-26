@@ -159,6 +159,7 @@ export interface Storyboard {
   unifiedTaskId?: string | null;
   legacyTaskId?: number | string | null;
   flowId?: number;
+  nodeId?: string | null;
   reason?: string;
   videoDesc: string;
   shouldGenerateImage: number;

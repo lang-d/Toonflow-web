@@ -111,10 +111,18 @@
       :references="promptDraftReferenceRows"
       :node-options="promptNodeOptions"
       @pick-assets="pickAssetsForPrompt"
+      @pick-storyboard-images="pickStoryboardImagesForPrompt"
       @upload-local="uploadLocalPromptReference"
       @remove-reference="removePromptReference"
       @preview-reference="previewPromptReference"
       @confirm="savePromptEditor" />
+
+    <storyboardImageCheck
+      v-model="promptStoryboardSelectorVisible"
+      multiple
+      :scriptId="episodesId!"
+      @confirm="confirmPromptStoryboardImages"
+      @cancel="cancelPromptStoryboardImages" />
 
     <StoryboardPreviewDialog
       v-model:visible="previewVisible"
@@ -162,6 +170,7 @@ import StoryboardGridView from "./components/StoryboardGridView.vue";
 import StoryboardPreviewDialog from "./components/StoryboardPreviewDialog.vue";
 import StoryboardPromptDialog from "./components/StoryboardPromptDialog.vue";
 import StoryboardHistoryDialog from "./components/StoryboardHistoryDialog.vue";
+import storyboardImageCheck from "@/components/storyboardImageCheck.vue";
 import { openImageLightbox } from "@/composables/useImageLightbox";
 import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 import { getMediaOriginalUrl, getMediaPathForGeneration, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
@@ -255,6 +264,8 @@ const promptDraftReferences = ref<ReferenceImage[]>([]);
 const promptPrimaryNodeId = ref("");
 const promptNodeOptions = ref<{ label: string; value: string }[]>([]);
 const promptFlowSnapshot = shallowRef<{ nodes: NodeType[]; edges: ReturnType<typeof cleanEdges> } | null>(null);
+const promptStoryboardSelectorVisible = ref(false);
+let promptStoryboardSelectorResolve: ((rows: Storyboard[]) => void) | null = null;
 const collapsedGroupKeys = ref<string[]>([]);
 const imageRatioMap = reactive<Record<string, string>>({});
 const storyboardFlowTaskReleases = new Map<number, () => void>();
@@ -714,6 +725,51 @@ async function pickAssetsForPrompt() {
   });
 }
 
+function storyboardToPromptReference(item: Storyboard): ReferenceImage | null {
+  const media = normalizeMediaRef((item as any).media ?? item, "image");
+  const image = media
+    ? getMediaOriginalUrl(media)
+    : getOriginalImageUrl((item as any).originalUrl || (item as any).imageUrl || (item as any).url || item.src || (item as any).filePath || "");
+  const previewImage = media
+    ? getMediaPreviewUrl(media)
+    : getThumbnailImageUrl((item as any).thumbnail || (item as any).thumb || item.src || (item as any).imageUrl || (item as any).url || (item as any).filePath || "");
+  if (!image && !previewImage) return null;
+  return {
+    image: image || previewImage,
+    previewImage: previewImage || image,
+    media,
+    label: item.prompt || (item.id ? `Storyboard #${item.id}` : $t("components.storyboardImageCheck.src")),
+    source: "storyboard",
+    sourceId: item.id,
+    group: $t("workbench.globalTaskCenter.domain.storyboardImage"),
+    type: "image",
+  };
+}
+
+function confirmPromptStoryboardImages(rows: Storyboard[]) {
+  promptStoryboardSelectorVisible.value = false;
+  promptStoryboardSelectorResolve?.(rows);
+  promptStoryboardSelectorResolve = null;
+}
+
+function cancelPromptStoryboardImages() {
+  promptStoryboardSelectorVisible.value = false;
+  promptStoryboardSelectorResolve?.([]);
+  promptStoryboardSelectorResolve = null;
+}
+
+async function pickStoryboardImagesForPrompt() {
+  const selected = await new Promise<Storyboard[]>((resolve) => {
+    promptStoryboardSelectorResolve = resolve;
+    promptStoryboardSelectorVisible.value = true;
+  });
+  selected.forEach((item) => {
+    if (!item.id || promptDraftReferences.value.some((ref) => ref.source === "storyboard" && ref.sourceId === item.id)) return;
+    const reference = storyboardToPromptReference(item);
+    if (reference) promptDraftReferences.value.push(reference);
+  });
+}
+
 async function uploadLocalPromptReference() {
   const files = await new Promise<FileList | null>((resolve) => {
     open();
@@ -954,19 +1010,6 @@ async function loadStoryboardFlow(row: Storyboard) {
   };
 }
 
-function getPrimaryReferenceMediaPaths(nodes: NodeType[], edges: ReturnType<typeof cleanEdges>, primaryId: string) {
-  const refs = [...getIncomingReferences(nodes, edges, primaryId)];
-  const primary = nodes.find((node): node is Extract<NodeType, { type: "generated" }> => node.type === "generated" && node.id === primaryId);
-  refs.push(...(primary?.data.references ?? []));
-  return [
-    ...new Set(
-      refs
-        .map((item) => getMediaPathForGeneration(item.media ?? normalizeMediaRef(item, "image")))
-        .filter(Boolean),
-    ),
-  ];
-}
-
 function releaseStoryboardFlowTask(storyboardId: number) {
   storyboardFlowTaskReleases.get(storyboardId)?.();
   storyboardFlowTaskReleases.delete(storyboardId);
@@ -978,14 +1021,17 @@ function applyStoryboardFlowTask(storyboardId: number, nodeId: string, task: Run
     releaseStoryboardFlowTask(storyboardId);
     return;
   }
+  const record = (task.result ?? {}) as any;
   row.status = task.status;
   row.state = toStoryboardState(task.status);
   row.reason = task.status === "completed" ? "" : (task.reason ?? "");
   row.taskId = task.unifiedTaskId ?? String(task.legacyTaskId ?? task.taskId ?? row.taskId ?? "");
   row.unifiedTaskId = task.unifiedTaskId ?? null;
   row.legacyTaskId = task.legacyTaskId ?? null;
+  row.flowId = Number(record.flowId ?? row.flowId) || row.flowId;
+  row.nodeId = record.nodeId ?? task.nodeId ?? row.nodeId ?? nodeId;
 
-  const media = normalizeMediaRef((task.result as any)?.media ?? task.result, "image");
+  const media = normalizeMediaRef(record.media ?? record, "image");
   if (media) {
     row.media = media;
     row.src = getMediaPreviewUrl(media);
@@ -993,7 +1039,7 @@ function applyStoryboardFlowTask(storyboardId: number, nodeId: string, task: Run
 
   if (task.status === "completed") {
     queueMicrotask(() => {
-      void finalizeStoryboardFlowTask(row, nodeId, media).catch((error) => {
+      void finalizeStoryboardFlowTask(row, row.nodeId ?? nodeId, media).catch((error) => {
         window.$message.error((error as any)?.message || $t("workbench.production.editImage.saveFailed"));
       });
       releaseStoryboardFlowTask(storyboardId);
@@ -1003,22 +1049,23 @@ function applyStoryboardFlowTask(storyboardId: number, nodeId: string, task: Run
   }
 }
 
-function bindStoryboardFlowTask(row: Storyboard, primaryNodeId: string, task: { taskId?: string | number; unifiedTaskId?: string; legacyTaskId?: string | number; status?: TaskStatus }) {
+function bindStoryboardFlowTask(row: Storyboard, primaryNodeId: string, task: { taskId?: string | number; unifiedTaskId?: string; legacyTaskId?: string | number | null; status?: TaskStatus }) {
   if (!row.id) return;
   releaseStoryboardFlowTask(row.id);
   const taskId = task.unifiedTaskId ?? task.legacyTaskId ?? task.taskId;
+  if (!taskId) return;
   const release = taskCenter.registerTask(
     {
-      key: createTaskKey("flowImage", Number(project.value?.id), row.id, primaryNodeId, task.unifiedTaskId),
+      key: createTaskKey("flowImage", Number(project.value?.id), row.id, primaryNodeId || undefined, task.unifiedTaskId),
       domain: "flowImage",
       taskId,
       unifiedTaskId: task.unifiedTaskId,
-      legacyTaskId: task.legacyTaskId,
+      legacyTaskId: task.legacyTaskId ?? undefined,
       targetType: "storyboard",
       targetId: row.id,
       projectId: Number(project.value?.id),
       scriptId: Number(episodesId.value),
-      nodeId: primaryNodeId,
+      nodeId: primaryNodeId || undefined,
       status: task.status && ["queued", "submitting", "processing"].includes(task.status) ? task.status : "processing",
     },
     (runtimeTask) => applyStoryboardFlowTask(row.id!, primaryNodeId, runtimeTask),
@@ -1049,64 +1096,101 @@ async function finalizeStoryboardFlowTask(row: Storyboard, nodeId: string, media
   row.src = getMediaPreviewUrl(media);
 }
 
-async function generateStoryboardViaFlow(row: Storyboard) {
-  if (!row.id || isStoryboardActive(row)) return;
-  const { nodes, edges } = await loadStoryboardFlow(row);
-  const primary = getPrimaryNodeOrThrow(nodes, row);
-  primary.data.model ||= project.value?.imageModel ?? "";
-  primary.data.quality ||= project.value?.imageQuality ?? "";
-  primary.data.ratio ||= project.value?.videoRatio ?? "16:9";
-  if (!primary.data.model) throw new Error($t("workbench.production.editImage.selectModel"));
-  if (!primary.data.quality) throw new Error($t("workbench.production.editImage.selectQuality"));
-  if (!primary.data.ratio) throw new Error($t("workbench.production.editImage.selectRatio"));
+function getStoryboardTaskIds(record: Record<string, any>) {
+  const unifiedTaskId =
+    record.unifiedTaskId ?? (typeof record.taskId === "string" && !/^\d+$/.test(record.taskId) ? record.taskId : undefined);
+  const legacyTaskId =
+    record.legacyTaskId ?? (typeof record.taskId === "number" || (typeof record.taskId === "string" && /^\d+$/.test(record.taskId)) ? record.taskId : undefined);
+  const taskId = unifiedTaskId ?? (legacyTaskId == null ? record.taskId : String(legacyTaskId));
+  return { taskId, unifiedTaskId, legacyTaskId };
+}
 
-  await axios.post("/production/editImage/saveImageFlow", {
-    flowId: row.flowId,
-    projectId: Number(project.value?.id),
-    scriptId: Number(episodesId.value),
-    targetType: "storyboard",
-    targetId: row.id,
-    nodes: cleanNodes(nodes),
-    edges,
-  });
-  const previousTaskState = {
-    status: row.status,
-    state: row.state,
-    reason: row.reason,
-  };
-  row.status = "processing";
-  row.state = "生成中";
-  row.reason = "";
+function removeStoryboardTask(row: Storyboard) {
+  if (!row.id) return;
+  releaseStoryboardFlowTask(row.id);
+  taskCenter.removeTask(createTaskKey("storyboardImage", Number(project.value?.id), row.id));
+  taskCenter.removeTask(createTaskKey("storyboardImage", Number(project.value?.id), row.id, undefined, row.unifiedTaskId ?? undefined));
+  taskCenter.removeTask(createTaskKey("flowImage", Number(project.value?.id), row.id, row.nodeId ?? undefined, row.unifiedTaskId ?? undefined));
+}
 
-  let data: any;
-  try {
-    ({ data } = await axios.post("/production/editImage/generateFlowImageTask", {
-      referenceMediaPaths: getPrimaryReferenceMediaPaths(nodes, edges, primary.id),
-      model: primary.data.model,
-      quality: primary.data.quality,
-      ratio: primary.data.ratio,
-      prompt: primary.data.prompt || row.prompt || "",
-      projectId: Number(project.value?.id),
-      scriptId: Number(episodesId.value),
-      flowId: row.flowId,
-      nodeId: primary.id,
-      targetType: "storyboard",
-      targetId: row.id,
-    }));
-  } catch (error) {
-    row.status = previousTaskState.status;
-    row.state = previousTaskState.state;
-    row.reason = previousTaskState.reason;
-    throw error;
+function applyStoryboardBatchRow(record: Record<string, any>) {
+  const storyboardId = Number(record.id);
+  if (!Number.isFinite(storyboardId)) return;
+  const row = storyboard.value.find((item) => item.id === storyboardId);
+  if (!row) return;
+
+  if (record.prompt !== undefined) row.prompt = record.prompt ?? "";
+  if (Array.isArray(record.associateAssetsIds)) row.associateAssetsIds = record.associateAssetsIds;
+  if (Array.isArray(record.referenceImages)) row.referenceImages = record.referenceImages;
+  if (record.flowId !== undefined) row.flowId = Number(record.flowId) || row.flowId;
+  if (record.nodeId !== undefined) row.nodeId = record.nodeId ?? null;
+  if (record.reason !== undefined) row.reason = record.reason ?? "";
+
+  const media = normalizeMediaRef(record.media ?? record, "image");
+  if (media) {
+    row.media = media;
+    row.src = getMediaPreviewUrl(media);
+  } else if (record.src !== undefined) {
+    row.src = record.src ?? null;
   }
-  const legacyTaskId = data?.legacyTaskId ?? (data?.unifiedTaskId ? data?.taskId : data?.taskId ?? data?.id);
-  const unifiedTaskId = data?.unifiedTaskId ?? (typeof data?.taskId === "string" && !/^\d+$/.test(data.taskId) ? data.taskId : undefined);
-  row.taskId = unifiedTaskId ?? String(legacyTaskId ?? data?.taskId ?? "");
+
+  const status = normalizeTaskStatus(record.status ?? record.state, getStoryboardStatus(row, "processing"));
+  row.status = status;
+  row.state = toStoryboardState(status);
+  const { taskId, unifiedTaskId, legacyTaskId } = getStoryboardTaskIds(record);
+  row.taskId = taskId == null ? "" : String(taskId);
   row.unifiedTaskId = unifiedTaskId ?? null;
   row.legacyTaskId = legacyTaskId ?? null;
-  row.status = normalizeTaskStatus(data?.status, "processing");
-  row.state = toStoryboardState(row.status);
-  bindStoryboardFlowTask(row, primary.id, { taskId: row.taskId, unifiedTaskId, legacyTaskId, status: row.status });
+
+  if (isStoryboardActive(row)) {
+    bindStoryboardFlowTask(row, row.nodeId ?? "", { taskId: row.taskId, unifiedTaskId, legacyTaskId, status });
+  } else {
+    releaseStoryboardFlowTask(storyboardId);
+  }
+}
+
+async function submitStoryboardImageBatch(rows: Storyboard[], compulsory = false) {
+  const items = rows.filter((item) => item.id && !isStoryboardActive(item));
+  if (!items.length) return [];
+  const previousStates = new Map<number, Pick<Storyboard, "status" | "state" | "reason">>();
+  items.forEach((row) => {
+    previousStates.set(row.id!, { status: row.status, state: row.state, reason: row.reason });
+    removeStoryboardTask(row);
+    row.status = "processing";
+    row.state = toStoryboardState("processing");
+    row.reason = "";
+  });
+
+  try {
+    const { data } = await axios.post("/production/storyboard/batchGenerateImage", {
+      projectId: Number(project.value?.id),
+      scriptId: Number(episodesId.value),
+      storyboardIds: items.map((item) => item.id!),
+      compulsory,
+    });
+    const records = Array.isArray(data) ? data : [];
+    if (!records.length) throw new Error($t("workbench.production.node.storyboard.batchGenerateFailed"));
+    records.forEach((record) => applyStoryboardBatchRow(record));
+    const returnedIds = new Set(records.map((record) => Number(record.id)).filter((id) => Number.isFinite(id)));
+    items.forEach((row) => {
+      if (!row.id || returnedIds.has(row.id)) return;
+      const previous = previousStates.get(row.id);
+      if (!previous) return;
+      row.status = previous.status;
+      row.state = previous.state;
+      row.reason = previous.reason;
+    });
+    return records;
+  } catch (error) {
+    items.forEach((row) => {
+      const previous = previousStates.get(row.id!);
+      if (!previous) return;
+      row.status = previous.status;
+      row.state = previous.state;
+      row.reason = previous.reason;
+    });
+    throw error;
+  }
 }
 
 async function savePromptEditor() {
@@ -1161,20 +1245,17 @@ async function savePromptEditor() {
 async function regenerateSingleImage(row: Storyboard) {
   if (!row.id || isStoryboardActive(row)) return;
   try {
-    await generateStoryboardViaFlow(row);
+    await submitStoryboardImageBatch([row], true);
   } catch (e) {
     window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.batchGenerateFailed"));
   }
 }
 
 async function generateGroup(rows: Storyboard[]) {
-  const items = rows.filter((item) => item.id && !isStoryboardActive(item));
-  for (const item of items) {
-    try {
-      await generateStoryboardViaFlow(item);
-    } catch (e) {
-      window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.batchGenerateFailed"));
-    }
+  try {
+    await submitStoryboardImageBatch(rows, false);
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.batchGenerateFailed"));
   }
 }
 
@@ -1183,9 +1264,7 @@ async function batchGenerateImage() {
   generateLoading.value = true;
   try {
     const selectedRows = storyboard.value.filter((item) => item.id && selectedIds.value.includes(item.id));
-    for (const row of selectedRows) {
-      await generateStoryboardViaFlow(row);
-    }
+    await submitStoryboardImageBatch(selectedRows, false);
     window.$message.success($t("workbench.production.node.storyboard.batchGenerateSuccess"));
     selectedIds.value = [];
   } catch (e) {

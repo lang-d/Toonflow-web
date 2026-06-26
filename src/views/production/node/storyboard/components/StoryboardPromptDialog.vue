@@ -29,6 +29,10 @@
                 <template #icon><i-folder-open /></template>
                 {{ $t("workbench.production.node.storyboard.pickFromAssets") }}
               </t-button>
+              <t-button size="small" variant="outline" @click="emit('pickStoryboardImages')">
+                <template #icon><i-image /></template>
+                {{ $t("components.storyboardImageCheck.dialogTitle") }}
+              </t-button>
               <t-button size="small" variant="outline" @click="emit('uploadLocal')">
                 <template #icon><i-upload /></template>
                 {{ $t("workbench.production.node.storyboard.localUpload") }}
@@ -155,6 +159,7 @@ const promptReferences = computed(() =>
 const emit = defineEmits<{
   confirm: [];
   pickAssets: [];
+  pickStoryboardImages: [];
   uploadLocal: [];
   removeReference: [ref: ReferenceView];
   previewReference: [ref: ReferenceView];

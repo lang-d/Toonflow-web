@@ -40,6 +40,18 @@
             <template #icon><i-save /></template>
           </t-button>
         </t-popup>
+        <t-tooltip theme="primary" :content="$t('workbench.production.editImage.annotateImage')">
+          <div
+            v-if="currentImageUrl"
+            class="annotate ac"
+            :class="{ disabled: annotating }"
+            @click.stop="annotatorVisible = true">
+            <i-edit theme="outline" size="18" fill="#fff" />
+            <span style="margin-left: 5px; color: #fff">
+            {{ $t("workbench.production.editImage.annotateShort") }}
+            </span>
+          </div>
+        </t-tooltip>
         <t-tooltip theme="primary" :content="$t('workbench.production.editImage.deleteNode')">
           <div class="remove ac" @click="removeFn">
             <i-delete theme="outline" size="18" fill="#fff" />
@@ -47,6 +59,7 @@
         </t-tooltip>
       </div>
     </div>
+    <ImageAnnotatorDialog v-model:visible="annotatorVisible" :src="currentImageUrl" @save="handleAnnotatorSave" />
   </div>
 </template>
 
@@ -62,6 +75,7 @@ import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import type { MediaRef } from "@/types/api";
+import ImageAnnotatorDialog from "./ImageAnnotatorDialog.vue";
 
 const { project } = storeToRefs(projectStore());
 const props = defineProps<{
@@ -83,6 +97,8 @@ const { updateNodeData, removeNodes } = useVueFlow("editImage");
 const currentImageUrl = ref(props.data?.image || "");
 const currentPreviewUrl = ref(props.data?.previewImage || props.data?.image || "");
 const currentObjectUrl = ref<string | null>(null);
+const annotatorVisible = ref(false);
+const annotating = ref(false);
 const episodesId = inject<Ref<number>>("episodesId");
 const { open, onChange, onCancel } = useFileDialog({ multiple: false, reset: true, accept: ".png,.jpg,.jpeg,.webp" });
 
@@ -166,6 +182,38 @@ async function localUpload() {
 function handleKeep() {
   if (!currentImageUrl.value) return window.$message.error($t("workbench.production.editImage.noImage"));
   emit("keep", currentImageUrl.value);
+}
+
+async function handleAnnotatorSave(base64Data: string) {
+  annotating.value = true;
+  try {
+    const { data } = await axios.post("/production/editImage/uploadImage", {
+      base64Data,
+      projectId: project.value?.id,
+      scriptId: episodesId?.value,
+    });
+    const media = normalizeMediaRef(data?.media ?? data, "image");
+    const image = media ? getMediaOriginalUrl(media) : data;
+    const previewImage = media ? getMediaPreviewUrl(media) : data;
+    currentImageUrl.value = image;
+    currentPreviewUrl.value = previewImage;
+    updateNodeData(props.id, {
+      image,
+      previewImage,
+      media,
+      label: props.data.label,
+      source: "local",
+      sourceId: `annotated-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      group: props.data.group,
+      type: "image",
+    });
+    emit("upload");
+    window.$message.success($t("workbench.production.editImage.annotateSaved"));
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.annotateSaveFailed"));
+  } finally {
+    annotating.value = false;
+  }
 }
 async function uploadFn() {
   const selectedAssets = await openAssetsSelector({
@@ -273,14 +321,30 @@ async function getStoryboardImage() {
         pointer-events: none;
       }
 
-      .upload {
+      .upload,
+      .annotate {
         position: absolute;
-        top: 10px;
         left: 10px;
         z-index: 9999;
         padding: 5px 10px;
         border-radius: 10px;
         background-color: rgba(0, 0, 0, 0.5);
+        cursor: pointer;
+      }
+
+      .upload {
+        top: 10px;
+      }
+
+      .annotate {
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+
+      .disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
       }
 
       .remove {

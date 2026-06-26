@@ -67,15 +67,16 @@ const TASK_RETENTION_MS = 60_000;
 const SNAPSHOT_MISSING_THRESHOLD = 2;
 const TRANSPORT_STORAGE_KEY = "taskTransport";
 
-function normalizeDomain(value: TaskStatusEvent["taskType"] | TaskDomain, targetType?: string): TaskDomain {
+function normalizeDomain(value: TaskStatusEvent["taskType"] | TaskDomain, targetType?: string, nodeId?: string): TaskDomain {
   const hint = `${value ?? ""}:${targetType ?? ""}`.toLowerCase();
+  const hasFlowImageHint = Boolean(nodeId) || hint.includes("deriveasset") || hint.includes("flow") || hint.includes("editimage") || hint.includes("node") || hint.includes("canvas");
   if (hint.includes("assetprompt") || hint.includes("asset_prompt") || hint.includes("polish")) return "assetPrompt";
   if (hint.includes("audiobind") || hint.includes("audio_bind")) return "audioBind";
   if (hint.includes("novelevent") || hint.includes("novel_event")) return "novelEvent";
   if (hint.includes("video") && hint.includes("prompt")) return "videoPrompt";
-  if (hint.includes("storyboard")) return "storyboardImage";
   if (hint.includes("productionasset") || hint.includes("image:asset") || hint.includes("image:assets")) return "assetImage";
-  if (hint.includes("deriveasset") || hint.includes("flow") || hint.includes("editimage") || hint.includes("node") || hint.includes("canvas")) return "flowImage";
+  if (hasFlowImageHint) return "flowImage";
+  if (hint.includes("storyboard")) return "storyboardImage";
   if (value === "image") return targetType ? "assetImage" : "flowImage";
   if (value === "asset") return "assetImage";
   if (value === "storyboard") return "storyboardImage";
@@ -511,7 +512,7 @@ export default defineStore("taskCenter", () => {
   };
 
   function findTaskForEvent(event: TaskStatusEvent) {
-    const domain = normalizeDomain(event.taskType, event.targetType);
+    const domain = normalizeDomain(event.taskType, event.targetType, event.nodeId);
     const eventUnifiedKey = event.taskId ? createTaskKey(domain, event.projectId, event.targetId ?? event.taskId, event.nodeId, event.taskId) : "";
     return (
       (eventUnifiedKey ? tasks.get(eventUnifiedKey) : undefined) ??
@@ -529,7 +530,7 @@ export default defineStore("taskCenter", () => {
     const task = findTaskForEvent(event);
     const updatedAt = Number(event.updatedAt) || Date.now();
     if (!task) {
-      const domain = normalizeDomain(event.taskType, event.targetType);
+      const domain = normalizeDomain(event.taskType, event.targetType, event.nodeId);
       const discovered = normalizeTaskInput({
         key: createTaskKey(domain, Number(event.projectId), event.targetId ?? event.taskId, event.nodeId, event.taskId),
         domain,

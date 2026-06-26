@@ -909,12 +909,12 @@ function makeProductionAgentStore(projectId: string) {
 
       const record = (task.result ?? {}) as any;
       item.status = task.status;
-      item.state =
-        task.status === "completed"
-          ? ("已完成" as any)
-          : task.status === "failed" || task.status === "cancelled"
-            ? ("生成失败" as any)
-            : ("生成中" as any);
+      item.state = toStoryboardTaskState(task.status);
+      item.taskId = task.unifiedTaskId ?? String(task.legacyTaskId ?? task.taskId ?? item.taskId ?? "");
+      item.unifiedTaskId = task.unifiedTaskId ?? item.unifiedTaskId ?? null;
+      item.legacyTaskId = task.legacyTaskId ?? item.legacyTaskId ?? null;
+      item.flowId = Number(record.flowId ?? item.flowId) || item.flowId;
+      item.nodeId = record.nodeId ?? task.nodeId ?? item.nodeId;
       const media = normalizeMediaRef(record.media ?? record, "image");
       if (media) {
         item.media = media;
@@ -924,6 +924,41 @@ function makeProductionAgentStore(projectId: string) {
       if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
         queueMicrotask(() => releaseStoryboardTask(session, storyboardId));
       }
+    }
+
+    function toStoryboardTaskState(status: RuntimeTask["status"]): Storyboard["state"] {
+      if (status === "completed") return "已完成";
+      if (status === "failed" || status === "cancelled") return "生成失败";
+      if (status === "queued" || status === "submitting" || status === "processing") return "生成中";
+      return "未生成";
+    }
+
+    function getStoryboardTaskIds(record: Record<string, any>) {
+      const unifiedTaskId =
+        record.unifiedTaskId ?? (typeof record.taskId === "string" && !/^\d+$/.test(record.taskId) ? record.taskId : undefined);
+      const legacyTaskId =
+        record.legacyTaskId ?? (typeof record.taskId === "number" || (typeof record.taskId === "string" && /^\d+$/.test(record.taskId)) ? record.taskId : undefined);
+      const taskId = unifiedTaskId ?? (legacyTaskId == null ? record.taskId : String(legacyTaskId));
+      return { taskId, unifiedTaskId, legacyTaskId };
+    }
+
+    function applyStoryboardBatchRecord(target: Storyboard, record: Record<string, any>) {
+      const normalized = normalizeAssetLike(record);
+      if (record.prompt !== undefined) target.prompt = record.prompt ?? "";
+      if (Array.isArray(record.associateAssetsIds)) target.associateAssetsIds = record.associateAssetsIds;
+      if (Array.isArray(record.referenceImages)) target.referenceImages = record.referenceImages;
+      if (record.flowId !== undefined) target.flowId = Number(record.flowId) || target.flowId;
+      if (record.nodeId !== undefined) target.nodeId = record.nodeId ?? null;
+      if (record.reason !== undefined) target.reason = record.reason ?? "";
+      if (normalized.media) target.media = normalized.media as MediaRef;
+      if (normalized.src !== undefined) target.src = normalized.src;
+      const status = normalizeTaskStatus(record.status ?? normalized.status ?? normalized.state, normalizeTaskStatus(target.status ?? target.state, "processing"));
+      target.status = status;
+      target.state = (record.state ?? toStoryboardTaskState(status)) as Storyboard["state"];
+      const { taskId, unifiedTaskId, legacyTaskId } = getStoryboardTaskIds(record);
+      target.taskId = taskId == null ? "" : String(taskId);
+      target.unifiedTaskId = unifiedTaskId ?? null;
+      target.legacyTaskId = legacyTaskId ?? null;
     }
 
     function syncAssetTasks(session: EpisodeSession) {
@@ -971,27 +1006,34 @@ function makeProductionAgentStore(projectId: string) {
     function syncStoryboardTasks(session: EpisodeSession) {
       const activeIds = new Set<number>();
       session.flowData.value.storyboard.forEach((item) => {
-        if (!item.id || normalizeTaskStatus((item as any).status ?? item.state, "pending") !== "processing") return;
+        const status = normalizeTaskStatus(item.status ?? item.state, "pending");
+        if (!item.id || !["queued", "submitting", "processing"].includes(status)) return;
         const storyboardId = item.id;
+        const { taskId, unifiedTaskId, legacyTaskId } = getStoryboardTaskIds(item as any);
+        if (!taskId && !unifiedTaskId && !legacyTaskId) return;
+        const nodeId = item.nodeId ?? undefined;
         activeIds.add(storyboardId);
-        const unifiedTaskId = (item as any).taskId;
+        const taskKey = createTaskKey("flowImage", Number(projectId), storyboardId, nodeId, unifiedTaskId);
         if (
           session.storyboardTaskBindings.has(storyboardId) &&
-          (!unifiedTaskId || taskCenter.getTask(createTaskKey("storyboardImage", Number(projectId), storyboardId, undefined, unifiedTaskId)))
+          taskCenter.getTask(taskKey)
         ) {
           return;
         }
         if (session.storyboardTaskBindings.has(storyboardId)) releaseStoryboardTask(session, storyboardId);
         const release = taskCenter.registerTask(
           {
-            key: createTaskKey("storyboardImage", Number(projectId), storyboardId, undefined, unifiedTaskId),
-            domain: "storyboardImage",
+            key: taskKey,
+            domain: "flowImage",
+            taskId,
             unifiedTaskId,
+            legacyTaskId,
             targetType: "storyboard",
             targetId: storyboardId,
             projectId: Number(projectId),
             scriptId: session.episodeId,
-            status: "processing",
+            nodeId,
+            status,
           },
           (task) => applyStoryboardTask(session, task),
         );
@@ -1010,31 +1052,35 @@ function makeProductionAgentStore(projectId: string) {
     async function batchGenerateStoryboard(allIds: number[], compulsory = false, scriptId = episodesId.value) {
       const session = getSession(scriptId);
       if (!session) return;
-      allIds.forEach((id) => taskCenter.removeTask(createTaskKey("storyboardImage", Number(projectId), id)));
+      allIds.forEach((id) => {
+        taskCenter.removeTask(createTaskKey("storyboardImage", Number(projectId), id));
+        const item = session.flowData.value.storyboard.find((row) => row.id === id);
+        if (item) {
+          taskCenter.removeTask(createTaskKey("storyboardImage", Number(projectId), id, undefined, item.unifiedTaskId ?? undefined));
+          taskCenter.removeTask(createTaskKey("flowImage", Number(projectId), id, item.nodeId ?? undefined, item.unifiedTaskId ?? undefined));
+        }
+      });
       try {
         const { data } = await axios.post("/production/storyboard/batchGenerateImage", {
           scriptId: session.episodeId,
           projectId,
           storyboardIds: allIds,
-          concurrentCount: settingStore().otherSetting.assetsBatchGenereateSize,
           compulsory,
         });
         if (data) {
           if (session.flowData.value.storyboard.length === 0) {
-            session.flowData.value.storyboard = data;
+            session.flowData.value.storyboard = data.map((record: any) =>
+              normalizeAssetLike({
+                ...record,
+                status: normalizeTaskStatus(record.status ?? record.state, "pending"),
+              }),
+            );
             syncStoryboardTasks(session);
             return data;
           }
           session.flowData.value.storyboard.forEach((item) => {
             const findData = data.find((record: any) => record.id === item.id);
-            if (findData) {
-              const normalized = normalizeAssetLike(findData);
-              item.state = normalized.state;
-              (item as any).status = normalizeTaskStatus(findData.status ?? normalized.status ?? normalized.state, "processing");
-              item.media = normalized.media as MediaRef | undefined;
-              item.src = normalized.src;
-              (item as any).taskId = findData.taskId;
-            }
+            if (findData) applyStoryboardBatchRecord(item, findData);
           });
         }
         syncStoryboardTasks(session);

@@ -8,6 +8,7 @@
       :options="options"
       @toggle-selected="selectedFn"
       @upload-option="clickHandler"
+      @annotate="openAnnotator"
       @remove="removeNodes(props.id)" />
     <GenerateControls
       :data="data"
@@ -26,6 +27,7 @@
       :history-items="historyItems"
       :selected-history-id="selectedHistoryId"
       @select-history="selectHistory" />
+    <ImageAnnotatorDialog v-model:visible="annotatorVisible" :src="currentOriginalImage" @save="handleAnnotatorSave" />
   </div>
 </template>
 
@@ -47,6 +49,7 @@ import projectStore from "@/stores/project";
 import GeneratedResultPanel from "./generatedNode/GeneratedResultPanel.vue";
 import GenerateControls from "./generatedNode/GenerateControls.vue";
 import GenerationHistoryDialog from "./generatedNode/GenerationHistoryDialog.vue";
+import ImageAnnotatorDialog from "./ImageAnnotatorDialog.vue";
 import useTaskCenterStore, { createTaskKey, type RuntimeTask } from "@/stores/taskCenter";
 import { getMediaOriginalUrl, getMediaPathForGeneration, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import type { MediaRef } from "@/types/api";
@@ -88,6 +91,7 @@ const historyVisible = ref(false);
 const historyLoading = ref(false);
 const historyItems = ref<ImageHistoryItem[]>([]);
 const selectedHistoryId = ref<number | null>(null);
+const annotatorVisible = ref(false);
 const taskCenter = useTaskCenterStore();
 let releaseTaskListener: (() => void) | null = null;
 let lastAppliedTaskUpdate = 0;
@@ -104,6 +108,11 @@ const referenceImages = computed(() => props.data.references ?? []);
 const references = computed(() => {
   return referenceImages.value.map((i) => ({ type: "image" as const, src: i.previewImage || i.image, label: i.label })).filter((i) => i.src);
 });
+const currentOriginalImage = computed(() =>
+  props.data.resultMedia
+    ? getMediaOriginalUrl(props.data.resultMedia)
+    : props.data.selectedResult?.url || props.data.generatedImage || "",
+);
 
 function selectedFn() {
   selected.value = !selected.value;
@@ -180,6 +189,44 @@ async function saveManualChange() {
     await props.saveFlow();
   } catch (e) {
     window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
+  }
+}
+
+function openAnnotator() {
+  if (!currentOriginalImage.value) return window.$message.error($t("workbench.production.editImage.noImage"));
+  annotatorVisible.value = true;
+}
+
+async function handleAnnotatorSave(base64Data: string) {
+  try {
+    const { data } = await axios.post("/production/editImage/uploadImage", {
+      base64Data,
+      projectId: props.projectId,
+      scriptId: episodesId.value,
+    });
+    const media = normalizeMediaRef(data?.media ?? data, "image");
+    const url = media ? getMediaOriginalUrl(media) : data;
+    props.data.resultMedia = media;
+    props.data.generatedImage = media ? getMediaPreviewUrl(media) : url;
+    props.data.selectedResult = {
+      url,
+      media,
+      prompt: props.data.prompt,
+      model: props.data.model,
+      ratio: props.data.ratio,
+      quality: props.data.quality,
+    };
+    props.data.status = "completed";
+    props.data.state = "success";
+    props.data.taskId = null;
+    props.data.unifiedTaskId = null;
+    props.data.legacyTaskId = null;
+    props.data.reason = "";
+    await saveManualChange();
+    emit("selectImage", url, props.id);
+    window.$message.success($t("workbench.production.editImage.annotateSaved"));
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.annotateSaveFailed"));
   }
 }
 
