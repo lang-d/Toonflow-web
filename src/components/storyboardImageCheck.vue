@@ -1,11 +1,12 @@
 <template>
   <t-dialog
     v-model:visible="dialogVisible"
+    attach="body"
     :header="$t('components.storyboardImageCheck.dialogTitle')"
     width="80vw"
     :footer="true"
     placement="center"
-    :zIndex="999999999999"
+    :z-index="12000"
     @close="handleClose"
     @confirm="handleConfirm"
     @cancel="handleClose">

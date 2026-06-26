@@ -601,12 +601,35 @@ function referenceImageToView(reference: ReferenceImage, index: number): Referen
   };
 }
 
-function getIncomingReferences(nodes: NodeType[], edges: any[], generatedNodeId: string): ReferenceImage[] {
+function sortConnectedSourceNodes<T extends NodeType>(items: { node: T; order: number }[]): T[] {
+  return [...items]
+    .sort((left, right) => {
+      const leftPosition = left.node.position;
+      const rightPosition = right.node.position;
+      const leftHasPosition = Number.isFinite(leftPosition?.y) && Number.isFinite(leftPosition?.x);
+      const rightHasPosition = Number.isFinite(rightPosition?.y) && Number.isFinite(rightPosition?.x);
+      if (!leftHasPosition || !rightHasPosition) return left.order - right.order;
+      const yDelta = leftPosition.y - rightPosition.y;
+      if (Math.abs(yDelta) > 1) return yDelta;
+      const xDelta = leftPosition.x - rightPosition.x;
+      if (Math.abs(xDelta) > 1) return xDelta;
+      return left.order - right.order;
+    })
+    .map((item) => item.node);
+}
+
+function getIncomingSourceNodes(nodes: NodeType[], edges: any[], targetNodeId: string): NodeType[] {
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  return edges
-    .filter((edge) => edge.target === generatedNodeId)
-    .map((edge) => nodeMap.get(edge.source))
-    .filter((node): node is NodeType => Boolean(node))
+  return sortConnectedSourceNodes(
+    edges
+      .filter((edge) => edge.target === targetNodeId)
+      .map((edge, order) => ({ node: nodeMap.get(edge.source), order }))
+      .filter((item): item is { node: NodeType; order: number } => Boolean(item.node)),
+  );
+}
+
+function getIncomingReferences(nodes: NodeType[], edges: any[], generatedNodeId: string): ReferenceImage[] {
+  return getIncomingSourceNodes(nodes, edges, generatedNodeId)
     .flatMap((node) => {
       if (node.type === "upload") return [normalizeReferenceImage(node.data)];
       return [];
@@ -920,11 +943,8 @@ function buildPromptFlow(row: Storyboard) {
     if (node.type === "upload" && detachedUploadIds.has(node.id) && !referencedNodeIds.has(node.id)) nodes.splice(index, 1);
   }
 
-  const remainingNodeMap = new Map(nodes.map((node) => [node.id, node]));
-  const internalReferences = edges
-    .filter((edge) => edge.target === primary.id && remainingNodeMap.get(edge.source)?.type === "generated")
-    .flatMap((edge) => {
-      const source = remainingNodeMap.get(edge.source);
+  const internalReferences = getIncomingSourceNodes(nodes, edges, primary.id)
+    .flatMap((source) => {
       if (source?.type !== "generated" || !source.data.generatedImage) return [];
       return [{
         image: getOriginalImageUrl(source.data.generatedImage),

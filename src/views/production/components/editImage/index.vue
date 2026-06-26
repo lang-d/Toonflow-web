@@ -77,7 +77,7 @@
         </div>
       </Panel>
     </VueFlow>
-    <storyboardImageCheck telepor v-model="storyboardVisible" :scriptId="episodesId!" @confirm="onStoryboardConfirm" @cancel="onStoryboardCancel" />
+    <storyboardImageCheck v-model="storyboardVisible" :scriptId="episodesId!" @confirm="onStoryboardConfirm" @cancel="onStoryboardCancel" />
   </t-dialog>
 </template>
 
@@ -197,6 +197,31 @@ function syncReferences() {
   syncTimer = setTimeout(_doSyncReferences, 60);
 }
 
+function sortConnectedSourceNodes<T extends NodeType>(items: { node: T; order: number }[]): T[] {
+  return [...items]
+    .sort((left, right) => {
+      const leftPosition = left.node.position;
+      const rightPosition = right.node.position;
+      const leftHasPosition = Number.isFinite(leftPosition?.y) && Number.isFinite(leftPosition?.x);
+      const rightHasPosition = Number.isFinite(rightPosition?.y) && Number.isFinite(rightPosition?.x);
+      if (!leftHasPosition || !rightHasPosition) return left.order - right.order;
+      const yDelta = leftPosition.y - rightPosition.y;
+      if (Math.abs(yDelta) > 1) return yDelta;
+      const xDelta = leftPosition.x - rightPosition.x;
+      if (Math.abs(xDelta) > 1) return xDelta;
+      return left.order - right.order;
+    })
+    .map((item) => item.node);
+}
+
+function getSortedConnectedNodes(sourceIds: string[], nodeMap: Map<string, NodeType>) {
+  return sortConnectedSourceNodes(
+    sourceIds
+      .map((id, order) => ({ node: nodeMap.get(id), order }))
+      .filter((item): item is { node: NodeType; order: number } => Boolean(item.node)),
+  );
+}
+
 function _doSyncReferences() {
   const allNodes = nodes.value;
   const allEdges = edges.value;
@@ -216,9 +241,7 @@ function _doSyncReferences() {
   for (const directorNode of allNodes) {
     if (directorNode.type !== "directorStage") continue;
     const sourceIds = edgesByTarget.get(directorNode.id) ?? [];
-    const connectedRefs = sourceIds
-      .map((id) => nodeMap.get(id))
-      .filter((n): n is NonNullable<typeof n> => !!n)
+    const connectedRefs = getSortedConnectedNodes(sourceIds, nodeMap)
       .flatMap((n) => {
         if (n.type === "upload") return [normalizeReferenceImage(n.data as UploadNodeData)];
         if (n.type === "generated") return [normalizeGeneratedReference(n.data as GeneratedNodeData)];
@@ -237,9 +260,7 @@ function _doSyncReferences() {
     if (genNode.type !== "generated") continue;
 
     const sourceIds = edgesByTarget.get(genNode.id) ?? [];
-    const connectedImages = sourceIds
-      .map((id) => nodeMap.get(id))
-      .filter((n): n is NonNullable<typeof n> => !!n)
+    const connectedImages = getSortedConnectedNodes(sourceIds, nodeMap)
       .flatMap((n) => {
         if (n.type === "upload") {
           return [normalizeReferenceImage(n.data as UploadNodeData)];
