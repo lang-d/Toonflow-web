@@ -84,6 +84,7 @@ import imageListCacheStore from "@/stores/imageListCache";
 import { handleDynamicImportFailure } from "@/utils/moduleRecovery";
 import useWorkspaceStore from "@/stores/workspace";
 import settingStore from "@/stores/setting";
+import { disposeProductionAgentStore } from "@/stores/productionAgent";
 
 const { clearProjectCache } = imageListCacheStore();
 const projectState = projectStore();
@@ -114,6 +115,7 @@ async function getAllProject() {
 }
 
 onMounted(() => {
+  disposeProductionAgentStore(project.value?.id);
   project.value = null;
   getAllProject();
 });
@@ -136,6 +138,7 @@ async function openProject(projectId: string | undefined) {
   }
 
   openingProjectId.value = projectId;
+  if (project.value?.id && project.value.id !== projectId) disposeProductionAgentStore(project.value.id);
   project.value = item;
   const target = getProjectEntryRoute(item);
   logProjectNavigation("push", { projectId, target });
@@ -330,6 +333,7 @@ function delProjcer(projectId: string | undefined) {
       axios
         .post("/project/delProject", { id: projectId })
         .then(() => {
+          disposeProductionAgentStore(projectId);
           clearProjectCache(projectId!);
           window.$message.success($t("workbench.project.msg.deleteSuccess"));
           getAllProject();

@@ -1350,6 +1350,18 @@ function createProductionAgentStore(projectId: string) {
   return storeMap.get(projectId)!;
 }
 
+export function disposeProductionAgentStore(projectId?: string | number | null) {
+  if (projectId == null || projectId === "") return;
+  const useStore = storeMap.get(String(projectId));
+  useStore?.().disposeSession();
+}
+
+export function disposeAllProductionAgentStores() {
+  Array.from(storeMap.values()).forEach((useStore) => {
+    useStore().disposeSession();
+  });
+}
+
 const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => {
   const connected = ref(false);
   const messages = ref<ChatMessagesData[]>([]);

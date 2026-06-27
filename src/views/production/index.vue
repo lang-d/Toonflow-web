@@ -625,8 +625,6 @@ onBeforeUnmount(() => {
   if (interactionTimer) clearTimeout(interactionTimer);
   document.removeEventListener("mousemove", onSpaceMouseMove);
   taskCenter.endInteraction();
-  agentStore.disposeSession();
-  agentStore.$dispose();
 });
 </script>
 <style lang="scss" scoped>
