@@ -104,7 +104,18 @@ const options = [
 
 const targetReady = computed(() => Boolean(props.flowId && props.targetType && props.targetId));
 const generating = computed(() => Boolean(props.data.taskRequestPending || isActiveImageTask(props.data)));
-const referenceImages = computed(() => props.data.references ?? []);
+const referenceImages = computed(() =>
+  (props.data.references ?? []).map((item) => {
+    const media = normalizeMediaRef(item.media, "image");
+    if (!media) return item;
+    return {
+      ...item,
+      media,
+      image: getMediaOriginalUrl(media),
+      previewImage: getMediaPreviewUrl(media),
+    };
+  }),
+);
 const references = computed(() => {
   return referenceImages.value.map((i) => ({ type: "image" as const, src: i.previewImage || i.image, label: i.label })).filter((i) => i.src);
 });

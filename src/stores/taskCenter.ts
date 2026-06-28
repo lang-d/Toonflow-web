@@ -94,7 +94,7 @@ export function normalizeTaskStatus(value: unknown, fallback: TaskStatus = "proc
   if (direct.includes(normalized as TaskStatus)) return normalized as TaskStatus;
   if (["生成中", "处理中", "排队中", "running", "generating"].includes(value)) return "processing";
   if (["未生成", "等待中", "waiting"].includes(value)) return "pending";
-  if (["已完成", "成功", "success", "done"].includes(value)) return "completed";
+  if (["已完成", "生成成功", "成功", "success", "done"].includes(value)) return "completed";
   if (["生成失败", "失败", "error"].includes(value)) return "failed";
   if (["已取消", "取消"].includes(value)) return "cancelled";
   return fallback;

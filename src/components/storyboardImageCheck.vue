@@ -45,9 +45,11 @@
                 <div class="previewCell">
                   <t-image-viewer
                     v-if="getStoryboardOriginalUrl(row)"
+                    attach="body"
                     :images="[getStoryboardOriginalUrl(row)]"
                     :closeOnEscKeydown="true"
-                    :closeOnOverlay="true">
+                    :closeOnOverlay="true"
+                    :z-index="13000">
                     <template #trigger="{ open }">
                       <div class="mediaTrigger" @click="open()">
                         <img :src="getStoryboardPreviewUrl(row)" :alt="row.prompt || ''" />

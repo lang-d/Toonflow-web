@@ -150,6 +150,7 @@ const restoredLastTrack = ref(false);
 const videoTaskBindings = new Map<number, () => void>();
 const promptTaskBindings = new Map<number, () => void>();
 const promptResultRefreshing = new Set<number>();
+const videoResultRefreshing = new Set<number>();
 const reportedFailures = new Set<string>();
 const cacheWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let promptAffixWriteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -583,6 +584,7 @@ async function getGenerateData(options: { forceCache?: boolean } = {}) {
     });
     // 整体赋值触发响应式
     trackList.value = [...data.trackList];
+    await refreshVideoResults(trackList.value.flatMap((track) => track.videoList));
     if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(trackList.value.length - 1, 0);
     restoreLastTrack();
     syncWorkbenchTasks();
@@ -977,6 +979,43 @@ async function refreshCompletedPrompt(track: TrackItem) {
   }
 }
 
+function applyVideoResult(video: VideoItem, record: Record<string, any>) {
+  const status = normalizeTaskStatus(record.status ?? record.state, video.status ?? "processing");
+  video.status = status;
+  video.state = status === "completed" ? "已完成" : status === "failed" || status === "cancelled" ? "生成失败" : "生成中";
+  const media = normalizeMediaRef(record.media ?? record, "video");
+  if (media) {
+    video.media = media;
+    video.src = getMediaOriginalUrl(media);
+  }
+  video.errorReason = record.reason ?? record.errorReason ?? video.errorReason ?? "";
+}
+
+async function refreshVideoResults(videos: VideoItem[]) {
+  const projectId = Number(project.value?.id);
+  const scriptId = Number(episodesId.value);
+  const pending = videos.filter((video) => video.id && !videoResultRefreshing.has(video.id));
+  if (!projectId || !scriptId || !pending.length) return;
+  pending.forEach((video) => videoResultRefreshing.add(video.id));
+  try {
+    const { data } = await axios.post("/production/workbench/checkVideoStateList", {
+      projectId,
+      scriptId,
+      videoIds: [...new Set(pending.map((video) => video.id))],
+    });
+    const records = (Array.isArray(data) ? data : data?.data ?? []) as Record<string, any>[];
+    const recordMap = new Map(records.map((record) => [Number(record.id ?? record.videoId), record]));
+    pending.forEach((video) => {
+      const record = recordMap.get(Number(video.id));
+      if (record) applyVideoResult(video, record);
+    });
+  } catch (error) {
+    console.warn("[workbench-video] failed to refresh completed video", error);
+  } finally {
+    pending.forEach((video) => videoResultRefreshing.delete(video.id));
+  }
+}
+
 function applyVideoTask(video: VideoItem, task: RuntimeTask) {
   const record = (task.result ?? {}) as any;
   video.status = task.status;
@@ -996,7 +1035,9 @@ function applyVideoTask(video: VideoItem, task: RuntimeTask) {
     reportedFailures.add(task.key);
     window.$message.error(task.reason || "视频生成失败");
   }
-  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+  if (task.status === "completed") {
+    void refreshVideoResults([video]).finally(() => releaseVideoTask(video.id));
+  } else if (task.status === "failed" || task.status === "cancelled") {
     queueMicrotask(() => releaseVideoTask(video.id));
   }
 }

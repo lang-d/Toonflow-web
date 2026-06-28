@@ -20,25 +20,33 @@
         </t-radio-group>
         <input v-model="color" class="colorPicker" type="color" />
         <t-input-number v-model="lineWidth" class="lineWidth" :min="2" :max="24" size="small" />
-        <t-input
-          v-if="tool === 'text'"
-          v-model="textValue"
-          class="textInput"
-          size="small"
-          :placeholder="$t('workbench.production.editImage.annotateTextPlaceholder')" />
       </div>
 
       <div class="canvasShell">
         <div v-if="loading" class="canvasPlaceholder">{{ $t("workbench.production.editImage.annotateLoading") }}</div>
         <div v-else-if="loadError" class="canvasPlaceholder error">{{ loadError }}</div>
-        <canvas
-          v-show="!loading && !loadError"
-          ref="canvasRef"
-          class="canvas"
-          @pointerdown="handlePointerDown"
-          @pointermove="handlePointerMove"
-          @pointerup="handlePointerUp"
-          @pointerleave="handlePointerUp" />
+        <div v-show="!loading && !loadError" class="canvasStage">
+          <canvas
+            ref="canvasRef"
+            class="canvas"
+            :class="{ textMode: tool === 'text' }"
+            @pointerdown="handlePointerDown"
+            @pointermove="handlePointerMove"
+            @pointerup="handlePointerUp"
+            @pointerleave="handlePointerUp"
+            @click="handleCanvasClick" />
+          <input
+            v-if="textEditor"
+            ref="textInputRef"
+            v-model="textValue"
+            class="canvasTextInput"
+            :style="textEditorStyle"
+            type="text"
+            @pointerdown.stop
+            @keydown.enter.prevent="commitTextEditor"
+            @keydown.esc.prevent="cancelTextEditor"
+            @blur="commitTextEditor" />
+        </div>
       </div>
 
       <div class="actions">
@@ -60,6 +68,7 @@
 type Tool = "rect" | "ellipse" | "pen" | "arrow" | "text";
 
 type Point = { x: number; y: number };
+type TextEditor = Point & { color: string; fontSize: number };
 
 type Mark =
   | { type: "rect" | "ellipse"; x: number; y: number; width: number; height: number; color: string; lineWidth: number }
@@ -78,6 +87,7 @@ const emit = defineEmits<{
 const visible = defineModel<boolean>("visible", { default: false });
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const textInputRef = ref<HTMLInputElement | null>(null);
 const imageEl = ref<HTMLImageElement | null>(null);
 const loading = ref(false);
 const loadError = ref("");
@@ -85,10 +95,28 @@ const tool = ref<Tool>("rect");
 const color = ref("#ff3b30");
 const lineWidth = ref(6);
 const textValue = ref("");
+const textEditor = ref<TextEditor | null>(null);
 const marks = ref<Mark[]>([]);
 const redoMarks = ref<Mark[]>([]);
 const currentMark = ref<Mark | null>(null);
 const drawing = ref(false);
+
+const textEditorStyle = computed(() => {
+  const canvas = canvasRef.value;
+  const editor = textEditor.value;
+  if (!canvas || !editor) return {};
+  const rect = canvas.getBoundingClientRect();
+  const scale = rect.width / canvas.width;
+  const left = (editor.x / canvas.width) * rect.width;
+  const top = (editor.y / canvas.height) * rect.height;
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${Math.max(120, Math.min(320, rect.width - left - 8))}px`,
+    color: editor.color,
+    fontSize: `${Math.max(14, editor.fontSize * scale)}px`,
+  };
+});
 
 watch(
   () => props.src,
@@ -96,6 +124,10 @@ watch(
     if (visible.value) void loadImage();
   },
 );
+
+watch(tool, (nextTool, previousTool) => {
+  if (previousTool === "text" && nextTool !== "text") commitTextEditor();
+});
 
 async function loadImage() {
   if (!props.src || !canvasRef.value) return;
@@ -133,10 +165,11 @@ function resetState() {
   marks.value = [];
   redoMarks.value = [];
   textValue.value = "";
+  textEditor.value = null;
   loadError.value = "";
 }
 
-function getCanvasPoint(event: PointerEvent): Point {
+function getCanvasPoint(event: PointerEvent | MouseEvent): Point {
   const canvas = canvasRef.value!;
   const rect = canvas.getBoundingClientRect();
   return {
@@ -147,18 +180,9 @@ function getCanvasPoint(event: PointerEvent): Point {
 
 function handlePointerDown(event: PointerEvent) {
   if (!canvasRef.value || !imageEl.value || loadError.value) return;
+  if (tool.value === "text") return;
   const point = getCanvasPoint(event);
   redoMarks.value = [];
-  if (tool.value === "text") {
-    const text = textValue.value.trim();
-    if (!text) {
-      window.$message.warning($t("workbench.production.editImage.annotateTextRequired"));
-      return;
-    }
-    marks.value.push({ type: "text", x: point.x, y: point.y, text, color: color.value, fontSize: Math.max(24, lineWidth.value * 5) });
-    redraw();
-    return;
-  }
   drawing.value = true;
   (event.currentTarget as HTMLCanvasElement).setPointerCapture(event.pointerId);
   if (tool.value === "rect" || tool.value === "ellipse") {
@@ -169,6 +193,19 @@ function handlePointerDown(event: PointerEvent) {
     currentMark.value = { type: "pen", points: [point], color: color.value, lineWidth: lineWidth.value };
   }
   redraw();
+}
+
+function handleCanvasClick(event: MouseEvent) {
+  if (tool.value !== "text" || !canvasRef.value || !imageEl.value || loadError.value) return;
+  const point = getCanvasPoint(event);
+  commitTextEditor();
+  textValue.value = "";
+  textEditor.value = {
+    ...point,
+    color: color.value,
+    fontSize: Math.max(24, lineWidth.value * 5),
+  };
+  nextTick(() => textInputRef.value?.focus());
 }
 
 function handlePointerMove(event: PointerEvent) {
@@ -209,6 +246,32 @@ function isTinyMark(mark: Mark) {
 
 function cloneMark(mark: Mark): Mark {
   return mark.type === "pen" ? { ...mark, points: mark.points.map((point) => ({ ...point })) } : { ...mark };
+}
+
+function commitTextEditor() {
+  const editor = textEditor.value;
+  if (!editor) return;
+  const text = textValue.value.trim();
+  if (text) {
+    marks.value.push({
+      type: "text",
+      x: editor.x,
+      y: editor.y + editor.fontSize,
+      text,
+      color: editor.color,
+      fontSize: editor.fontSize,
+    });
+    redoMarks.value = [];
+  }
+  textEditor.value = null;
+  textValue.value = "";
+  redraw();
+}
+
+function cancelTextEditor() {
+  textEditor.value = null;
+  textValue.value = "";
+  redraw();
 }
 
 function redraw() {
@@ -296,6 +359,7 @@ function save() {
   const canvas = canvasRef.value;
   if (!canvas) return;
   try {
+    commitTextEditor();
     emit("save", canvas.toDataURL("image/png"));
     visible.value = false;
   } catch {
@@ -335,10 +399,6 @@ function save() {
   width: 86px;
 }
 
-.textInput {
-  width: min(320px, 70vw);
-}
-
 .canvasShell {
   display: grid;
   min-height: 360px;
@@ -350,11 +410,39 @@ function save() {
   background: var(--td-bg-color-page);
 }
 
+.canvasStage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: calc(100vh - 260px);
+  line-height: 0;
+}
+
 .canvas {
+  display: block;
   max-width: 100%;
   max-height: calc(100vh - 260px);
   cursor: crosshair;
   background: #fff;
+}
+
+.canvas.textMode {
+  cursor: text;
+}
+
+.canvasTextInput {
+  position: absolute;
+  z-index: 2;
+  min-width: 120px;
+  height: 1.5em;
+  padding: 2px 5px;
+  border: 1px dashed currentcolor;
+  border-radius: 3px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.92);
+  font-weight: 700;
+  line-height: 1.2;
+  transform: translateY(0);
 }
 
 .canvasPlaceholder {

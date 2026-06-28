@@ -578,6 +578,7 @@ onMounted(async () => {
       fallbackToLast: true,
     });
     await nextTick();
+    _doSyncReferences();
     setTimeout(() => fitView({ duration: 300 }), 100);
   } catch (e) {
     window.$message.error((e as any).message || $t("workbench.production.editImage.fetchFailed"));
