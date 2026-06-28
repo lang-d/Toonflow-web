@@ -55,37 +55,80 @@ export interface GeneratedNodeData {
   } | null;
 }
 
+export interface DirectorVec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export type DirectorJointName =
+  | "head"
+  | "neck"
+  | "spine"
+  | "leftShoulder"
+  | "rightShoulder"
+  | "leftElbow"
+  | "rightElbow"
+  | "leftHip"
+  | "rightHip"
+  | "leftKnee"
+  | "rightKnee";
+
+export type DirectorJointState = Partial<Record<DirectorJointName, DirectorVec3>>;
+
 export interface DirectorStagePlacedItem extends ReferenceImage {
   itemId: string;
   role: "actor" | "prop";
-  x: number;
-  y: number;
-  scale: number;
-  rotation: number;
+  modelKind: "mannequin" | "primitive";
+  mannequinType?: "neutral" | "female" | "male" | "youth";
+  primitiveType?: "box" | "sphere" | "cylinder" | "cone" | "capsule";
+  position: DirectorVec3;
+  rotation: DirectorVec3;
+  scale3d: DirectorVec3;
   color?: string;
-  pose?: string;
+  poseId?: string;
+  joints?: DirectorJointState;
+  visible: boolean;
+}
+
+export interface DirectorStageView extends ReferenceImage {
+  viewId: string;
+  kind: "rendered" | "ai";
+  createTime?: string;
 }
 
 export interface DirectorStageCamera {
   id: string;
   name: string;
   fov: number;
-  x: number;
-  y: number;
-  zoom: number;
+  position: DirectorVec3;
+  target: DirectorVec3;
   promptFragment?: string;
-  asset?: ReferenceImage;
+  views: DirectorStageView[];
+  activeViewId?: string;
+}
+
+export interface DirectorStageScene {
+  backgroundMode: "flat" | "panorama";
+  background?: ReferenceImage;
+  backgroundFit: "cover" | "contain";
+  panoramaRotation: number;
+  panoramaRadius: number;
+  backgroundScale: number;
+  backgroundOffsetX: number;
+  backgroundOffsetY: number;
+  skyColor: string;
 }
 
 export interface DirectorStageData {
+  stageVersion: 2;
   title: string;
   mode: "director" | "camera";
   references: ReferenceImage[];
-  background?: ReferenceImage;
+  scene: DirectorStageScene;
   items: DirectorStagePlacedItem[];
   cameras: DirectorStageCamera[];
   activeCameraId?: string;
-  assets: ReferenceImage[];
   promptFragment?: string;
 }
 
@@ -326,59 +369,103 @@ function normalizeReferenceData(input: Partial<ReferenceImage> = {}): ReferenceI
 
 export function createDirectorStageData(): DirectorStageData {
   return {
+    stageVersion: 2,
     title: "3D导演台",
     mode: "director",
     references: [],
+    scene: {
+      backgroundMode: "flat",
+      backgroundFit: "cover",
+      panoramaRotation: 0,
+      panoramaRadius: 30,
+      backgroundScale: 1,
+      backgroundOffsetX: 0,
+      backgroundOffsetY: 0,
+      skyColor: "#111827",
+    },
     items: [],
     cameras: [
       {
         id: "camera-1",
         name: "机位1",
         fov: 45,
-        x: 50,
-        y: 52,
-        zoom: 1,
+        position: { x: 6, y: 3.2, z: 8 },
+        target: { x: 0, y: 1.4, z: 0 },
         promptFragment: "",
+        views: [],
       },
     ],
     activeCameraId: "camera-1",
-    assets: [],
     promptFragment: "",
   };
 }
 
 export function normalizeDirectorStageData(data: Partial<DirectorStageData> = {}): DirectorStageData {
   const defaults = createDirectorStageData();
+  if (data.stageVersion !== 2) return defaults;
   const cameras = data.cameras?.length ? data.cameras : defaults.cameras;
   return {
-    ...defaults,
-    ...data,
+    stageVersion: 2,
+    title: data.title || defaults.title,
+    mode: data.mode === "camera" ? "camera" : "director",
     references: (data.references ?? []).map(normalizeReferenceData),
-    background: data.background ? normalizeReferenceData(data.background) : undefined,
+    scene: {
+      ...defaults.scene,
+      ...(data.scene ?? {}),
+      background: data.scene?.background ? normalizeReferenceData(data.scene.background) : undefined,
+    },
     items: (data.items ?? []).map((item) => ({
       ...normalizeReferenceData(item),
       itemId: item.itemId,
       role: item.role || "actor",
-      x: Number(item.x ?? 50),
-      y: Number(item.y ?? 70),
-      scale: Number(item.scale ?? 1),
-      rotation: Number(item.rotation ?? 0),
+      modelKind: item.role === "prop" ? "primitive" : "mannequin",
+      mannequinType: item.mannequinType ?? "neutral",
+      primitiveType: item.primitiveType ?? "box",
+      position: { ...({ x: 0, y: 0, z: 0 } as DirectorVec3), ...(item.position ?? {}) },
+      rotation: { ...({ x: 0, y: 0, z: 0 } as DirectorVec3), ...(item.rotation ?? {}) },
+      scale3d: { ...({ x: 1, y: 1, z: 1 } as DirectorVec3), ...(item.scale3d ?? {}) },
       color: item.color,
-      pose: item.pose,
+      poseId: item.poseId ?? "stand",
+      joints: item.joints ?? {},
+      visible: item.visible !== false,
     })),
     cameras: cameras.map((camera) => ({
       id: camera.id,
       name: camera.name,
       fov: Number(camera.fov ?? 45),
-      x: Number(camera.x ?? 50),
-      y: Number(camera.y ?? 52),
-      zoom: Number(camera.zoom ?? 1),
+      position: { ...({ x: 6, y: 3.2, z: 8 } as DirectorVec3), ...(camera.position ?? {}) },
+      target: { ...({ x: 0, y: 1.4, z: 0 } as DirectorVec3), ...(camera.target ?? {}) },
       promptFragment: camera.promptFragment ?? "",
-      asset: camera.asset ? normalizeReferenceData(camera.asset) : undefined,
+      views: (camera.views ?? []).map((view) => ({
+        ...normalizeReferenceData(view),
+        viewId: view.viewId,
+        kind: view.kind === "ai" ? "ai" : "rendered",
+        createTime: view.createTime,
+      })),
+      activeViewId: camera.activeViewId,
     })),
     activeCameraId: data.activeCameraId || cameras[0]?.id,
-    assets: (data.assets ?? []).map(normalizeReferenceData),
+    promptFragment: data.promptFragment ?? "",
   };
+}
+
+export function getDirectorStageGenerationReferences(data: DirectorStageData): ReferenceImage[] {
+  const activeCamera = data.cameras.find((camera) => camera.id === data.activeCameraId) ?? data.cameras[0];
+  const activeView = activeCamera?.views.find((view) => view.viewId === activeCamera.activeViewId) ?? activeCamera?.views[0];
+  const ordered = [
+    activeView,
+    data.scene.background,
+    ...data.items.filter((item) => item.visible && item.role === "actor"),
+    ...data.items.filter((item) => item.visible && item.role === "prop"),
+  ].filter((item): item is ReferenceImage => Boolean(item?.image || item?.media));
+  const seen = new Set<string>();
+  return ordered.filter((item) => {
+    const media = normalizeMediaRef(item.media ?? item, "image");
+    const key = media?.path || media?.url || `${item.source || ""}:${item.sourceId ?? ""}:${item.image}`;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function cleanNodes(nodes: NodeType[]): CleanNode[] {

@@ -116,6 +116,7 @@ import {
   isActiveImageTask,
   normalizeGeneratedNodeData,
   normalizeDirectorStageData,
+  getDirectorStageGenerationReferences,
   resolvePrimaryGeneratedNode as resolvePrimaryGeneratedNodeFromFlow,
 } from "../../utils/editImageType";
 import { useLayout } from "../../utils/dagre";
@@ -252,7 +253,7 @@ function _doSyncReferences() {
     const data = directorNode.data as DirectorStageData;
     if (!sameReferenceList(data.references ?? [], connectedRefs)) {
       data.references = connectedRefs;
-      if (!data.background && connectedRefs.length) data.background = connectedRefs[0];
+      if (!data.scene.background && connectedRefs.length) data.scene.background = connectedRefs[0];
     }
   }
 
@@ -342,9 +343,9 @@ function normalizeGeneratedReference(data: GeneratedNodeData): ReferenceImage {
 }
 
 function normalizeDirectorAssetReferences(data: DirectorStageData): ReferenceImage[] {
-  return (data.assets ?? []).map((asset) => ({
+  return getDirectorStageGenerationReferences(data).map((asset) => ({
     ...normalizeReferenceImage(asset),
-    source: "directorAsset",
+    source: asset.source || "directorAsset",
     group: "directorStage",
     type: "image",
   }));
@@ -493,9 +494,6 @@ async function selectFinalImage(imageUrl: string, nodeId = "") {
 
 function onDirectorStageChange() {
   syncReferences();
-  persistFlow().catch((e) => {
-    window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
-  });
 }
 
 function hasActiveImageTask() {
