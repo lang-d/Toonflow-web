@@ -30,6 +30,7 @@
           :class="{ active: index === activeTrackIndex }"
           v-for="(track, index) in trackList"
           :key="track.id"
+          :ref="(el) => setTrackItemRef(el, index)"
           @click="changeIndex(index)">
           <t-checkbox
             class="trackCheck"
@@ -70,7 +71,7 @@
             <i-close size="14" />
           </div>
         </div>
-        <div class="item addItem c" @click="addTrack">
+        <div class="item addItem c" :class="{ disabled: addTrackLoading }" @click="handleAddTrack">
           <i-plus size="36"></i-plus>
         </div>
         </div>
@@ -105,6 +106,7 @@ const props = defineProps<{
   promptPrefix?: string;
   promptSuffix?: string;
   reviewLoading?: boolean;
+  addTrackLoading?: boolean;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
   default: 0,
@@ -118,9 +120,26 @@ const emit = defineEmits<{
   change: [prevIndex: number];
   saveImageList: [trackId: number];
   reviewTracks: [trackIds: number[]];
+  addTrack: [];
 }>();
 const itemBoxRef = ref<HTMLElement>();
+const trackItemRefs = ref<HTMLElement[]>([]);
 const checkAll = ref(false); // 全选状态
+
+onBeforeUpdate(() => {
+  trackItemRefs.value = [];
+});
+
+function setTrackItemRef(el: any, index: number) {
+  if (el instanceof HTMLElement) trackItemRefs.value[index] = el;
+}
+
+function scrollActiveTrackIntoView() {
+  void nextTick(() => {
+    const el = trackItemRefs.value[Number(activeTrackIndex.value)];
+    el?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  });
+}
 
 /** 视频封面缓存 src -> dataURL */
 const videoCoverMap = ref<Record<string, string>>({});
@@ -181,6 +200,11 @@ function changeIndex(index: number) {
   activeTrackIndex.value = index;
   emit("change", prevIndex);
 }
+
+watch(
+  () => activeTrackIndex.value,
+  () => scrollActiveTrackIntoView(),
+);
 function scrollTrackList(direction: -1 | 1) {
   const el = itemBoxRef.value;
   if (!el) return;
@@ -229,19 +253,9 @@ function confirmDeleteTrack(index: number) {
     },
   });
 }
-async function addTrack() {
-  const { data: modelData } = await axios.post("/modelSelect/getModelDetail", { modelId: props.modelParmas.model });
-  const drMap = modelData.durationResolutionMap;
-  if (!Array.isArray(drMap) || drMap.length === 0 || !drMap[0].duration?.length) return;
-  const duration = drMap[0].duration[0];
-  const { data } = await axios.post("/production/workbench/addTrack", {
-    projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
-    duration,
-  });
-  // await getGenerateData();
-  emit("getData");
-  activeTrackIndex.value = trackList.value.length - 1;
+function handleAddTrack() {
+  if (props.addTrackLoading) return;
+  emit("addTrack");
 }
 /** 获取 URL 中的文件扩展名 */
 function getFileExtension(url: string): string {
@@ -599,6 +613,11 @@ watch(
     .addItem {
       border: 4px dashed var(--td-component-border);
       cursor: pointer;
+      &.disabled {
+        cursor: not-allowed;
+        opacity: 0.58;
+        filter: grayscale(0.3);
+      }
     }
     .selectedVideoThumb {
       width: 100%;

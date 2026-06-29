@@ -115,7 +115,9 @@
         :prompt-prefix="promptPrefix"
         :prompt-suffix="promptSuffix"
         :review-loading="reviewLoading"
+        :add-track-loading="addTrackLoading"
         @reviewTracks="reviewTracks"
+        @addTrack="addManualTrack"
         @getData="getGenerateData" />
     </div>
   </div>
@@ -153,6 +155,7 @@ const { urlMap } = storeToRefs(cacheStore);
 const cacheRefreshing = ref(false);
 const mergeLoading = ref<"" | "storyboard" | "assets">("");
 const reviewLoading = ref(false);
+const addTrackLoading = ref(false);
 const referenceAudioPreviewVisible = ref(false);
 const activeReferenceAudio = ref<UploadItem | null>(null);
 const promptPrefix = ref("");
@@ -176,6 +179,7 @@ const modeOptions = ref<VideoModel>({
 }); // 当前模型配置
 
 const trackList = ref<TrackItem[]>([]); // 轨道列表
+const pendingManualTracks = ref<TrackItem[]>([]);
 
 const modelParmas = ref<ModelSetting>({
   mode: "",
@@ -480,6 +484,142 @@ function clampDuration(trackDuration: number): number {
   }
   return trackDuration;
 }
+
+function normalizeTrackItem(track: TrackItem): TrackItem {
+  return {
+    ...track,
+    status: normalizeTaskStatus((track as any).status ?? track.state, "pending"),
+    medias: (track.medias ?? []).map((media: TrackMedia) => attachLegacyMediaFields(media as any, normalizeMediaRef((media as any).media ?? media, media.fileType))),
+    videoList: (track.videoList ?? []).map((video: VideoItem) => ({
+      ...attachLegacyMediaFields(video as any, normalizeMediaRef((video as any).media ?? video, "video")),
+      status: normalizeTaskStatus((video as any).status ?? video.state, "pending"),
+    })),
+  };
+}
+
+function unwrapApiData(response: any) {
+  return response?.data?.data ?? response?.data ?? response;
+}
+
+function upsertTrackItem(track: TrackItem) {
+  const normalizedTrack = normalizeTrackItem(track);
+  const existingIndex = trackList.value.findIndex((item) => Number(item.id) === Number(normalizedTrack.id));
+  if (existingIndex >= 0) {
+    trackList.value[existingIndex] = normalizedTrack;
+    return existingIndex;
+  }
+  trackList.value = [...trackList.value, normalizedTrack];
+  return trackList.value.length - 1;
+}
+
+function rememberPendingManualTrack(track: TrackItem) {
+  const normalizedTrack = normalizeTrackItem(track);
+  pendingManualTracks.value = pendingManualTracks.value.filter((item) => Number(item.id) !== Number(normalizedTrack.id));
+  pendingManualTracks.value.push(normalizedTrack);
+}
+
+function mergePendingManualTracks(tracks: TrackItem[]) {
+  const serverIds = new Set(tracks.map((track) => Number(track.id)).filter(Number.isFinite));
+  pendingManualTracks.value = pendingManualTracks.value.filter((track) => !serverIds.has(Number(track.id)));
+  if (!pendingManualTracks.value.length) return tracks;
+  return [...tracks, ...pendingManualTracks.value.map((track) => normalizeTrackItem(track))];
+}
+
+function getNextManualGroupName() {
+  const baseName = "手动视频组";
+  const pattern = /^手动视频组(?:\s+(\d+))?$/;
+  const maxIndex = trackList.value.reduce((max, track) => {
+    const match = String(track.groupName || "").trim().match(pattern);
+    if (!match) return max;
+    return Math.max(max, match[1] ? Number(match[1]) : 1);
+  }, 0);
+  return `${baseName} ${maxIndex + 1}`;
+}
+
+function getManualTrackDuration() {
+  const rawDuration = Number(modelParmas.value.duration);
+  const fallbackDuration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 8;
+  const clamped = clampDuration(fallbackDuration);
+  return Number.isFinite(clamped) && clamped > 0 ? clamped : 8;
+}
+
+function getAddTrackPayload(response: any) {
+  return unwrapApiData(response);
+}
+
+function selectTrackById(trackId: number | string | null | undefined) {
+  const numericTrackId = Number(trackId);
+  if (!Number.isFinite(numericTrackId)) return false;
+  const nextIndex = trackList.value.findIndex((track) => Number(track.id) === numericTrackId);
+  if (nextIndex < 0) return false;
+  activeTrackIndex.value = nextIndex;
+  const selectedTrack = trackList.value[nextIndex];
+  modelParmas.value.duration = clampDuration(selectedTrack.duration || modelParmas.value.duration);
+  rememberCurrentTrack(selectedTrack.id);
+  return true;
+}
+
+function buildManualTrack(trackId: number, groupName: string, duration: number, returnedTrack?: Partial<TrackItem>): TrackItem {
+  return normalizeTrackItem({
+    id: trackId,
+    duration,
+    prompt: "",
+    state: "未生成",
+    reason: "",
+    groupKey: `manual-${trackId}`,
+    groupName,
+    groupIntent: "",
+    musicPlan: null,
+    reviewState: "pending",
+    reviewIssues: [],
+    selectVideoId: null,
+    medias: [],
+    videoList: [],
+    ...(returnedTrack ?? {}),
+  } as TrackItem);
+}
+
+async function addManualTrack() {
+  if (addTrackLoading.value) return;
+  const current = currentTrack.value;
+  const pid = project.value?.id;
+  const sid = episodesId.value;
+  if (pid == null || sid == null) {
+    window.$message.warning("当前项目或剧集缺少 ID");
+    return;
+  }
+  if (current?.id != null) {
+    scheduleCacheWrite(pid, sid, current.id, current.medias as unknown as UploadItem[]);
+  }
+
+  addTrackLoading.value = true;
+  try {
+    const groupName = getNextManualGroupName();
+    const duration = getManualTrackDuration();
+    const response = await axios.post("/production/workbench/addTrack", {
+      projectId: pid,
+      scriptId: sid ?? 0,
+      duration,
+      groupName,
+    });
+    const result = getAddTrackPayload(response);
+    const returnedTrack = result?.track ?? result?.videoTrack ?? result?.item;
+    const trackId = Number(returnedTrack?.id ?? result?.trackId ?? result?.id ?? (typeof result === "number" ? result : undefined));
+    if (!Number.isFinite(trackId)) throw new Error("新增成功，但后端未返回视频组 ID");
+
+    const normalizedTrack = buildManualTrack(trackId, groupName, duration, returnedTrack as Partial<TrackItem> | undefined);
+    rememberPendingManualTrack(normalizedTrack);
+    const nextIndex = upsertTrackItem(normalizedTrack);
+    if (!selectTrackById(normalizedTrack.id)) activeTrackIndex.value = nextIndex;
+    window.$message.success("已新增空视频组");
+    syncWorkbenchTasks();
+    void getGenerateData({ selectTrackId: normalizedTrack.id });
+  } catch (error: any) {
+    window.$message.error(error?.message || "新增视频组失败");
+  } finally {
+    addTrackLoading.value = false;
+  }
+}
 watch(
   () => modelParmas.value.model,
   (val) => {
@@ -630,11 +770,12 @@ async function saveReferenceAudioClip(payload: { base64Data: string; name: strin
   }
 }
 
-async function getGenerateData(options: { forceCache?: boolean } = {}) {
-  const { data } = await axios.post("/production/workbench/getGenerateData", {
+async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: number | string } = {}) {
+  const response = await axios.post("/production/workbench/getGenerateData", {
     projectId: project.value?.id,
     scriptId: episodesId.value ?? 0,
   });
+  const data = unwrapApiData(response) ?? {};
 
   storyboardList.value = (data.storyboardList ?? []).map((item: StoryboardItem) =>
     attachLegacyMediaFields(
@@ -645,15 +786,7 @@ async function getGenerateData(options: { forceCache?: boolean } = {}) {
       normalizeMediaRef((item as any).media ?? item, "image"),
     ),
   ) as StoryboardItem[];
-  data.trackList = (data.trackList ?? []).map((track: TrackItem) => ({
-    ...track,
-    status: normalizeTaskStatus((track as any).status ?? track.state, "pending"),
-    medias: (track.medias ?? []).map((media: TrackMedia) => attachLegacyMediaFields(media as any, normalizeMediaRef((media as any).media ?? media, media.fileType))),
-    videoList: (track.videoList ?? []).map((video: VideoItem) => ({
-      ...attachLegacyMediaFields(video as any, normalizeMediaRef((video as any).media ?? video, "video")),
-      status: normalizeTaskStatus((video as any).status ?? video.state, "pending"),
-    })),
-  }));
+  data.trackList = mergePendingManualTracks((data.trackList ?? []).map((track: TrackItem) => normalizeTrackItem(track)));
   // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
   const pid = project.value?.id;
   const sid = episodesId.value;
@@ -678,12 +811,17 @@ async function getGenerateData(options: { forceCache?: boolean } = {}) {
     // 整体赋值触发响应式
     trackList.value = [...data.trackList];
     await refreshVideoResults(trackList.value.flatMap((track) => track.videoList));
-    if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(trackList.value.length - 1, 0);
-    restoreLastTrack();
+    if (options.selectTrackId != null) {
+      selectTrackById(options.selectTrackId);
+    } else {
+      if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(trackList.value.length - 1, 0);
+      restoreLastTrack();
+    }
     syncWorkbenchTasks();
   }
 
-  modelParmas.value.duration = clampDuration(data.trackList?.[activeTrackIndex.value]?.duration);
+  const selectedDuration = trackList.value?.[activeTrackIndex.value]?.duration;
+  if (selectedDuration != null) modelParmas.value.duration = clampDuration(selectedDuration);
 }
 /** 提示词失焦时保存到后端 */
 function confirmRefreshReferenceCache() {
