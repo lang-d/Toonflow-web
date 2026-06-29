@@ -76,6 +76,7 @@ import projectStore from "@/stores/project";
 import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import type { MediaRef } from "@/types/api";
 import ImageAnnotatorDialog from "./ImageAnnotatorDialog.vue";
+import type { ReferenceImage, UploadNodeData } from "../../utils/editImageType";
 
 const { project } = storeToRefs(projectStore());
 const props = defineProps<{
@@ -132,7 +133,17 @@ onBeforeUnmount(() => {
 function removeFn() {
   removeNodes(props.id);
 }
-const emit = defineEmits(["upload", "keep"]);
+const emit = defineEmits<{
+  upload: [nodeId: string, reference: ReferenceImage];
+  keep: [imageUrl: string, nodeId: string];
+}>();
+
+function commitReference(data: UploadNodeData) {
+  currentImageUrl.value = data.image || "";
+  currentPreviewUrl.value = data.previewImage || data.image || "";
+  updateNodeData(props.id, data);
+  emit("upload", props.id, data as ReferenceImage);
+}
 
 function clickHandler(data: DropdownOption) {
   if (data.value == 1) {
@@ -160,18 +171,17 @@ async function localUpload() {
         scriptId: episodesId?.value,
       });
       const media = normalizeMediaRef(data?.media ?? data, "image");
-      currentImageUrl.value = media ? getMediaOriginalUrl(media) : data;
-      currentPreviewUrl.value = media ? getMediaPreviewUrl(media) : data;
-      updateNodeData(props.id, {
-        image: currentImageUrl.value,
-        previewImage: currentPreviewUrl.value,
+      const image = media ? getMediaOriginalUrl(media) : data;
+      const previewImage = media ? getMediaPreviewUrl(media) : data;
+      commitReference({
+        image,
+        previewImage,
         media,
         label: files[0].name,
         source: "local",
         sourceId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         type: "image",
       });
-      emit("upload");
     } catch (e) {
       window.$message.error((e as any)?.message || $t("workbench.production.editImage.uploadFailed"));
     }
@@ -181,7 +191,7 @@ async function localUpload() {
 
 function handleKeep() {
   if (!currentImageUrl.value) return window.$message.error($t("workbench.production.editImage.noImage"));
-  emit("keep", currentImageUrl.value);
+  emit("keep", currentImageUrl.value, props.id);
 }
 
 async function handleAnnotatorSave(base64Data: string) {
@@ -195,9 +205,7 @@ async function handleAnnotatorSave(base64Data: string) {
     const media = normalizeMediaRef(data?.media ?? data, "image");
     const image = media ? getMediaOriginalUrl(media) : data;
     const previewImage = media ? getMediaPreviewUrl(media) : data;
-    currentImageUrl.value = image;
-    currentPreviewUrl.value = previewImage;
-    updateNodeData(props.id, {
+    commitReference({
       image,
       previewImage,
       media,
@@ -207,7 +215,6 @@ async function handleAnnotatorSave(base64Data: string) {
       group: props.data.group,
       type: "image",
     });
-    emit("upload");
     window.$message.success($t("workbench.production.editImage.annotateSaved"));
   } catch (e) {
     window.$message.error((e as any)?.message || $t("workbench.production.editImage.annotateSaveFailed"));
@@ -225,9 +232,7 @@ async function uploadFn() {
     const media = normalizeMediaRef((asset as any).media ?? asset, "image");
     const image = media ? getMediaOriginalUrl(media) : asset?.originalUrl || asset?.imageUrl || asset?.url || asset?.src || "";
     const previewImage = media ? getMediaPreviewUrl(media) : asset?.thumbnail || asset?.thumb || asset?.previewImage || asset?.src || asset?.imageUrl || asset?.url || image;
-    currentImageUrl.value = image;
-    currentPreviewUrl.value = previewImage;
-    updateNodeData(props.id, {
+    commitReference({
       image,
       previewImage,
       media,
@@ -236,7 +241,6 @@ async function uploadFn() {
       sourceId: asset.id,
       type: "image",
     });
-    emit("upload");
   }
 }
 async function getStoryboardImage() {
@@ -246,9 +250,7 @@ async function getStoryboardImage() {
     const media = normalizeMediaRef((row as any).media ?? row, "image");
     const image = media ? getMediaOriginalUrl(media) : row?.originalUrl || row?.imageUrl || row?.url || row?.src || "";
     const previewImage = media ? getMediaPreviewUrl(media) : row?.thumbnail || row?.thumb || row?.previewImage || row?.src || row?.imageUrl || row?.url || image;
-    currentImageUrl.value = image;
-    currentPreviewUrl.value = previewImage;
-    updateNodeData(props.id, {
+    commitReference({
       image,
       previewImage,
       media,
@@ -257,7 +259,6 @@ async function getStoryboardImage() {
       sourceId: row.id,
       type: "image",
     });
-    emit("upload");
   }
 }
 </script>

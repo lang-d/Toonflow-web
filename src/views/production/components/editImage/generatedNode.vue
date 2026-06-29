@@ -40,6 +40,7 @@ import {
   isActiveImageTask,
   normalizeGeneratedNodeData,
   type GeneratedNodeData,
+  type ReferenceImage,
 } from "../../utils/editImageType";
 import type { DropdownOption } from "tdesign-vue-next/es/dropdown";
 import type { Storyboard } from "../../utils/flowBuilder";
@@ -79,6 +80,19 @@ const props = defineProps<{
 const emit = defineEmits<{
   keep: [imageUrl: string, nodeId: string];
   selectImage: [imageUrl: string, nodeId: string];
+  replaceReference: [nodeId: string, reference: ReferenceImage];
+  taskStart: [
+    payload: {
+      flowId: number;
+      nodeId: string;
+      targetType?: "deriveAsset" | "storyboard";
+      targetId?: number | null;
+      taskId: string | number;
+      unifiedTaskId?: string | null;
+      legacyTaskId?: string | number | null;
+      status?: GeneratedNodeData["status"];
+    },
+  ];
 }>();
 const { project } = storeToRefs(projectStore());
 const openStoryboardCheck = inject<() => Promise<Storyboard[]>>("openStoryboardCheck")!;
@@ -124,6 +138,7 @@ const currentOriginalImage = computed(() =>
     ? getMediaOriginalUrl(props.data.resultMedia)
     : props.data.selectedResult?.url || props.data.generatedImage || "",
 );
+const shouldUploadReplaceReference = computed(() => props.targetType === "deriveAsset" && !currentOriginalImage.value);
 
 function selectedFn() {
   selected.value = !selected.value;
@@ -156,6 +171,18 @@ async function localUpload() {
       });
       const media = normalizeMediaRef(data?.media ?? data, "image");
       const url = media ? getMediaOriginalUrl(media) : data;
+      if (shouldUploadReplaceReference.value) {
+        emit("replaceReference", props.id, {
+          image: url,
+          previewImage: media ? getMediaPreviewUrl(media) : url,
+          media,
+          label: files[0].name,
+          source: "local",
+          sourceId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          type: "image",
+        });
+        return;
+      }
       props.data.resultMedia = media;
       props.data.generatedImage = media ? getMediaPreviewUrl(media) : url;
       props.data.selectedResult = { url, media, prompt: props.data.prompt };
@@ -173,8 +200,22 @@ async function uploadFn() {
     title: $t("workbench.production.editImage.selectImage"),
   });
   if (selectedAssets.length > 0) {
-    const media = normalizeMediaRef((selectedAssets[0] as any).media ?? selectedAssets[0], "image");
-    const filePath = media ? getMediaOriginalUrl(media) : selectedAssets[0].src!;
+    const asset = selectedAssets[0] as any;
+    const media = normalizeMediaRef(asset.media ?? asset, "image");
+    const filePath = media ? getMediaOriginalUrl(media) : asset.originalUrl || asset.imageUrl || asset.url || asset.src || "";
+    const previewImage = media ? getMediaPreviewUrl(media) : asset.thumbnail || asset.thumb || asset.previewImage || asset.src || asset.imageUrl || asset.url || filePath;
+    if (shouldUploadReplaceReference.value) {
+      emit("replaceReference", props.id, {
+        image: filePath,
+        previewImage,
+        media,
+        label: asset.name,
+        source: "asset",
+        sourceId: asset.id,
+        type: "image",
+      });
+      return;
+    }
     props.data.resultMedia = media;
     props.data.generatedImage = media ? getMediaPreviewUrl(media) : filePath;
     props.data.selectedResult = { url: filePath, media, prompt: props.data.prompt };
@@ -185,8 +226,22 @@ async function uploadFn() {
 async function getStoryboardImage() {
   const rows = await openStoryboardCheck();
   if (rows.length > 0) {
-    const media = normalizeMediaRef((rows[0] as any).media ?? rows[0], "image");
-    const filePath = media ? getMediaOriginalUrl(media) : rows[0].src!;
+    const row = rows[0] as any;
+    const media = normalizeMediaRef(row.media ?? row, "image");
+    const filePath = media ? getMediaOriginalUrl(media) : row.originalUrl || row.imageUrl || row.url || row.src || "";
+    const previewImage = media ? getMediaPreviewUrl(media) : row.thumbnail || row.thumb || row.previewImage || row.src || row.imageUrl || row.url || filePath;
+    if (shouldUploadReplaceReference.value) {
+      emit("replaceReference", props.id, {
+        image: filePath,
+        previewImage,
+        media,
+        label: row.videoDesc || row.prompt,
+        source: "storyboard",
+        sourceId: row.id,
+        type: "image",
+      });
+      return;
+    }
     props.data.resultMedia = media;
     props.data.generatedImage = media ? getMediaPreviewUrl(media) : filePath;
     props.data.selectedResult = { url: filePath, media, prompt: props.data.prompt };
@@ -275,6 +330,16 @@ async function handleGenerate() {
       props.data.legacyTaskId = legacyTaskId ?? null;
       props.data.status = data?.status ?? "processing";
       props.data.state = "generating";
+      emit("taskStart", {
+        flowId,
+        nodeId: props.id,
+        targetType: props.targetType,
+        targetId: props.targetId,
+        taskId,
+        unifiedTaskId: unifiedTaskId ?? null,
+        legacyTaskId: legacyTaskId ?? null,
+        status: props.data.status,
+      });
       bindTask({ unifiedTaskId, legacyTaskId, status: props.data.status });
       return;
     }

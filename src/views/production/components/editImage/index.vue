@@ -21,7 +21,7 @@
       @connect="onConnect"
       @edges-change="syncReferences">
       <template #node-upload="{ id, data }">
-        <uploadNode :id="id" :data="data" @upload="syncReferences" @keep="sureNode" />
+        <uploadNode :id="id" :data="data" @upload="handleUploadNodeChange" @keep="sureNode" />
       </template>
 
       <template #node-generated="{ id, data }">
@@ -34,7 +34,9 @@
           :targetType="flowData.targetType"
           :targetId="flowData.targetId"
           @keep="sureNode"
-          @select-image="selectFinalImage" />
+          @select-image="selectFinalImage"
+          @replace-reference="replaceGeneratedReference"
+          @task-start="emit('taskStart', $event)" />
       </template>
       <template #node-directorStage="{ id, data }">
         <directorStageNode
@@ -157,6 +159,18 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   save: [payload: ImageFlowSavePayload];
+  taskStart: [
+    payload: {
+      flowId: number;
+      nodeId: string;
+      targetType?: "deriveAsset" | "storyboard";
+      targetId?: number | null;
+      taskId: string | number;
+      unifiedTaskId?: string | null;
+      legacyTaskId?: string | number | null;
+      status?: GeneratedNodeData["status"];
+    },
+  ];
 }>();
 
 const visible = defineModel({
@@ -487,6 +501,45 @@ async function selectFinalImage(imageUrl: string, nodeId = "") {
   try {
     const flowId = await persistFlow(imageUrl, nodeId);
     emitSave(imageUrl, flowId, nodeId);
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
+  }
+}
+
+async function persistReferenceChanges() {
+  if (syncTimer) {
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+  _doSyncReferences();
+  await persistFlow(selectedImageUrl.value);
+}
+
+async function handleUploadNodeChange(nodeId: string, reference: ReferenceImage) {
+  const node = nodes.value.find((item): item is Extract<NodeType, { type: "upload" }> => item.type === "upload" && item.id === nodeId);
+  if (node) node.data = normalizeReferenceImage(reference);
+  try {
+    await persistReferenceChanges();
+  } catch (e) {
+    window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
+  }
+}
+
+async function replaceGeneratedReference(generatedNodeId: string, reference: ReferenceImage) {
+  const nodeMap = new Map(nodes.value.map((node) => [node.id, node]));
+  const sourceIds = (edges.value as Array<{ source: string; target: string }>)
+    .filter((edge) => edge.target === generatedNodeId)
+    .map((edge) => edge.source);
+  const uploadNode = getSortedConnectedNodes(sourceIds, nodeMap).find(
+    (node): node is Extract<NodeType, { type: "upload" }> => node.type === "upload",
+  );
+  if (!uploadNode) {
+    window.$message.warning("请先连接一个引用节点后再替换引用");
+    return;
+  }
+  uploadNode.data = normalizeReferenceImage(reference);
+  try {
+    await persistReferenceChanges();
   } catch (e) {
     window.$message.error((e as any)?.message || $t("workbench.production.editImage.saveFailed"));
   }

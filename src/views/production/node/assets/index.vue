@@ -7,7 +7,7 @@
     <div class="content">
       <AssetsGrid :assets="assets" @generate="generateDeriveAsset" @edit="openEdit" @remove="removeFn" @add="openAddDialog" />
     </div>
-    <editImage v-model="visible" v-if="visible" :flowData="currentRow" @save="save" />
+    <editImage v-model="visible" v-if="visible" :flowData="currentRow" @save="save" @task-start="handleFlowTaskStart" />
     <AddDeriveAssetDialog
       v-model:visible="addVisible"
       :form="addForm"
@@ -25,7 +25,9 @@ import type { ImageFlowSavePayload } from "../../utils/editImageType";
 import axios from "@/utils/axios";
 import useProjectStore from "@/stores/project";
 import productionAgentStore from "@/stores/productionAgent";
-import { normalizeTaskStatus } from "@/stores/taskCenter";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
+import type { TaskStatus } from "@/types/api";
+import { getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import AssetsGrid from "./components/AssetsGrid.vue";
 import AddDeriveAssetDialog from "./components/AddDeriveAssetDialog.vue";
 import "./styles.scss";
@@ -33,6 +35,7 @@ import "./styles.scss";
 const { project } = storeToRefs(useProjectStore());
 const productionStore = productionAgentStore();
 const { episodesId } = storeToRefs(productionStore);
+const taskCenter = useTaskCenterStore();
 const props = defineProps<{
   id: string;
   handleIds: {
@@ -63,6 +66,67 @@ const addForm = reactive({
   name: "",
   desc: "",
 });
+const flowTaskReleases = new Map<number, () => void>();
+
+type FlowTaskStartPayload = {
+  flowId: number;
+  nodeId: string;
+  targetType?: "deriveAsset" | "storyboard";
+  targetId?: number | null;
+  taskId: string | number;
+  unifiedTaskId?: string | null;
+  legacyTaskId?: string | number | null;
+  status?: TaskStatus;
+};
+
+function toAssetState(status: TaskStatus): DeriveAsset["state"] {
+  if (status === "completed") return "已完成";
+  if (status === "failed" || status === "cancelled") return "生成失败";
+  if (status === "queued" || status === "submitting" || status === "processing") return "生成中";
+  return "未生成";
+}
+
+function findCurrentDeriveAsset(targetId: number) {
+  for (const asset of assets.value) {
+    const target = asset.derive.find((item) => item.id === targetId);
+    if (target) return target;
+  }
+  return null;
+}
+
+function releaseFlowTask(targetId: number) {
+  flowTaskReleases.get(targetId)?.();
+  flowTaskReleases.delete(targetId);
+}
+
+function applyFlowTask(targetId: number, task: RuntimeTask) {
+  const target = findCurrentDeriveAsset(targetId);
+  if (!target) {
+    queueMicrotask(() => releaseFlowTask(targetId));
+    return;
+  }
+  const record = (task.result ?? {}) as any;
+  target.status = task.status;
+  target.state = toAssetState(task.status);
+  target.taskId = task.unifiedTaskId ?? String(task.legacyTaskId ?? task.taskId ?? target.taskId ?? "");
+  target.unifiedTaskId = task.unifiedTaskId ?? target.unifiedTaskId ?? null;
+  target.legacyTaskId =
+    task.legacyTaskId == null || !Number.isFinite(Number(task.legacyTaskId))
+      ? target.legacyTaskId
+      : Number(task.legacyTaskId);
+  target.flowId = Number(record.flowId ?? target.flowId) || target.flowId;
+  target.nodeId = record.nodeId ?? task.nodeId ?? target.nodeId;
+  target.errorReason = task.status === "completed" ? "" : (task.reason ?? "");
+  if (record.prompt !== undefined) target.prompt = record.prompt;
+  const media = normalizeMediaRef(record.media ?? record, "image");
+  if (media && task.status === "completed") {
+    target.media = media;
+    target.src = getMediaPreviewUrl(media);
+  }
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    queueMicrotask(() => releaseFlowTask(targetId));
+  }
+}
 
 function openEdit(row: DeriveAsset, referanceImageUrl: string) {
   currentRow.value = {
@@ -168,6 +232,50 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt }: ImageFlo
     ];
   }
 }
+
+function handleFlowTaskStart(payload: FlowTaskStartPayload) {
+  if (payload.targetType !== "deriveAsset") return;
+  const targetId = Number(payload.targetId ?? currentRow.value.targetId ?? currentAssetsId.value);
+  if (!Number.isFinite(targetId)) return;
+  const target = findCurrentDeriveAsset(targetId);
+  if (!target) return;
+  const status = normalizeTaskStatus(payload.status, "processing");
+  target.flowId = payload.flowId ?? target.flowId;
+  target.nodeId = payload.nodeId ?? target.nodeId;
+  target.taskId = String(payload.taskId);
+  target.unifiedTaskId = payload.unifiedTaskId ?? (typeof payload.taskId === "string" && !/^\d+$/.test(payload.taskId) ? payload.taskId : undefined);
+  target.legacyTaskId =
+    payload.legacyTaskId == null || !Number.isFinite(Number(payload.legacyTaskId))
+      ? undefined
+      : Number(payload.legacyTaskId);
+  target.status = status;
+  target.state = toAssetState(status);
+  target.errorReason = "";
+  currentRow.value.flowId = payload.flowId ?? currentRow.value.flowId;
+  releaseFlowTask(target.id);
+  const release = taskCenter.registerTask(
+    {
+      key: createTaskKey("flowImage", Number(project.value?.id), target.id, payload.nodeId, payload.unifiedTaskId ?? undefined),
+      domain: "flowImage",
+      taskId: payload.taskId,
+      unifiedTaskId: payload.unifiedTaskId ?? undefined,
+      legacyTaskId: payload.legacyTaskId ?? undefined,
+      targetType: "deriveAsset",
+      targetId: target.id,
+      projectId: Number(project.value?.id),
+      scriptId: Number(episodesId.value),
+      nodeId: payload.nodeId,
+      status,
+    },
+    (task) => applyFlowTask(target.id, task),
+  );
+  flowTaskReleases.set(target.id, release);
+}
+
+onUnmounted(() => {
+  flowTaskReleases.forEach((release) => release());
+  flowTaskReleases.clear();
+});
 
 async function removeFn(id: number) {
   const dialog = DialogPlugin.confirm({
