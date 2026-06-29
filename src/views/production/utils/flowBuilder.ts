@@ -167,13 +167,13 @@ export interface Storyboard {
 
 export interface StoryboardReference {
   id: string;
-  source: "local" | "storyboard";
+  source: "local" | "storyboard" | "asset";
   sourceId?: number | string;
   url: string;
   previewUrl?: string;
   media?: MediaRef;
   name: string;
-  type?: "role" | "tool" | "scene" | "clip" | "image";
+  type?: "role" | "tool" | "scene" | "clip" | "image" | "audio";
 }
 
 interface VideoList {

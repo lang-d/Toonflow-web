@@ -22,7 +22,11 @@
                 <template #icon><i-plus /></template>
                 {{ $t("common.add") }}{{ $t("workbench.menu.assetCenter") }}
               </t-button>
-              <t-image-viewer :images="previewImages" :closeOnEscKeydown="true" :closeOnOverlay="true">
+              <t-image-viewer
+                :images="previewImages"
+                :imageScale="{ defaultScale: 1.6, min: 0.2, max: 5, step: 0.2 }"
+                :closeOnEscKeydown="true"
+                :closeOnOverlay="true">
                 <template #trigger="{ open }">
                   <t-button theme="primary" variant="outline" :disabled="!hasPreviewImages" @click="hasPreviewImages && open()">
                     {{ $t("workbench.cornerScape.batchPreview") }}
@@ -271,10 +275,34 @@
                   {{ $t("workbench.cornerScape.selectAudio") }}
                 </t-button>
               </div>
-              <div class="audioList ac w" v-if="editForm.relepedAudio.length">
-                <t-tag v-for="audio in editForm.relepedAudio" :key="audio.id" closable variant="light-outline" @close="removeAudio(audio.id)">
-                  {{ audio.name }}
-                </t-tag>
+              <div class="audioList" v-if="editForm.relepedAudio.length">
+                <div v-for="audio in editForm.relepedAudio" :key="audio.id" class="audioBindItem">
+                  <div class="audioBindInfo">
+                    <i-volume-notice size="16" />
+                    <span>{{ audio.name }}</span>
+                  </div>
+                  <div class="audioBindActions">
+                    <t-button
+                      size="small"
+                      variant="text"
+                      :loading="isAudioActionLoading(audio, 'preview')"
+                      :disabled="!canResolveAudio(audio)"
+                      @click="openAudioClipDialog(audio, 'preview')">
+                      试听
+                    </t-button>
+                    <t-button
+                      size="small"
+                      variant="text"
+                      :loading="isAudioActionLoading(audio, 'clip')"
+                      :disabled="!canResolveAudio(audio)"
+                      @click="openAudioClipDialog(audio, 'clip')">
+                      截取
+                    </t-button>
+                    <t-button size="small" variant="text" theme="danger" @click="removeAudio(audio.id)">
+                      解绑
+                    </t-button>
+                  </div>
+                </div>
               </div>
               <div v-else class="assets-empty">{{ $t("workbench.cornerScape.noAudio") }}</div>
             </div>
@@ -332,6 +360,14 @@
           </t-form-item>
         </t-form>
       </t-dialog>
+      <AudioClipDialog
+        v-model:visible="audioClipVisible"
+        :src="getAudioUrl(activeAudio)"
+        :title="audioClipMode === 'clip' ? '截取音频片段' : '试听音频'"
+        :name="activeAudio?.name"
+        :mode="audioClipMode"
+        save-label="截取并绑定"
+        @save="saveAudioClipAsBoundAsset" />
     </div>
   </div>
 </template>
@@ -343,10 +379,11 @@ import modelSelect from "@/components/modelSelect.vue";
 import settingStore from "@/stores/setting";
 import openAssetsSelector from "@/utils/assetsCheck";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
-import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { attachLegacyMediaFields, getMediaDisplayUrls, getMediaOriginalUrl, getMediaPreviewUrl, getPlayableMediaUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 import { useFileDialog } from "@vueuse/core";
+import AudioClipDialog from "@/components/AudioClipDialog.vue";
 
 const { otherSetting } = storeToRefs(settingStore());
 interface Image {
@@ -373,7 +410,7 @@ interface DataItem {
   historyImages: Image[];
   errorReason: string;
   promptErrorReason: string;
-  relepedAudio: { id: number; name: string }[];
+  relepedAudio: BoundAudio[];
   audioBindState: string;
   taskId?: string;
   legacyTaskId?: number | string;
@@ -381,6 +418,17 @@ interface DataItem {
   audioTaskId?: string;
   media?: MediaRef;
   sonAssets?: DataItem[];
+}
+
+interface BoundAudio {
+  id: number;
+  name: string;
+  src?: string;
+  url?: string;
+  media?: MediaRef;
+  prompt?: string;
+  describe?: string;
+  parentName?: string;
 }
 
 type AssetType = "role" | "scene" | "tool" | "unknown";
@@ -437,6 +485,14 @@ const assetForm = reactive({
 });
 const uploadLoading = ref(false);
 const localImageDialog = useFileDialog({ multiple: false, reset: true, accept: "image/*" });
+const audioClipVisible = ref(false);
+const activeAudio = ref<BoundAudio | null>(null);
+const audioClipMode = ref<"preview" | "clip">("preview");
+const audioAssetDetails = shallowRef(new Map<number, BoundAudio>());
+const resolvingAudioAction = ref("");
+let audioAssetProjectId: number | null = null;
+let audioAssetIndexComplete = false;
+let audioAssetLoadPromise: Promise<Map<number, BoundAudio>> | null = null;
 
 const visibleAssetItems = computed(() => getVisibleAssetItems());
 const groupedDataList = computed<AssetGroup[]>(() => {
@@ -529,12 +585,27 @@ function normalizeHistoryImages(item: DataItem): Image[] {
   return Array.isArray(item.historyImages) ? item.historyImages : [];
 }
 
+function normalizeBoundAudio(row: any): BoundAudio {
+  const playableUrl = getPlayableMediaUrl(row, "audio");
+  const media = normalizeMediaRef(row?.media, "audio") ?? normalizeMediaRef(playableUrl || row, "audio");
+  return {
+    id: Number(row?.id),
+    name: row?.name || media?.name || "音频",
+    src: playableUrl,
+    url: playableUrl,
+    media,
+    prompt: row?.prompt,
+    describe: row?.describe,
+    parentName: row?.parentName,
+  };
+}
+
 function normalizeDataItem(row: any): DataItem {
   const media = normalizeMediaRef(row?.media ?? row, "image");
   const normalized = attachLegacyMediaFields({ ...row }, media) as DataItem;
   normalized.assetsId = row?.assetsId ?? row?.assetId ?? null;
   normalized.historyImages = normalizeHistoryImages(normalized);
-  normalized.relepedAudio = Array.isArray(row?.relepedAudio) ? row.relepedAudio : [];
+  normalized.relepedAudio = Array.isArray(row?.relepedAudio) ? row.relepedAudio.map(normalizeBoundAudio) : [];
   normalized.sonAssets = Array.isArray(row?.sonAssets) ? row.sonAssets.map((item: any) => normalizeDataItem(item)) : [];
   normalized.errorReason = normalized.errorReason ?? "";
   normalized.promptErrorReason = normalized.promptErrorReason ?? "";
@@ -602,7 +673,7 @@ function mergeAssetPatch(id: number, patch: Partial<DataItem>) {
   if (!target) return null;
   Object.assign(target, patch);
   target.historyImages = normalizeHistoryImages(target);
-  target.relepedAudio = Array.isArray(target.relepedAudio) ? target.relepedAudio : [];
+  target.relepedAudio = Array.isArray(target.relepedAudio) ? target.relepedAudio.map(normalizeBoundAudio) : [];
   if (currentItem.value?.id === id) {
     currentItem.value = target;
     syncEditFormFromItem(target);
@@ -618,6 +689,7 @@ async function getFilteredData() {
       type: checkboxValue.value,
     });
     dataList.value = normalizeAssetTree(data ?? []);
+    void hydrateBoundAudioDetails();
     syncSelectedIdsWithData();
     syncRuntimeTasks();
   } catch (error) {
@@ -638,14 +710,15 @@ function syncSelectedIdsWithData() {
 
 const previewImages = computed((): string[] => {
   const selectedImageList = visibleAssetItems.value
-    .filter((item) => selectedIds.value.includes(item.id) && item.filePath)
-    .map((item) => item.filePath as string);
+    .filter((item) => selectedIds.value.includes(item.id))
+    .map((item) => getMediaDisplayUrls(item, "image").originalUrl)
+    .filter(Boolean);
 
   if (selectedImageList.length > 0) {
     return selectedImageList;
   }
 
-  return visibleAssetItems.value.filter((item) => item.filePath).map((item) => item.filePath as string);
+  return visibleAssetItems.value.map((item) => getMediaDisplayUrls(item, "image").originalUrl).filter(Boolean);
 });
 
 const hasPreviewImages = computed(() => previewImages.value.length > 0);
@@ -794,7 +867,7 @@ const editForm = reactive({
   name: "",
   describe: "",
   promptState: "",
-  relepedAudio: [] as { id: number; name: string }[],
+  relepedAudio: [] as BoundAudio[],
 });
 
 function openAssetDialog(parent?: DataItem | null) {
@@ -1381,11 +1454,246 @@ function syncRuntimeTasks() {
     if (!activeAudioIds.has(id)) releaseAudioTask(id);
   });
 }
+
+function isValidAudioId(id: unknown) {
+  return Number.isFinite(Number(id)) && Number(id) > 0;
+}
+
+function cacheAudioDetails(rows: any[], projectId = Number(project.value?.id)) {
+  if (!Number.isFinite(projectId) || projectId <= 0) return;
+  if (audioAssetProjectId !== projectId) resetAudioAssetIndex(projectId);
+  const next = new Map(audioAssetDetails.value);
+  rows.forEach((row) => {
+    if (isValidAudioId(row?.id)) next.set(Number(row.id), normalizeBoundAudio(row));
+    if (!Array.isArray(row?.sonAssets)) return;
+    row.sonAssets.forEach((child: any) => {
+      if (!isValidAudioId(child?.id)) return;
+      next.set(Number(child.id), normalizeBoundAudio({ ...child, parentName: row.name }));
+    });
+  });
+  audioAssetDetails.value = next;
+}
+
+function resetAudioAssetIndex(projectId: number) {
+  audioAssetProjectId = projectId;
+  audioAssetIndexComplete = false;
+  audioAssetLoadPromise = null;
+  audioAssetDetails.value = new Map();
+}
+
+async function loadAudioAssetIndex(targetIds = new Set<number>()) {
+  const projectId = Number(project.value?.id);
+  if (!Number.isFinite(projectId) || projectId <= 0) return audioAssetDetails.value;
+  if (audioAssetProjectId !== projectId) resetAudioAssetIndex(projectId);
+  if (targetIds.size && Array.from(targetIds).every((id) => audioAssetDetails.value.has(id))) return audioAssetDetails.value;
+  if (audioAssetIndexComplete) return audioAssetDetails.value;
+  if (audioAssetLoadPromise) return audioAssetLoadPromise;
+
+  const loadPromise = (async () => {
+    const pageSize = 100;
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    while ((page - 1) * pageSize < total) {
+      const { data } = await axios.post("/assets/getAssetsApi", {
+        projectId,
+        type: "audio",
+        page,
+        limit: pageSize,
+      });
+      if (audioAssetProjectId !== projectId) return audioAssetDetails.value;
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      cacheAudioDetails(rows, projectId);
+      total = Number(data?.total ?? rows.length);
+      if (!rows.length || (targetIds.size && Array.from(targetIds).every((id) => audioAssetDetails.value.has(id)))) break;
+      page += 1;
+    }
+    if (audioAssetProjectId === projectId && (!Number.isFinite(total) || page * pageSize >= total || total === 0)) {
+      audioAssetIndexComplete = true;
+    }
+    return audioAssetDetails.value;
+  })();
+  audioAssetLoadPromise = loadPromise;
+  try {
+    return await loadPromise;
+  } finally {
+    if (audioAssetLoadPromise === loadPromise) audioAssetLoadPromise = null;
+  }
+}
+
+function collectBoundAudioIds(items: DataItem[], ids = new Set<number>()) {
+  items.forEach((item) => {
+    item.relepedAudio.forEach((audio) => {
+      if (isValidAudioId(audio.id) && !getPlayableMediaUrl(audio, "audio")) ids.add(Number(audio.id));
+    });
+    if (item.sonAssets?.length) collectBoundAudioIds(item.sonAssets, ids);
+  });
+  return ids;
+}
+
+async function hydrateBoundAudioDetails() {
+  const ids = collectBoundAudioIds(dataList.value);
+  if (!ids.size) return;
+  try {
+    await loadAudioAssetIndex(ids);
+  } catch (error) {
+    console.error("加载绑定音频详情失败:", error);
+  }
+}
+
+function resolveBoundAudio(audio?: BoundAudio | null) {
+  if (!audio) return null;
+  const detail = audioAssetDetails.value.get(Number(audio.id));
+  return normalizeBoundAudio(detail ? { ...audio, ...detail, id: audio.id, name: audio.name || detail.name } : audio);
+}
+
+function getAudioUrl(audio?: BoundAudio | null) {
+  return getPlayableMediaUrl(resolveBoundAudio(audio), "audio");
+}
+
+function canResolveAudio(audio?: BoundAudio | null) {
+  return Boolean(getAudioUrl(audio) || isValidAudioId(audio?.id));
+}
+
+function getAudioActionKey(audio: BoundAudio, mode: "preview" | "clip") {
+  return `${audio.id}:${mode}`;
+}
+
+function isAudioActionLoading(audio: BoundAudio, mode: "preview" | "clip") {
+  return resolvingAudioAction.value === getAudioActionKey(audio, mode);
+}
+
+async function ensureBoundAudioDetails(audio: BoundAudio) {
+  let resolved = resolveBoundAudio(audio) ?? audio;
+  if (getPlayableMediaUrl(resolved, "audio")) return resolved;
+  if (isValidAudioId(audio.id)) {
+    await loadAudioAssetIndex(new Set([Number(audio.id)]));
+    resolved = resolveBoundAudio(audio) ?? audio;
+  }
+  if (!getPlayableMediaUrl(resolved, "audio") && audio.name) {
+    const queried = await queryAudioAssetByName(audio.name, Number(audio.id));
+    if (queried) {
+      cacheAudioDetails([queried]);
+      resolved = resolveBoundAudio(audio) ?? queried;
+    }
+  }
+  return resolved;
+}
+
+async function openAudioClipDialog(audio: BoundAudio, mode: "preview" | "clip") {
+  const actionKey = getAudioActionKey(audio, mode);
+  if (resolvingAudioAction.value) return;
+  resolvingAudioAction.value = actionKey;
+  try {
+    const resolved = await ensureBoundAudioDetails(audio);
+    if (!getPlayableMediaUrl(resolved, "audio")) {
+      window.$message.warning("当前音频暂无可播放地址");
+      return;
+    }
+    activeAudio.value = resolved;
+    audioClipMode.value = mode;
+    audioClipVisible.value = true;
+  } catch (error: any) {
+    window.$message.error(error?.message || "音频详情加载失败");
+  } finally {
+    resolvingAudioAction.value = "";
+  }
+}
+
+function findCreatedAudioInResponse(input: any, name: string): BoundAudio | null {
+  const payloads = [input, input?.data, input?.data?.data, input?.response, input?.response?.data, input?.response?.data?.data].filter(Boolean);
+  for (const payload of payloads) {
+    const audioAsset = payload?.audioAsset;
+    const child = Array.isArray(audioAsset?.sonAssets) ? audioAsset.sonAssets.find((item: any) => isValidAudioId(item?.id)) : null;
+    if (child) {
+      return normalizeBoundAudio({
+        ...child,
+        name: child.name || name,
+        describe: child.describe || audioAsset.describe,
+        prompt: child.prompt,
+        parentName: audioAsset.name,
+      });
+    }
+  }
+
+  const candidates: any[] = [];
+  const visit = (value: any) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (value.id && (value.name === name || value.media || value.src || value.url || value.filePath)) candidates.push(value);
+    Object.values(value).forEach(visit);
+  };
+  visit(input);
+  const matched = candidates.find((item) => item.name === name) ?? candidates[0];
+  return matched?.id ? normalizeBoundAudio(matched) : null;
+}
+
+async function queryAudioAssetByName(name: string, preferredId?: number): Promise<BoundAudio | null> {
+  const { data } = await axios.post("/assets/getAssetsApi", {
+    projectId: project.value?.id,
+    type: "audio",
+    name,
+    page: 1,
+    limit: 20,
+  });
+  const rows = data?.data ?? [];
+  const candidates = rows.flatMap((row: any) => [row, ...(row?.sonAssets ?? []).map((child: any) => ({ ...child, parentName: row.name }))]);
+  const matched = candidates.find((item: any) => preferredId && Number(item?.id) === preferredId) ?? candidates.find((item: any) => item?.name === name);
+  return matched ? normalizeBoundAudio(matched) : null;
+}
+
+async function bindAudioToCurrentAsset(audio: BoundAudio) {
+  cacheAudioDetails([audio]);
+  editForm.relepedAudio = [audio];
+  await axios.post("/cornerScape/updateAssetsAudio", {
+    assetsId: editForm.assetsId,
+    audioIds: editForm.relepedAudio.map((i) => i.id),
+  });
+  mergeAssetPatch(editForm.assetsId, { relepedAudio: editForm.relepedAudio });
+}
+
+async function saveAudioClipAsBoundAsset(payload: { base64Data: string; name: string }, controls?: { done: (error?: unknown) => void }) {
+  if (!editForm.assetsId) {
+    const error = new Error("当前资产缺少 ID");
+    controls?.done(error);
+    return;
+  }
+  const source = activeAudio.value;
+  try {
+    const response = await axios.post("/assets/addAudioAssets", {
+      name: payload.name.replace(/\.wav$/i, ""),
+      describe: source?.describe || source?.name || "音频片段",
+      projectId: project.value?.id ?? 0,
+      assetsItem: [
+        {
+          base64: payload.base64Data,
+          prompt: source?.prompt || "",
+          name: payload.name,
+          describe: source?.name ? `从 ${source.name} 截取` : "音频截取片段",
+        },
+      ],
+    });
+    const created = findCreatedAudioInResponse(response, payload.name) ?? (await queryAudioAssetByName(payload.name));
+    if (!created?.id) throw new Error("音频资产已创建，但未能获取新音频 ID");
+    await bindAudioToCurrentAsset(created);
+    audioClipVisible.value = false;
+    window.$message.success("已截取为新音频资产并绑定");
+    controls?.done();
+  } catch (e: any) {
+    window.$message.error(e?.message || "音频截取保存失败");
+    controls?.done(e);
+  }
+}
+
 async function removeAudio(id: number) {
   editForm.relepedAudio = editForm.relepedAudio.filter((a) => a.id !== id);
   await axios.post("/cornerScape/updateAssetsAudio", {
     assetsId: editForm.assetsId,
+    audioIds: editForm.relepedAudio.map((i) => i.id),
   });
+  mergeAssetPatch(editForm.assetsId, { relepedAudio: editForm.relepedAudio });
 }
 async function selectAudio() {
   const assets = await openAssetsSelector({
@@ -1395,11 +1703,7 @@ async function selectAudio() {
     multiple: false,
   });
   if (assets.length) {
-    editForm.relepedAudio = [{ id: assets[0].id, name: assets[0].name }];
-    await axios.post("/cornerScape/updateAssetsAudio", {
-      assetsId: editForm.assetsId,
-      audioIds: editForm.relepedAudio.map((i) => i.id),
-    });
+    await bindAudioToCurrentAsset(normalizeBoundAudio(assets[0]));
   }
 }
 </script>
@@ -1661,6 +1965,36 @@ async function selectAudio() {
 }
 .audioList {
   margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+.audioBindItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--td-border-level-1-color);
+  border-radius: 6px;
+  background: var(--td-bg-color-container);
+}
+.audioBindInfo {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+.audioBindActions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .drawerImageBox {
   width: 100%;

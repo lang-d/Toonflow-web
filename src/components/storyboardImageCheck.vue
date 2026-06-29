@@ -81,7 +81,7 @@ import dayjs from "dayjs";
 import axios from "@/utils/axios";
 import type { TableProps } from "tdesign-vue-next";
 import type { Storyboard } from "@/views/production/utils/flowBuilder";
-import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { getMediaDisplayUrls, normalizeMediaRef } from "@/utils/mediaRef";
 import type { MediaRef } from "@/types/api";
 
 type StoryboardListItem = Storyboard & {
@@ -208,13 +208,11 @@ function normalizeStoryboardItem(item: StoryboardListItem): StoryboardListItem {
 }
 
 function getStoryboardPreviewUrl(row: StoryboardListItem) {
-  const media = normalizeMediaRef(row.media ?? row, "image");
-  return media ? getMediaPreviewUrl(media) : row.thumbnail || row.thumb || row.src || row.imageUrl || row.filePath || row.originalUrl || "";
+  return getMediaDisplayUrls(row, "image").previewUrl;
 }
 
 function getStoryboardOriginalUrl(row: StoryboardListItem) {
-  const media = normalizeMediaRef(row.media ?? row, "image");
-  return media ? getMediaOriginalUrl(media) : row.originalUrl || row.imageUrl || row.src || row.filePath || "";
+  return getMediaDisplayUrls(row, "image").originalUrl;
 }
 
 async function getFilteredData() {

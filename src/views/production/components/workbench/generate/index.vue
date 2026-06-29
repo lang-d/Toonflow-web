@@ -14,9 +14,17 @@
         <span class="referenceHint">拖动引用可调整生成顺序</span>
       </div>
       <div class="uploadBtn">
-        <imageSelect :mode="modelParmas.mode as VideoMode" v-model="imageList" :storyboard-list="storyboardList" />
+        <imageSelect :mode="modelParmas.mode as VideoMode" v-model="imageList" :storyboard-list="storyboardList" @preview-audio="openReferenceAudioPreview" />
       </div>
     </div>
+    <AudioClipDialog
+      v-model:visible="referenceAudioPreviewVisible"
+      title="截取音频片段"
+      :src="activeReferenceAudioUrl"
+      :name="activeReferenceAudio?.name || activeReferenceAudio?.parentName"
+      mode="clip"
+      save-label="截取并作为引用"
+      @save="saveReferenceAudioClip" />
     <div class="modelSelect">
       <modeMenu v-model="modelParmas" :modeOptions="modeOptions" :trackId="currentTrack?.id" :modeList="modeList" @modeChange="modeChange" />
     </div>
@@ -124,6 +132,7 @@ import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import promptEditor from "@/components/promptEditor.vue";
+import AudioClipDialog from "@/components/AudioClipDialog.vue";
 import imageListCacheStore from "@/stores/imageListCache";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
@@ -144,6 +153,8 @@ const { urlMap } = storeToRefs(cacheStore);
 const cacheRefreshing = ref(false);
 const mergeLoading = ref<"" | "storyboard" | "assets">("");
 const reviewLoading = ref(false);
+const referenceAudioPreviewVisible = ref(false);
+const activeReferenceAudio = ref<UploadItem | null>(null);
 const promptPrefix = ref("");
 const promptSuffix = ref("");
 const restoredLastTrack = ref(false);
@@ -537,6 +548,88 @@ const references = computed(() => {
     }));
 });
 
+const activeReferenceAudioUrl = computed(() => getReferenceAudioUrl(activeReferenceAudio.value));
+
+function getReferenceAudioUrl(item?: UploadItem | null) {
+  if (!item) return "";
+  const media = normalizeMediaRef(item.media ?? item, "audio");
+  return (media ? getMediaOriginalUrl(media) : "") || item.originalUrl || item.imageUrl || item.src || "";
+}
+
+function openReferenceAudioPreview(item: UploadItem) {
+  activeReferenceAudio.value = item;
+  if (!getReferenceAudioUrl(item)) {
+    window.$message.warning("当前音频暂无可播放地址");
+    return;
+  }
+  referenceAudioPreviewVisible.value = true;
+}
+
+function findActiveReferenceAudioIndex() {
+  const active = activeReferenceAudio.value;
+  if (!active) return -1;
+  return imageList.value.findIndex((item) => item === active || (
+    item.fileType === "audio" &&
+    item.id === active.id &&
+    item.sources === active.sources &&
+    item.src === active.src
+  ));
+}
+
+async function saveReferenceAudioClip(payload: { base64Data: string; name: string; duration: number }, controls?: { done: (error?: unknown) => void }) {
+  const active = activeReferenceAudio.value;
+  const activeIndex = findActiveReferenceAudioIndex();
+  if (!active || activeIndex < 0) {
+    window.$message.error("未找到当前音频引用");
+    controls?.done(new Error("未找到当前音频引用"));
+    return;
+  }
+
+  try {
+    const response = await axios.post("/production/editImage/uploadMedia", {
+      projectId: project.value?.id,
+      scriptId: episodesId.value ?? 0,
+      type: "audio",
+      base64Data: payload.base64Data,
+      name: payload.name,
+    });
+    const responsePayload = (response as any)?.data ?? response;
+    const uploadResult = responsePayload?.data ?? responsePayload;
+    const media = normalizeMediaRef(uploadResult?.media ?? uploadResult, "audio");
+    const mediaId = media?.id ?? uploadResult?.id ?? uploadResult?.mediaId;
+    const mediaUrl = media ? getMediaOriginalUrl(media) : uploadResult?.url || uploadResult?.src || "";
+    if (mediaId == null || !mediaUrl) throw new Error("音频片段已上传，但未返回可用媒体信息");
+
+    const clippedAudio: UploadItem = {
+      ...active,
+      fileType: "audio",
+      sources: "local",
+      id: Number.isFinite(Number(mediaId)) ? Number(mediaId) : mediaId,
+      media,
+      src: mediaUrl,
+      originalUrl: mediaUrl,
+      imageUrl: undefined,
+      thumbnail: undefined,
+      thumb: undefined,
+      name: uploadResult?.name || media?.name || payload.name,
+      prompt: active.prompt,
+      parentName: active.parentName,
+      category: active.category || "audio",
+    };
+
+    const next = [...imageList.value];
+    next[activeIndex] = clippedAudio;
+    imageList.value = next;
+    activeReferenceAudio.value = clippedAudio;
+    referenceAudioPreviewVisible.value = false;
+    window.$message.success("已截取为当前音频引用");
+    controls?.done();
+  } catch (error: any) {
+    window.$message.error(error?.message || "音频截取保存失败");
+    controls?.done(error);
+  }
+}
+
 async function getGenerateData(options: { forceCache?: boolean } = {}) {
   const { data } = await axios.post("/production/workbench/getGenerateData", {
     projectId: project.value?.id,
@@ -748,7 +841,7 @@ async function genTextConfirmed() {
   if (!ensureCurrentTrackStoryboardReady()) return;
   if (currentTrack.value.id == null) return;
   taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), currentTrack.value.id));
-  let info: Array<{ id: number; sources: WorkbenchReferenceSource }> = [];
+  let info: Array<{ id: number | string; sources: WorkbenchReferenceSource }> = [];
   const currentTrackId = currentTrack.value.id;
   const changeTrack = currentTrack.value;
   if (modelParmas.value.mode !== "text") {
@@ -761,7 +854,7 @@ async function genTextConfirmed() {
             ? imageList.value.slice(0, 1)
             : imageList.value;
         const filtered = preSliced
-          .filter((item): item is UploadItem & { id: number; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.sources))
+          .filter((item): item is UploadItem & { id: number | string; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.sources))
           .map(({ id, sources }) => ({ id, sources }));
         if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
         if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
@@ -844,7 +937,7 @@ onMounted(() => {
   void getGenerateData();
 });
 
-type VideoUploadDataItem = { id: number; sources: WorkbenchReferenceSource };
+type VideoUploadDataItem = { id: number | string; sources: WorkbenchReferenceSource };
 
 function buildVideoUploadData(mode: string, items: UploadItem[]): VideoUploadDataItem[] {
   const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
@@ -854,7 +947,7 @@ function buildVideoUploadData(mode: string, items: UploadItem[]): VideoUploadDat
       ? items.slice(0, 1)
       : items;
   const filtered = preSliced
-    .filter((item): item is UploadItem & { id: number; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.src) && Boolean(item.sources))
+    .filter((item): item is UploadItem & { id: number | string; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.src) && Boolean(item.sources))
     .map(({ id, sources }) => ({ id, sources }));
   if (frameMode.includes(mode)) return filtered.slice(0, 2);
   if (mode === "singleImage") return filtered.slice(0, 1);

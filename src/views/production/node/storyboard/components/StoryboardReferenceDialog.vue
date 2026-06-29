@@ -13,11 +13,19 @@
       </div>
       <div class="referenceDialogList">
         <div v-for="ref in currentReferenceRows" :key="ref.key" class="referenceRow">
-          <img :src="ref.src" />
+          <img v-if="ref.type === 'image'" :src="ref.src" />
+          <div v-else-if="ref.type === 'audio'" class="referenceAudioIcon">
+            <i-volume-notice size="20" />
+            <span>音频</span>
+          </div>
           <div class="referenceInfo">
             <strong>{{ ref.label }}</strong>
             <span>{{ ref.group }}</span>
           </div>
+          <t-button v-if="ref.type === 'audio'" size="small" variant="text" @click="emit('previewReference', ref)">试听</t-button>
+          <t-tooltip v-if="ref.type === 'audio'" content="等待后端私有音频上传接口支持">
+            <t-button size="small" variant="text" disabled>截取</t-button>
+          </t-tooltip>
           <t-button shape="circle" variant="text" theme="danger" @click="emit('removeReference', ref)">
             <template #icon><i-delete /></template>
           </t-button>
@@ -39,5 +47,22 @@ const emit = defineEmits<{
   pickAssets: [];
   uploadLocal: [];
   removeReference: [ref: any];
+  previewReference: [ref: any];
 }>();
 </script>
+
+<style scoped>
+.referenceAudioIcon {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  color: var(--td-brand-color);
+  border-radius: 6px;
+  background: var(--td-bg-color-container-hover);
+}
+
+.referenceAudioIcon span {
+  font-size: 11px;
+}
+</style>

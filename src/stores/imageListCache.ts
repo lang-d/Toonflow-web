@@ -21,12 +21,12 @@ const CACHE_STORAGE_KEY = "imageListCache";
 
 /** 用于向后端请求 URL 的标识信息 */
 interface ResolveUrlItem {
-  id: number | null | undefined;
+  id: number | string | null | undefined;
   sources: string | undefined;
 }
 
 /** 生成 urlMap 的复合键: "id:sources" */
-function makeUrlKey(id: number | null | undefined, sources: string | undefined): string {
+function makeUrlKey(id: number | string | null | undefined, sources: string | undefined): string {
   return `${id ?? ""}:${sources ?? ""}`;
 }
 
@@ -193,7 +193,7 @@ export default defineStore(
     }
 
     /** 通过 id + sources 同步解析为完整 URL（优先走内存缓存） */
-    function resolveUrlSync(id: number | null | undefined, sources: string | undefined, fallbackPath?: string): string {
+    function resolveUrlSync(id: number | string | null | undefined, sources: string | undefined, fallbackPath?: string): string {
       if (id != null) {
         const key = makeUrlKey(id, sources);
         if (urlMap.value[key]) return urlMap.value[key];

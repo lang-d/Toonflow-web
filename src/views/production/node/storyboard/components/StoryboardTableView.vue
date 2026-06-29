@@ -51,11 +51,21 @@
                   <t-popup v-for="ref in assetGroup.items" :key="ref.key" placement="top" destroy-on-close>
                     <template #content>
                       <div class="assetPreviewPopup">
-                        <img :src="ref.src" />
+                        <div v-if="ref.type === 'audio'" class="assetAudioPreview">
+                          <i-volume-notice size="20" />
+                          <span>音频</span>
+                        </div>
+                        <img v-else :src="ref.src" />
                         <div>{{ ref.label }}</div>
                       </div>
                     </template>
-                    <div class="assetChip">
+                    <button v-if="ref.type === 'audio'" class="assetChip assetChipButton" type="button" @click="emit('previewReference', ref)">
+                      <span class="assetAudioIcon">
+                        <i-volume-notice size="16" />
+                      </span>
+                      <span>{{ ref.label }}</span>
+                    </button>
+                    <div v-else class="assetChip">
                       <img :src="ref.src" />
                       <span>{{ ref.label }}</span>
                     </div>
@@ -179,6 +189,7 @@ const emit = defineEmits<{
   openStoryboardHistory: [row: any];
   remove: [id: number];
   imageLoad: [src: string, event: Event];
+  previewReference: [ref: any];
 }>();
 
 function changeDuration(row: any, delta: number) {
@@ -204,3 +215,39 @@ function getFactStatusTheme(status?: string) {
   return "success";
 }
 </script>
+
+<style scoped>
+.assetChipButton {
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+}
+
+.assetChipButton:hover {
+  color: var(--td-brand-color);
+}
+
+.assetAudioIcon,
+.assetAudioPreview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--td-brand-color);
+}
+
+.assetAudioIcon {
+  width: 20px;
+  height: 20px;
+}
+
+.assetAudioPreview {
+  flex-direction: column;
+  gap: 4px;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--td-radius-default);
+  background: var(--td-bg-color-container-hover);
+}
+</style>

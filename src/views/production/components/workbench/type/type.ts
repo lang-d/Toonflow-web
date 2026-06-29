@@ -2,12 +2,12 @@ type ReferenceType = "videoReference" | "imageReference" | "audioReference" | "t
 type Type = "imageReference" | "startImage" | "endImage" | "videoReference" | "audioReference";
 type VideoMode = "singleImage" | "startEndRequired" | "endFrameOptional" | "startFrameOptional" | "text" | ReferenceType[];
 type UploadCategory = "role" | "scene" | "tool" | "clip" | "audio" | "other";
-type WorkbenchReferenceSource = "storyboard" | "assets" | "merged" | "directorAsset";
+type WorkbenchReferenceSource = "storyboard" | "assets" | "merged" | "directorAsset" | "local";
 type StoryboardFactStatus = "draft" | "ready" | "legacy";
 
 interface UploadItemBase {
   fileType: "image" | "video" | "audio";
-  id: number | null;
+  id: number | string | null;
   src?: string;
   originalUrl?: string;
   imageUrl?: string;
@@ -40,6 +40,10 @@ interface UploadItemDirectorAsset extends UploadItemBase {
   sources: "directorAsset";
 }
 
+interface UploadItemLocal extends UploadItemBase {
+  sources: "local";
+}
+
 interface UploadItemMerged extends UploadItemBase {
   sources: "merged";
   fileType: "image";
@@ -48,7 +52,7 @@ interface UploadItemMerged extends UploadItemBase {
   sourceRefs: Array<{ id: number; sources: "storyboard" | "assets"; order: number }>;
 }
 
-type UploadItem = UploadItemStoryboard | UploadItemAssets | UploadItemMerged | UploadItemDirectorAsset;
+type UploadItem = UploadItemStoryboard | UploadItemAssets | UploadItemMerged | UploadItemDirectorAsset | UploadItemLocal;
 
 interface StoryboardItem {
   src: string;
@@ -127,7 +131,7 @@ interface TrackMediaBase {
   imageUrl?: string;
   thumbnail?: string;
   thumb?: string;
-  id?: number;
+  id?: number | string;
   prompt?: string;
   fileType: "image" | "video" | "audio";
   slotType?: Type; // 本地保存时记录的 slot 类型，用于切换轨道时精确还原位置
@@ -150,6 +154,10 @@ interface TrackMediaDirectorAsset extends TrackMediaBase {
   sources: "directorAsset";
 }
 
+interface TrackMediaLocal extends TrackMediaBase {
+  sources: "local";
+}
+
 interface TrackMediaUnknown extends TrackMediaBase {
   sources?: string;
 }
@@ -161,7 +169,7 @@ interface TrackMediaMerged extends TrackMediaBase {
   sourceRefs?: Array<{ id: number; sources: "storyboard" | "assets"; order: number }>;
 }
 
-type TrackMedia = TrackMediaStoryboard | TrackMediaAssets | TrackMediaMerged | TrackMediaDirectorAsset | TrackMediaUnknown;
+type TrackMedia = TrackMediaStoryboard | TrackMediaAssets | TrackMediaMerged | TrackMediaDirectorAsset | TrackMediaLocal | TrackMediaUnknown;
 
 interface HistoryVideoItem {
   errorReason?: string | null;

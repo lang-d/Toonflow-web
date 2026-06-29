@@ -443,7 +443,7 @@ import generateImage from "./components/generateImage.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
-import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { attachLegacyMediaFields, getMediaDisplayUrls, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 const { otherSetting } = storeToRefs(settingStore());
@@ -1424,8 +1424,7 @@ function syncAssetRuntimeTasks() {
 }
 
 function getAssetOriginalUrl(row: Asset) {
-  const media = normalizeMediaRef(row.media ?? row, "image");
-  return media ? getMediaOriginalUrl(media) : row.src || row.filePath || "";
+  return getMediaDisplayUrls(row, "image").originalUrl;
 }
 
 async function getBigImageUrl(row: Asset, open: () => void) {

@@ -14,9 +14,16 @@
               </t-image>
             </div>
             <t-tooltip theme="primary" v-else-if="item.fileType == 'audio'" :content="item?.prompt || ''">
-              <div class="mediaPreview audioPreview">
+              <div
+                class="mediaPreview audioPreview audioPreviewTrigger"
+                role="button"
+                tabindex="0"
+                @click.stop="previewAudio(item)"
+                @keydown.enter.stop.prevent="previewAudio(item)"
+                @keydown.space.stop.prevent="previewAudio(item)">
                 <i-acoustic size="20" />
                 <span class="mediaLabel">音频</span>
+                <span class="audioPreviewBadge"><i-play size="12" /></span>
               </div>
             </t-tooltip>
             <div v-else-if="item.fileType == 'video'" class="mediaPreview videoPreview">
@@ -47,9 +54,16 @@
             </t-image>
           </div>
           <t-tooltip theme="primary" v-else-if="item.fileType == 'audio'" :content="item?.prompt || ''">
-            <div class="mediaPreview audioPreview">
+            <div
+              class="mediaPreview audioPreview audioPreviewTrigger"
+              role="button"
+              tabindex="0"
+              @click.stop="previewAudio(item)"
+              @keydown.enter.stop.prevent="previewAudio(item)"
+              @keydown.space.stop.prevent="previewAudio(item)">
               <i-acoustic size="20" />
               <span class="mediaLabel">音频</span>
+              <span class="audioPreviewBadge"><i-play size="12" /></span>
             </div>
           </t-tooltip>
           <div v-else-if="item.fileType == 'video'" class="mediaPreview videoPreview">
@@ -84,9 +98,17 @@
                 <template #overlayContent></template>
               </t-image>
             </div>
-            <div v-else-if="imageList?.[index]?.fileType == 'audio'" class="mediaPreview audioPreview">
+            <div
+              v-else-if="imageList?.[index]?.fileType == 'audio'"
+              class="mediaPreview audioPreview audioPreviewTrigger"
+              role="button"
+              tabindex="0"
+              @click.stop="previewAudio(imageList?.[index])"
+              @keydown.enter.stop.prevent="previewAudio(imageList?.[index])"
+              @keydown.space.stop.prevent="previewAudio(imageList?.[index])">
               <i-acoustic size="20" />
               <span class="mediaLabel">音频</span>
+              <span class="audioPreviewBadge"><i-play size="12" /></span>
             </div>
             <div v-else-if="imageList?.[index]?.fileType == 'video'" class="mediaPreview videoPreview">
               <video class="uploadPreview" :src="imageList?.[index]!.src" preload="metadata" muted />
@@ -173,6 +195,9 @@ const props = defineProps<{
 const imageList = defineModel<UploadItem[]>({
   default: () => [],
 });
+const emit = defineEmits<{
+  previewAudio: [item: UploadItem];
+}>();
 //分镜选择弹窗
 const storyboardDialogVisible = ref(false);
 const selectedStoryboardIds = ref<number[]>([]);
@@ -195,6 +220,11 @@ function openImagePreview(item?: UploadItem) {
     })),
     index: previewIndex,
   });
+}
+
+function previewAudio(item?: UploadItem) {
+  if (!item || item.fileType !== "audio") return;
+  emit("previewAudio", item);
 }
 
 /** 空占位项，用于首尾帧模式中未设置的槽位 */
@@ -537,8 +567,28 @@ function splitImage(index: number) {
         color: var(--td-text-color-secondary);
       }
       &.audioPreview {
+        position: relative;
         background: var(--td-bg-color-secondarycontainer);
         color: var(--td-brand-color);
+      }
+      &.audioPreviewTrigger {
+        cursor: pointer;
+      }
+      &.audioPreviewTrigger:hover {
+        background: var(--td-brand-color-light);
+      }
+      .audioPreviewBadge {
+        position: absolute;
+        right: 6px;
+        bottom: 6px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        color: #fff;
+        background: var(--td-brand-color);
       }
       &.videoPreview {
         background: #000;

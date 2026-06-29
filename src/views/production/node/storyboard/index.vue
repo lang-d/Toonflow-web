@@ -51,6 +51,7 @@
         @regenerate-single-image="regenerateSingleImage"
         @edit-storyboard-image="editStoryboaryImage"
         @open-storyboard-history="openStoryboardHistory"
+        @preview-reference="previewPromptReference"
         @remove="removeFn"
         @image-load="onImageLoad" />
 
@@ -117,6 +118,12 @@
       @preview-reference="previewPromptReference"
       @confirm="savePromptEditor" />
 
+    <AudioClipDialog
+      v-model:visible="promptAudioPreviewVisible"
+      :src="activePromptAudioReference?.originalSrc || activePromptAudioReference?.src"
+      :name="activePromptAudioReference?.label"
+      mode="preview" />
+
     <storyboardImageCheck
       v-model="promptStoryboardSelectorVisible"
       multiple
@@ -171,6 +178,7 @@ import StoryboardPreviewDialog from "./components/StoryboardPreviewDialog.vue";
 import StoryboardPromptDialog from "./components/StoryboardPromptDialog.vue";
 import StoryboardHistoryDialog from "./components/StoryboardHistoryDialog.vue";
 import storyboardImageCheck from "@/components/storyboardImageCheck.vue";
+import AudioClipDialog from "@/components/AudioClipDialog.vue";
 import { openImageLightbox } from "@/composables/useImageLightbox";
 import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 import { getMediaOriginalUrl, getMediaPathForGeneration, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
@@ -265,6 +273,8 @@ const promptPrimaryNodeId = ref("");
 const promptNodeOptions = ref<{ label: string; value: string }[]>([]);
 const promptFlowSnapshot = shallowRef<{ nodes: NodeType[]; edges: ReturnType<typeof cleanEdges> } | null>(null);
 const promptStoryboardSelectorVisible = ref(false);
+const promptAudioPreviewVisible = ref(false);
+const activePromptAudioReference = ref<ReferenceView | null>(null);
 let promptStoryboardSelectorResolve: ((rows: Storyboard[]) => void) | null = null;
 const collapsedGroupKeys = ref<string[]>([]);
 const imageRatioMap = reactive<Record<string, string>>({});
@@ -425,9 +435,23 @@ function assetTypeLabel(type?: string) {
     scene: $t("workbench.production.node.storyboard.assetScene"),
     tool: $t("workbench.production.node.storyboard.assetTool"),
     clip: $t("workbench.production.node.storyboard.assetClip"),
+    audio: "音频",
     image: $t("workbench.production.node.storyboard.assetLocal"),
   };
   return map[type || ""] || $t("workbench.production.node.storyboard.assetOther");
+}
+
+function getReferenceMediaType(reference: Partial<ReferenceImage> | Partial<StoryboardReference> | any): "image" | "video" | "audio" | "text" {
+  if (reference?.type === "audio" || reference?.parentType === "audio" || reference?.media?.type === "audio") return "audio";
+  if (reference?.type === "video" || reference?.media?.type === "video") return "video";
+  if (reference?.type === "text") return "text";
+  return "image";
+}
+
+function getReferenceDisplayUrl(value: string, type: "image" | "video" | "audio" | "text", purpose: "preview" | "original" = "preview") {
+  if (!value) return "";
+  if (type === "image") return purpose === "original" ? getOriginalImageUrl(value) : getThumbnailImageUrl(value);
+  return value;
 }
 
 function getStoryboardStatus(row: Storyboard, fallback: TaskStatus = "pending") {
@@ -483,19 +507,20 @@ function getStoryboardReferences(row: Storyboard): ReferenceView[] {
       }];
     });
   const localRefs = (row.referenceImages ?? []).map((item) => {
-    const media = normalizeMediaRef((item as any).media ?? item, "image");
+    const type = getReferenceMediaType(item);
+    const media = normalizeMediaRef((item as any).media ?? item, type === "audio" ? "audio" : "image");
     const preview = media ? getMediaPreviewUrl(media) : item.previewUrl || item.url;
     const original = media ? getMediaOriginalUrl(media) : item.url || item.previewUrl;
     return {
       key: `${item.source || "local"}-${item.id}`,
       localId: item.id,
-      source: (item.source || "local") as "local" | "storyboard",
+      source: (item.source || "local") as ReferenceView["source"],
       sourceId: item.sourceId ?? item.id,
-      src: getThumbnailImageUrl(preview || original || ""),
-      originalSrc: getOriginalImageUrl(original || preview || ""),
+      src: getReferenceDisplayUrl(preview || original || "", type),
+      originalSrc: getReferenceDisplayUrl(original || preview || "", type, "original"),
       label: item.name,
       group: assetTypeLabel(item.type ?? "image"),
-      type: "image" as const,
+      type,
     };
   });
   return [...assetRefs, ...localRefs];
@@ -539,7 +564,8 @@ function getAssetReferenceImagesByIds(ids: number[] = []): ReferenceImage[] {
 
 function getLocalReferenceImages(row: Storyboard): ReferenceImage[] {
   return (row.referenceImages ?? []).map((ref) => {
-    const media = normalizeMediaRef((ref as any).media ?? ref, "image");
+    const type = getReferenceMediaType(ref);
+    const media = normalizeMediaRef((ref as any).media ?? ref, type === "audio" ? "audio" : "image");
     return {
     image: media ? getMediaOriginalUrl(media) : ref.url,
     previewImage: media ? getMediaPreviewUrl(media) : ref.previewUrl || ref.url,
@@ -548,7 +574,7 @@ function getLocalReferenceImages(row: Storyboard): ReferenceImage[] {
     source: ref.source,
     sourceId: ref.sourceId ?? ref.id,
     group: assetTypeLabel(ref.type ?? "image"),
-    type: "image" as const,
+    type,
   };
   });
 }
@@ -570,21 +596,23 @@ function getPreviewImageFit(item: Storyboard): "cover" | "contain" {
 }
 
 function normalizeReferenceImage(reference: ReferenceImage): ReferenceImage {
-  const media = normalizeMediaRef(reference.media ?? reference, "image");
+  const type = getReferenceMediaType(reference);
+  const media = normalizeMediaRef(reference.media ?? reference, type === "audio" ? "audio" : "image");
   return {
-    image: media ? getMediaOriginalUrl(media) : getOriginalImageUrl(reference.image),
-    previewImage: media ? getMediaPreviewUrl(media) : getThumbnailImageUrl(reference.previewImage || reference.image),
+    image: media ? getMediaOriginalUrl(media) : getReferenceDisplayUrl(reference.image, type, "original"),
+    previewImage: media ? getMediaPreviewUrl(media) : getReferenceDisplayUrl(reference.previewImage || reference.image, type),
     media,
     label: reference.label,
     source: reference.source,
     sourceId: reference.sourceId,
     group: reference.group,
-    type: reference.type || "image",
+    type,
   };
 }
 
 function referenceImageToView(reference: ReferenceImage, index: number): ReferenceView {
-  const media = normalizeMediaRef(reference.media ?? reference, "image");
+  const type = getReferenceMediaType(reference);
+  const media = normalizeMediaRef(reference.media ?? reference, type === "audio" ? "audio" : "image");
   const preview = media ? getMediaPreviewUrl(media) : reference.previewImage || reference.image;
   const original = media ? getMediaOriginalUrl(media) : reference.image || reference.previewImage || "";
   return {
@@ -593,11 +621,11 @@ function referenceImageToView(reference: ReferenceImage, index: number): Referen
     localId: reference.source !== "asset" ? String(reference.sourceId ?? index) : undefined,
     source: reference.source || "local",
     sourceId: reference.sourceId,
-    src: getThumbnailImageUrl(preview || original),
-    originalSrc: getOriginalImageUrl(original || preview),
+    src: getReferenceDisplayUrl(preview || original, type),
+    originalSrc: getReferenceDisplayUrl(original || preview, type, "original"),
     label: reference.label || $t("workbench.production.editImage.reference", { index: index + 1 }),
     group: reference.group || assetTypeLabel(reference.source === "local" ? "image" : ""),
-    type: reference.type || "image",
+    type,
   };
 }
 
@@ -678,9 +706,15 @@ function loadPromptDraftFromNode(nodeId: string) {
   );
   if (!node) return;
   promptDraft.value = node.data.prompt || "";
-  promptDraftReferences.value = currentPromptTarget.value
+  const incomingReferences = currentPromptTarget.value
     ? enrichLegacyReferences(getIncomingReferences(flow.nodes, flow.edges, node.id), currentPromptTarget.value)
     : getIncomingReferences(flow.nodes, flow.edges, node.id);
+  const audioReferences = currentPromptTarget.value ? getLocalReferenceImages(currentPromptTarget.value).filter((ref) => ref.type === "audio") : [];
+  const incomingKeys = new Set(incomingReferences.map((ref) => `${ref.source || ""}:${ref.sourceId ?? ""}:${ref.image}`));
+  promptDraftReferences.value = [
+    ...incomingReferences,
+    ...audioReferences.filter((ref) => !incomingKeys.has(`${ref.source || ""}:${ref.sourceId ?? ""}:${ref.image}`)),
+  ];
 }
 
 watch(promptPrimaryNodeId, (nodeId) => {
@@ -732,18 +766,32 @@ async function openPromptEditor(row: Storyboard) {
 async function pickAssetsForPrompt() {
   const selected = await openAssetsSelector({ multiple: true, title: $t("common.selectAssets") });
   if (!selected.length) return;
-  selected.forEach((item: any) => {
+  const assetItems = selected.flatMap((item: any) => {
+    if (getReferenceMediaType(item) !== "audio" || !Array.isArray(item.sonAssets) || item.sonAssets.length === 0) {
+      return [item];
+    }
+    return item.sonAssets.map((child: any) => ({
+      ...child,
+      parentName: item.name,
+      parentType: item.type,
+      sourceAssetId: item.id,
+    }));
+  });
+  assetItems.forEach((item: any) => {
     if (promptDraftReferences.value.some((ref) => ref.source === "asset" && ref.sourceId === item.id)) return;
-    const media = normalizeMediaRef(item.media ?? item, "image");
+    const type = getReferenceMediaType(item);
+    const media = normalizeMediaRef(item.media ?? item, type === "audio" ? "audio" : "image");
+    const original = media ? getMediaOriginalUrl(media) : item.originalUrl || item.imageUrl || item.src || item.url;
+    const preview = media ? getMediaPreviewUrl(media) : item.thumbnail || item.thumb || item.src || item.url || original;
     promptDraftReferences.value.push({
-      image: media ? getMediaOriginalUrl(media) : item.originalUrl || item.imageUrl || item.src,
-      previewImage: media ? getMediaPreviewUrl(media) : item.thumbnail || item.thumb || item.src,
+      image: original,
+      previewImage: preview,
       media,
       label: item.name,
       source: "asset",
       sourceId: item.id,
-      group: assetTypeLabel(item.type),
-      type: "image",
+      group: assetTypeLabel(type === "audio" ? "audio" : item.type),
+      type,
     });
   });
 }
@@ -834,6 +882,11 @@ function removePromptReference(ref: ReferenceView) {
 }
 
 function previewPromptReference(ref: ReferenceView) {
+  if (ref.type === "audio") {
+    activePromptAudioReference.value = ref;
+    promptAudioPreviewVisible.value = true;
+    return;
+  }
   openImageLightbox({
     images: [{
       src: ref.src,
@@ -868,21 +921,24 @@ async function saveStoryboardInfo(row: Storyboard) {
 
 function splitStoryboardReferences(references: ReferenceImage[]) {
   const associateAssetsIds = references
-    .filter((ref) => ref.source === "asset" && Number.isFinite(Number(ref.sourceId)))
+    .filter((ref) => ref.source === "asset" && ref.type !== "audio" && Number.isFinite(Number(ref.sourceId)))
     .map((ref) => Number(ref.sourceId));
   const referenceImages: StoryboardReference[] = references
-    .filter((ref) => ref.source !== "asset")
+    .filter((ref) => ref.source !== "asset" || ref.type === "audio")
     .map((ref, index) => {
-      const media = normalizeMediaRef(ref.media ?? ref, "image");
+      const type = getReferenceMediaType(ref);
+      const media = normalizeMediaRef(ref.media ?? ref, type === "audio" ? "audio" : "image");
       return {
       id: String(ref.sourceId ?? `reference-${index}-${Date.now()}`),
-      source: ref.source === "storyboard" ? "storyboard" : "local",
+      source: ref.source === "storyboard" ? "storyboard" : ref.source === "asset" ? "asset" : "local",
       sourceId: ref.sourceId,
-      url: media ? getMediaOriginalUrl(media) : getOriginalImageUrl(ref.image),
-      previewUrl: media ? getMediaPreviewUrl(media) : getThumbnailImageUrl(ref.previewImage || ref.image),
+      url: media ? getMediaOriginalUrl(media) : getReferenceDisplayUrl(ref.image, type, "original"),
+      previewUrl: media ? getMediaPreviewUrl(media) : getReferenceDisplayUrl(ref.previewImage || ref.image, type),
       media,
       name: ref.label || $t("workbench.production.editImage.reference", { index: index + 1 }),
-      type: ref.group === assetTypeLabel("role")
+      type: type === "audio"
+        ? "audio"
+        : ref.group === assetTypeLabel("role")
         ? "role"
         : ref.group === assetTypeLabel("scene")
           ? "scene"
@@ -956,8 +1012,9 @@ function buildPromptFlow(row: Storyboard) {
       }];
     });
 
-  const baseY = primary.position.y - Math.max(0, (promptDraftReferences.value.length - 1) * 70);
-  promptDraftReferences.value.forEach((reference, index) => {
+  const visualReferences = promptDraftReferences.value.filter((reference) => reference.type !== "audio");
+  const baseY = primary.position.y - Math.max(0, (visualReferences.length - 1) * 70);
+  visualReferences.forEach((reference, index) => {
     const uploadId = uuid();
     nodes.push({
       id: uploadId,
@@ -976,7 +1033,7 @@ function buildPromptFlow(row: Storyboard) {
   primary.data = {
     ...primary.data,
     prompt: promptDraft.value,
-    references: [...internalReferences, ...promptDraftReferences.value.map(normalizeReferenceImage)],
+    references: [...internalReferences, ...visualReferences.map(normalizeReferenceImage)],
     isPrimary: true,
   };
 
