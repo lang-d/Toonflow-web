@@ -412,7 +412,19 @@ const handleSelectAll = (checked: boolean | string[]) => {
   const isChecked = Array.isArray(checked) ? checked.length > 0 : checked;
   shotList.value.forEach((shot) => (shot.selected = isChecked));
 };
+
+function isEditableEventTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  if (target.closest("input, textarea, select, button")) return true;
+
+  const editable = target.closest("[contenteditable]");
+  if (editable instanceof HTMLElement && editable.contentEditable !== "false") return true;
+
+  return Boolean(target.closest(".t-input, .t-input__inner, .t-textarea, .t-textarea__inner, .t-select, .t-select-input"));
+}
+
 useEventListener(document, "keydown", (e: KeyboardEvent) => {
+  if (isEditableEventTarget(e.target)) return;
   if (e.code === "Space" && !e.repeat) {
     e.preventDefault();
     const data = shotList.value[currentShotIndex.value];

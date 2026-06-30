@@ -164,6 +164,16 @@ const {
 const isSpacePressed = ref(false);
 let dragOrigin = { x: 0, y: 0, vx: 0, vy: 0 };
 
+function isEditableEventTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  if (target.closest("input, textarea, select, button")) return true;
+
+  const editable = target.closest("[contenteditable]");
+  if (editable instanceof HTMLElement && editable.contentEditable !== "false") return true;
+
+  return Boolean(target.closest(".t-input, .t-input__inner, .t-textarea, .t-textarea__inner, .t-select, .t-select-input"));
+}
+
 function onSpaceMouseDown(e: MouseEvent) {
   if (!isSpacePressed.value || e.button !== 0) return;
   e.stopPropagation();
@@ -182,13 +192,16 @@ function onSpaceMouseUp() {
 }
 
 useEventListener(document, "keydown", (e: KeyboardEvent) => {
+  if (isEditableEventTarget(e.target)) return;
   if (e.code === "Space" && !e.repeat) {
     e.preventDefault();
     isSpacePressed.value = true;
   }
 });
 useEventListener(document, "keyup", (e: KeyboardEvent) => {
-  if (e.code === "Space") isSpacePressed.value = false;
+  if (e.code === "Space") {
+    isSpacePressed.value = false;
+  }
 });
 
 // 拖拽/平移期间降低渲染复杂度，优化性能
