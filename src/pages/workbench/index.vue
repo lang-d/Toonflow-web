@@ -112,6 +112,7 @@ const rightBtnList = ref([
   { type: "btn", path: "/novel", labelKey: "workbench.menu.novel", icon: "i-notebook", nodelOnly: true, needProject: true },
   { type: "btn", path: "/scriptAgent", labelKey: "workbench.menu.scriptAgent", icon: "i-color-filter", nodelOnly: true, needProject: true },
   { type: "btn", path: "/storyAgent", label: "故事创作台", icon: "i-edit-name", needProject: true },
+  { type: "btn", path: "/projectMaterial", labelKey: "workbench.menu.projectMaterial", icon: "i-folder-open", needProject: true },
   { type: "btn", path: "/script", labelKey: "workbench.menu.scriptManage", icon: "i-document-folder", needProject: true },
   { type: "btn", path: "/cornerScape", labelKey: "workbench.menu.cornerScape", icon: "i-peoples-two", needProject: true },
   { type: "btn", path: "/production", labelKey: "workbench.menu.production", icon: "i-carousel-video", needProject: true },

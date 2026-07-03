@@ -145,6 +145,8 @@
       :get-storyboard-index="getStoryboardIndex"
       :get-storyboard-description="getStoryboardDescription"
       :get-storyboard-image-url="getStoryboardImageUrl"
+      :has-storyboard-preview-image="hasStoryboardPreviewImage"
+      :get-storyboard-preview-label="getStoryboardPreviewLabel"
       :get-preview-image-fit="getPreviewImageFit"
       @change-preview="changePreview"
       @open-image-viewer="openImageViewer"
@@ -469,6 +471,17 @@ function isStoryboardCompleted(row: Storyboard) {
 function isStoryboardFailed(row: Storyboard) {
   const status = getStoryboardStatus(row);
   return status === "failed" || status === "cancelled";
+}
+
+function hasStoryboardPreviewImage(row: Storyboard) {
+  return isStoryboardCompleted(row) && Boolean(getStoryboardImageUrl(row, "preview") || getStoryboardImageUrl(row, "display"));
+}
+
+function getStoryboardPreviewLabel(row: Storyboard) {
+  if (isStoryboardCompleted(row)) return $t("workbench.production.node.storyboard.noPreviewImages");
+  if (isStoryboardActive(row)) return $t("generating");
+  if (isStoryboardFailed(row)) return $t("workbench.production.node.storyboard.genFailed");
+  return "等待生成";
 }
 
 function toStoryboardState(status: TaskStatus): Storyboard["state"] {
@@ -1465,11 +1478,14 @@ function onImageLoad(src: string, event: Event) {
 }
 
 function openImageViewer(row: Storyboard) {
-  const group = storyboardGroups.value.find((item) => item.items.some((story) => story.id === row.id));
-  const sourceItems = (group?.items ?? storyboard.value).filter((item) => getStoryboardImageUrl(item, "display") && isStoryboardCompleted(item));
+  if (!hasStoryboardPreviewImage(row)) {
+    window.$message.warning($t("workbench.production.node.storyboard.noPreviewImages"));
+    return;
+  }
+  const sourceItems = previewItems.value.filter(hasStoryboardPreviewImage);
   openImageLightbox({
     images: sourceItems.map((item) => {
-      const src = getStoryboardImageUrl(item, "preview");
+      const src = getStoryboardImageUrl(item, "preview") || getStoryboardImageUrl(item, "display");
       return {
         src: getStoryboardImageUrl(item, "display") || src,
         originalSrc: src,
@@ -1504,7 +1520,7 @@ function confirmDownloadPreview() {
 
 async function downLoadImage() {
   LoadingPlugin(true);
-  const allIds = previewItems.value.map((s) => s.id!);
+  const allIds = previewItems.value.filter(hasStoryboardPreviewImage).map((s) => s.id!);
   if (!allIds.length) {
     window.$message.warning($t("workbench.production.node.storyboard.noPreviewImages"));
     LoadingPlugin(false);

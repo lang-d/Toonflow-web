@@ -1,83 +1,7 @@
 <template>
-  <div class="cornerScape f">
-    <div class="left">
-      <t-card shadow class="card">
-        <template #title>
-          {{ $t("workbench.cornerScape.batchSettings") }}
-          <t-tag size="small" theme="primary" variant="light" style="margin-left: 8px">{{ visibleAssetItems.length }}</t-tag>
-        </template>
-        <t-form labelAlign="top">
-          <t-form-item :label="$t('workbench.cornerScape.quickActions')">
-            <div class="quickActions">
-              <t-button theme="primary" variant="outline" @click="selectAll">{{ $t("workbench.cornerScape.selectAll") }}</t-button>
-              <t-button theme="primary" variant="outline" @click="selectPromptEmpty()">{{ $t("workbench.cornerScape.selectPromptEmpty") }}</t-button>
-              <t-button theme="primary" variant="outline" @click="selectByState('')">{{ $t("workbench.cornerScape.selectUngenerated") }}</t-button>
-              <t-button theme="primary" variant="outline" @click="selectByState('已完成')">
-                {{ $t("workbench.cornerScape.selectGenerated") }}
-              </t-button>
-              <t-button theme="primary" variant="outline" @click="selectByState('生成失败')">{{ $t("workbench.cornerScape.selectFailed") }}</t-button>
-              <t-button theme="primary" variant="outline" @click="toggleSelectAll">{{ $t("workbench.cornerScape.invertSelection") }}</t-button>
-              <t-button theme="primary" variant="outline" @click="clearSelection">{{ $t("workbench.cornerScape.clearSelection") }}</t-button>
-              <t-button theme="primary" variant="outline" @click="openAssetDialog()">
-                <template #icon><i-plus /></template>
-                {{ $t("common.add") }}{{ $t("workbench.menu.assetCenter") }}
-              </t-button>
-              <t-image-viewer
-                :images="previewImages"
-                :imageScale="{ defaultScale: 1.6, min: 0.2, max: 5, step: 0.2 }"
-                :closeOnEscKeydown="true"
-                :closeOnOverlay="true">
-                <template #trigger="{ open }">
-                  <t-button theme="primary" variant="outline" :disabled="!hasPreviewImages" @click="hasPreviewImages && open()">
-                    {{ $t("workbench.cornerScape.batchPreview") }}
-                  </t-button>
-                </template>
-              </t-image-viewer>
-            </div>
-          </t-form-item>
-          <t-form-item :label="$t('workbench.cornerScape.assetTypeFilter')">
-            <t-checkbox-group @change="onChangeFn" v-model="checkboxValue" :options="translatedOptions" class="filterGroup" />
-          </t-form-item>
-
-          <t-form-item :label="$t('workbench.cornerScape.genModel')">
-            <modelSelect v-model="selectValue" :type="`image`" />
-          </t-form-item>
-          <t-form-item :label="$t('workbench.cornerScape.resolution')">
-            <t-select
-              v-model="resolution"
-              :placeholder="$t('workbench.cornerScape.resolutionPh')"
-              :options="[
-                { label: '1K', value: '1K' },
-                { label: '2K', value: '2K' },
-                { label: '4K', value: '4K' },
-              ]"></t-select>
-          </t-form-item>
-          <t-form-item :label="$t('workbench.cornerScape.textPromptInput')">
-            <t-textarea v-model="otherTextPrompt" :placeholder="$t('workbench.cornerScape.textPromptPh')"></t-textarea>
-          </t-form-item>
-          <t-form-item>
-            <div class="btnGap ac">
-              <div class="selectedInfo" v-if="selectedIds.length > 0">
-                <t-tag size="medium" theme="primary" variant="light">
-                  {{ $t("workbench.cornerScape.selectedCount", { count: selectedIds.length }) }}
-                </t-tag>
-              </div>
-              <div class="ac jb" style="width: 100%">
-                <t-button theme="primary" block @click="batchGenerationPrompt">{{ $t("workbench.cornerScape.batchGenerationPrompt") }}</t-button>
-                <t-button theme="primary" style="margin-left: 10px" block @click="batchSelectBindAudio">
-                  {{ $t("workbench.cornerScape.batchBingAudio") }}
-                </t-button>
-              </div>
-              <t-button theme="primary" block @click="batchGenerationImage">
-                {{ $t("workbench.cornerScape.startBatch") }}
-              </t-button>
-            </div>
-          </t-form-item>
-        </t-form>
-      </t-card>
-    </div>
+  <div class="cornerScape">
     <div class="content">
-      <template v-if="visibleAssetItems.length > 0">
+      <template v-if="selectableAssetItems.length > 0">
         <section v-for="group in groupedDataList" :key="group.type" class="assetGroup">
           <div class="groupHeader">
             <span>{{ group.label }}</span>
@@ -85,258 +9,314 @@
           </div>
           <div class="groupGrid">
             <div v-for="item in group.items" :key="item.id" class="assetFamily">
-              <t-card shadow class="card" @click="openDrawer(item)">
-                <div class="imageBox">
-                  <t-checkbox class="selectBox" :checked="selectedIds.includes(item.id)" @click.stop @change="toggleSelect(item.id)" />
-                  <div class="cancelGeneration" @click.stop="cancelGenerationFn(item)" v-if="isImageTaskActive(item)">
-                    <t-tag theme="danger" size="small">
-                      {{ $t("workbench.cornerScape.cancelGeneration") }}
-                    </t-tag>
-                  </div>
-                  <div class="cardActions" @click.stop>
-                    <t-tooltip :content="$t('workbench.production.node.assets.addDerivedAsset')">
-                      <t-button size="small" shape="circle" variant="outline" @click="openAssetDialog(item)">
-                        <template #icon><i-plus /></template>
-                      </t-button>
-                    </t-tooltip>
-                  </div>
-                  <div v-if="isAssetBusy(item)" class="generatingBox">
-                    <t-loading />
-                    <span class="generatingText">
-                      {{ isAudioTaskActive(item) ? $t("workbench.cornerScape.audioState") : $t("workbench.cornerScape.generating") }}
-                    </span>
-                  </div>
-                  <t-popup :content="item.errorReason" v-else-if="isImageTaskFailed(item)">
-                    <t-empty type="fail" :title="$t('workbench.cornerScape.genFailed')" />
-                  </t-popup>
-                  <t-image v-else-if="item.filePath" class="image" :src="item.filePath" fit="contain" :preview="true" :lazy="true">
-                    <template #error>
-                      <t-empty type="fail" :title="$t('workbench.cornerScape.imageError')" />
-                    </template>
-                    <template #overlayContent>
-                      <div class="imageToolsWrap">
-                        <ImageTools :src="item.filePath!" position="br" />
+              <t-popup trigger="hover" placement="top" :show-arrow="true" overlay-class-name="assetDossierPopup">
+                <template #content>
+                  <div class="assetDossier">
+                    <div class="dossierHead">
+                      <strong>{{ item.name || $t("workbench.cornerScape.unnamed") }}</strong>
+                      <div class="dossierTags">
+                        <t-tag size="small" variant="light-outline" theme="warning">{{ getTypeLabel(item.type) }}</t-tag>
+                        <t-tag size="small" :theme="getPromptStateTheme(item)" variant="light">{{ getPromptStateLabel(item) }}</t-tag>
                       </div>
-                    </template>
-                  </t-image>
-                  <t-empty v-else type="maintenance" :title="$t('workbench.cornerScape.waitingGen')" />
-                </div>
-                <div class="infoBox">
-                  <div class="title ac jb">
-                    {{ item.name }}
-                    <t-tag size="small" variant="outline" theme="success" v-if="item.prompt">已生成提示词</t-tag>
-                    <t-tag size="small" variant="outline" theme="danger" v-else>未生成提示词</t-tag>
+                    </div>
+                    <div class="dossierBlock">
+                      <span>{{ $t("workbench.cornerScape.foundationDescribe") }}</span>
+                      <p>{{ getFoundationDisplay(item) || $t("workbench.cornerScape.foundationEmpty") }}</p>
+                    </div>
+                    <div class="dossierBlock">
+                      <span>{{ $t("workbench.cornerScape.foundationPrompt") }}</span>
+                      <p>{{ item.prompt || $t("workbench.cornerScape.promptEmpty") }}</p>
+                    </div>
+                    <div v-if="isFoundationFailed(item) && getFoundationFailureReason(item)" class="dossierBlock dossierFailure">
+                      <span>{{ $t("workbench.task.col.reason") }}</span>
+                      <p>{{ getFoundationFailureReason(item) }}</p>
+                    </div>
+                    <div class="dossierBlock">
+                      <span>{{ $t("workbench.production.node.assets.addDerivedAsset") }}</span>
+                      <div v-if="getDerivedAssets(item).length" class="dossierTagList">
+                        <t-tag v-for="child in getDerivedAssets(item)" :key="child.id" size="small" variant="outline">
+                          {{ child.name || $t("workbench.cornerScape.unnamed") }}
+                        </t-tag>
+                      </div>
+                      <p v-else>{{ $t("workbench.production.node.assets.noDerivedAssets") }}</p>
+                    </div>
+                    <div class="dossierBlock">
+                      <span>{{ $t("workbench.cornerScape.assetsAudioLabel") }}</span>
+                      <div v-if="item.relepedAudio.length" class="dossierTagList">
+                        <t-tag v-for="audio in item.relepedAudio" :key="audio.id" size="small" variant="outline" theme="primary">{{ audio.name }}</t-tag>
+                      </div>
+                      <p v-else>{{ $t("workbench.cornerScape.noAudio") }}</p>
+                    </div>
                   </div>
-                  <div class="meta">
-                    <t-tag size="small" variant="light-outline" theme="warning" class="typeTag">{{ getTypeLabel(item.type) }}</t-tag>
-                    <t-tag size="small" variant="outline" class="stateTag" v-if="item.model">
-                      {{ item.model }}
-                    </t-tag>
-                    <t-tag size="small" variant="outline" v-if="item.resolution">
-                      {{ item.resolution }}
-                    </t-tag>
-                  </div>
-                  <div class="prompt" v-if="item.describe">{{ getTypeLabel(item.type) }}{{ $t("workbench.cornerScape.descriptionSuffix") }}{{ item.describe }}</div>
-                  <div v-if="item.relepedAudio.length" style="margin-top: 6px">
-                    <t-tag v-for="audio in item.relepedAudio" :key="audio.id" size="small" variant="outline" theme="primary">{{ audio.name }}</t-tag>
-                  </div>
-                </div>
-              </t-card>
-              <div v-if="item.sonAssets?.length" class="derivedList">
-                <t-card v-for="child in item.sonAssets" :key="child.id" shadow class="card derivedCard" @click="openDrawer(child)">
+                </template>
+                <t-card shadow class="card assetCard" @click="openDrawer(item)">
                   <div class="imageBox">
-                    <t-checkbox class="selectBox" :checked="selectedIds.includes(child.id)" @click.stop @change="toggleSelect(child.id)" />
-                    <t-tag class="derivedBadge" size="small" theme="warning" variant="light">{{ $t("workbench.production.node.assets.derived") }}</t-tag>
-                    <div class="cancelGeneration" @click.stop="cancelGenerationFn(child)" v-if="isImageTaskActive(child)">
+                    <t-checkbox
+                      class="selectBox"
+                      :model-value="selectedIds.includes(item.id)"
+                      @click.stop
+                      @change="(checked: boolean) => setSelected(item.id, checked)" />
+                    <div class="cancelGeneration" @click.stop="cancelGenerationFn(item)" v-if="isImageTaskActive(item)">
                       <t-tag theme="danger" size="small">
                         {{ $t("workbench.cornerScape.cancelGeneration") }}
                       </t-tag>
                     </div>
-                    <div v-if="isAssetBusy(child)" class="generatingBox">
+                    <div class="cardActions" @click.stop>
+                      <t-tooltip :content="$t('workbench.production.node.assets.addDerivedAsset')">
+                        <t-button size="small" shape="circle" variant="outline" @click="openAssetDialog(item)">
+                          <template #icon><i-plus /></template>
+                        </t-button>
+                      </t-tooltip>
+                    </div>
+                    <div v-if="isAssetBusy(item)" class="generatingBox">
                       <t-loading />
                       <span class="generatingText">
-                        {{ isAudioTaskActive(child) ? $t("workbench.cornerScape.audioState") : $t("workbench.cornerScape.generating") }}
+                        {{ isAudioTaskActive(item) ? $t("workbench.cornerScape.audioState") : $t("workbench.cornerScape.generating") }}
                       </span>
                     </div>
-                    <t-popup :content="child.errorReason" v-else-if="isImageTaskFailed(child)">
+                    <t-popup :content="item.errorReason" v-else-if="isImageTaskFailed(item)">
                       <t-empty type="fail" :title="$t('workbench.cornerScape.genFailed')" />
                     </t-popup>
-                    <t-image v-else-if="child.filePath" class="image" :src="child.filePath" fit="contain" :preview="true" :lazy="true">
+                    <t-image v-else-if="getAssetPreviewUrl(item)" class="image" :src="getAssetPreviewUrl(item)" :fit="getCardImageFit(item)" :preview="false" :lazy="true">
                       <template #error>
                         <t-empty type="fail" :title="$t('workbench.cornerScape.imageError')" />
                       </template>
                       <template #overlayContent>
                         <div class="imageToolsWrap">
-                          <ImageTools :src="child.filePath!" position="br" />
+                          <ImageTools :src="getAssetPreviewUrl(item)" position="br" />
                         </div>
                       </template>
                     </t-image>
                     <t-empty v-else type="maintenance" :title="$t('workbench.cornerScape.waitingGen')" />
                   </div>
                   <div class="infoBox">
-                    <div class="title ac jb">
-                      {{ child.name }}
-                      <t-tag size="small" variant="outline" theme="success" v-if="child.prompt">已生成提示词</t-tag>
-                      <t-tag size="small" variant="outline" theme="danger" v-else>未生成提示词</t-tag>
+                    <div class="title">
+                      <span class="assetNameText">{{ item.name || $t("workbench.cornerScape.unnamed") }}</span>
+                      <t-tag size="small" variant="light" :theme="getPromptStateTheme(item)">{{ getPromptStateLabel(item) }}</t-tag>
                     </div>
                     <div class="meta">
-                      <t-tag size="small" variant="light-outline" theme="warning" class="typeTag">{{ getTypeLabel(child.type) }}</t-tag>
-                      <t-tag size="small" variant="outline" class="stateTag" v-if="child.model">
-                        {{ child.model }}
-                      </t-tag>
-                      <t-tag size="small" variant="outline" v-if="child.resolution">
-                        {{ child.resolution }}
+                      <t-tag size="small" variant="light-outline" theme="warning" class="typeTag">{{ getTypeLabel(item.type) }}</t-tag>
+                      <t-tag size="small" variant="outline" class="stateTag" v-if="item.model">{{ item.model }}</t-tag>
+                      <t-tag size="small" variant="outline" v-if="item.resolution">{{ item.resolution }}</t-tag>
+                      <t-tag size="small" variant="outline" theme="primary" v-if="getDerivedAssets(item).length">
+                        {{ getDerivedAssets(item).length }} {{ $t("workbench.production.node.assets.derived") }}
                       </t-tag>
                     </div>
-                    <div class="prompt" v-if="child.describe">{{ getTypeLabel(child.type) }}{{ $t("workbench.cornerScape.descriptionSuffix") }}{{ child.describe }}</div>
-                    <div v-if="child.relepedAudio.length" style="margin-top: 6px">
-                      <t-tag v-for="audio in child.relepedAudio" :key="audio.id" size="small" variant="outline" theme="primary">{{ audio.name }}</t-tag>
+                    <div class="prompt" v-if="getFoundationDisplay(item)">
+                      {{ getTypeLabel(item.type) }}{{ $t("workbench.cornerScape.descriptionSuffix") }}{{ getFoundationDisplay(item) }}
+                    </div>
+                    <div v-if="item.relepedAudio.length" class="audioChipList">
+                      <t-tag v-for="audio in item.relepedAudio" :key="audio.id" size="small" variant="outline" theme="primary">{{ audio.name }}</t-tag>
                     </div>
                   </div>
                 </t-card>
-              </div>
+              </t-popup>
             </div>
           </div>
         </section>
       </template>
       <t-empty v-else type="empty" :title="$t('workbench.cornerScape.operateScriptFirst')" />
-      <t-drawer :closeBtn="true" closeOnEscKeydown :showOverlay="false" :footer="false" v-model:visible="drawerVisible" size="480px">
+      <t-drawer
+        :closeBtn="true"
+        closeOnEscKeydown
+        :showOverlay="false"
+        :footer="false"
+        placement="right"
+        v-model:visible="drawerVisible"
+        size="min(860px, 82vw)"
+        class="assetDetailDrawer">
         <template #header>
-          <div class="drawerHeader">
-            <span>{{ currentItem?.name }} - {{ $t("workbench.cornerScape.individualConfig") }}</span>
-            <t-tag size="medium" variant="light-outline" theme="warning">
-              {{
-                currentItem?.type === "role"
-                  ? $t("workbench.cornerScape.typeRole")
-                  : currentItem?.type === "scene"
-                    ? $t("workbench.cornerScape.typeScene")
-                    : currentItem?.type === "tool"
-                      ? $t("workbench.cornerScape.typeTool")
-                      : $t("workbench.cornerScape.typeUnknown")
-              }}
-            </t-tag>
+          <div class="drawerHeader drawerHeaderV2">
+            <div class="drawerTitleGroup">
+              <strong>{{ currentItem?.name || $t("workbench.cornerScape.unnamed") }}</strong>
+              <span v-if="currentParentAsset">所属主资产：{{ currentParentAsset.name || $t("workbench.cornerScape.unnamed") }}</span>
+              <span v-else>{{ $t("workbench.cornerScape.individualConfig") }}</span>
+            </div>
+            <div class="drawerHeaderTags">
+              <t-button v-if="currentParentAsset" size="small" variant="outline" @click.stop="openParentAsset">
+                <template #icon><t-icon name="arrow-left" /></template>
+                返回主资产
+              </t-button>
+              <t-tag size="medium" variant="light-outline" theme="warning">{{ getTypeLabel(currentItem?.type) }}</t-tag>
+              <t-tag v-if="currentItem && isDerivedAsset(currentItem)" size="medium" theme="warning" variant="light">
+                {{ $t("workbench.production.node.assets.derived") }}
+              </t-tag>
+              <t-tag v-if="currentItem" size="medium" :theme="getPromptStateTheme(currentItem)" variant="light">
+                {{ getPromptStateLabel(currentItem) }}
+              </t-tag>
+            </div>
           </div>
         </template>
-        <div v-if="currentItem" class="drawerImageBox">
-          <div v-if="isImageTaskActive(currentItem)" class="generatingBox">
-            <t-loading />
-            <span class="generatingText">{{ $t("workbench.cornerScape.generating") }}</span>
-          </div>
-          <t-empty v-else-if="isImageTaskFailed(currentItem)" type="fail" :title="$t('workbench.cornerScape.genFailed')" />
-          <t-image v-else-if="currentItem.filePath" class="image" :src="currentItem.filePath" fit="contain">
-            <template #error>
-              <t-empty type="fail" :title="$t('workbench.cornerScape.imageError')" />
-            </template>
-            <template #overlayContent>
-              <div class="imageToolsWrap show">
-                <ImageTools :src="currentItem.filePath!" position="br" />
-              </div>
-            </template>
-          </t-image>
-          <t-empty v-else type="maintenance" :title="$t('workbench.cornerScape.noImage')" />
-        </div>
-        <t-form v-if="currentItem" labelAlign="top">
-          <t-form-item :label="$t('workbench.cornerScape.history')">
-            <t-loading :loading="historyLoading" style="width: 100%">
-              <div class="historyImageList f">
-                <div
-                  v-for="item in currentItem.historyImages"
-                  :key="item.id"
-                  class="historyImageItem"
-                  :class="{ selected: selectedHistoryId === item.id }"
-                  @click.stop="toggleHistorySelect(item.id)">
-                  <t-image :src="item.filePath" :style="{ width: '100px', minWidth: '100px', height: '100px' }" :lazy="true" fit="contain" />
+        <div v-if="currentItem" class="detailEditor">
+          <section class="detailHero">
+            <div class="detailMediaColumn">
+              <div class="drawerImageBox">
+                <div v-if="isImageTaskActive(currentItem)" class="generatingBox">
+                  <t-loading />
+                  <span class="generatingText">{{ $t("workbench.cornerScape.generating") }}</span>
                 </div>
-                <t-empty v-if="!currentItem.historyImages.length && !historyLoading" size="small" />
+                <t-empty v-else-if="isImageTaskFailed(currentItem)" type="fail" :title="$t('workbench.cornerScape.genFailed')" />
+                <t-image v-else-if="currentItem.filePath" class="image" :src="currentItem.filePath" fit="contain" :preview="false">
+                  <template #error>
+                    <t-empty type="fail" :title="$t('workbench.cornerScape.imageError')" />
+                  </template>
+                  <template #overlayContent>
+                    <div class="imageToolsWrap show">
+                      <ImageTools :src="currentItem.filePath!" position="br" />
+                    </div>
+                  </template>
+                </t-image>
+                <t-empty v-else type="maintenance" :title="$t('workbench.cornerScape.noImage')" />
               </div>
-            </t-loading>
-          </t-form-item>
-          <t-form-item :label="$t('workbench.cornerScape.genModel')">
-            <modelSelect v-model="selectValue" :type="`image`" />
-          </t-form-item>
-          <t-form-item :label="$t('workbench.cornerScape.resolution')">
-            <t-select v-model="editForm.resolution" :placeholder="$t('workbench.cornerScape.resolutionPh')" :options="resolutionOptions" />
-          </t-form-item>
-          <t-form-item :label="$t('workbench.cornerScape.promptLabel')">
+              <div class="detailHistoryStrip">
+                <div class="detailSectionTitle">{{ $t("workbench.cornerScape.history") }}</div>
+                <t-loading :loading="historyLoading" style="width: 100%">
+                  <div class="historyImageList f">
+                    <div
+                      v-for="item in currentItem.historyImages"
+                      :key="item.id"
+                      class="historyImageItem"
+                      :class="{ selected: selectedHistoryId === item.id }"
+                      @click.stop="toggleHistorySelect(item.id)">
+                      <t-image :src="item.filePath" :style="{ width: '76px', minWidth: '76px', height: '76px' }" :lazy="true" fit="contain" />
+                    </div>
+                    <t-empty v-if="!currentItem.historyImages.length && !historyLoading" size="small" />
+                  </div>
+                </t-loading>
+              </div>
+            </div>
+            <t-form class="detailIdentityForm" labelAlign="top">
+              <t-form-item :label="$t('workbench.production.node.assets.assetName')">
+                <t-input v-model="editForm.name" :placeholder="$t('workbench.assets.add.namePh')" />
+              </t-form-item>
+              <div class="detailFormGrid">
+                <t-form-item :label="$t('workbench.cornerScape.genModel')">
+                  <modelSelect v-model="detailModelValue" :type="`image`" />
+                </t-form-item>
+                <t-form-item :label="$t('workbench.cornerScape.resolution')">
+                  <t-select v-model="editForm.resolution" :placeholder="$t('workbench.cornerScape.resolutionPh')" :options="resolutionOptions" />
+                </t-form-item>
+              </div>
+              <div class="detailTags">
+                <t-tag size="small" variant="light-outline" theme="warning">{{ getTypeLabel(currentItem.type) }}</t-tag>
+                <t-tag v-if="isDerivedAsset(currentItem)" size="small" theme="warning" variant="light">{{ $t("workbench.production.node.assets.derived") }}</t-tag>
+                <t-tag size="small" :theme="getPromptStateTheme(currentItem)" variant="light">{{ getPromptStateLabel(currentItem) }}</t-tag>
+              </div>
+            </t-form>
+          </section>
+
+          <section class="detailSection">
+            <div class="detailSectionTitle">{{ $t("workbench.cornerScape.foundationDescribe") }}</div>
+            <t-textarea v-model="editForm.foundationText" :placeholder="$t('workbench.assets.add.describePh')" :autosize="{ minRows: 4, maxRows: 8 }" />
+            <div v-if="currentItem && getFoundationFailureReason(currentItem)" class="foundationErrorReason">{{ getFoundationFailureReason(currentItem) }}</div>
+          </section>
+
+          <section class="detailSection">
+            <div class="detailSectionTitle">{{ $t("workbench.cornerScape.foundationPrompt") }}</div>
             <t-loading style="width: 100%" :loading="isPromptTaskActive(currentItem)">
               <t-textarea
                 v-model="editForm.prompt"
                 :placeholder="$t('workbench.cornerScape.promptPh')"
-                :autosize="{ minRows: 4, maxRows: 10 }"
-                :disabled="polishing"
-                @blur="savePromptOnBlur" />
+                :autosize="{ minRows: 5, maxRows: 10 }"
+                :disabled="polishing" />
             </t-loading>
-          </t-form-item>
-          <t-form-item :label="$t('workbench.cornerScape.assetsAudioLabel')">
-            <div>
-              <div>
-                <t-button size="small" theme="primary" variant="outline" @click="selectAudio">
-                  <template #icon><i-plus /></template>
-                  {{ $t("workbench.cornerScape.selectAudio") }}
-                </t-button>
-              </div>
-              <div class="audioList" v-if="editForm.relepedAudio.length">
-                <div v-for="audio in editForm.relepedAudio" :key="audio.id" class="audioBindItem">
-                  <div class="audioBindInfo">
-                    <i-volume-notice size="16" />
-                    <span>{{ audio.name }}</span>
-                  </div>
-                  <div class="audioBindActions">
-                    <t-button
-                      size="small"
-                      variant="text"
-                      :loading="isAudioActionLoading(audio, 'preview')"
-                      :disabled="!canResolveAudio(audio)"
-                      @click="openAudioClipDialog(audio, 'preview')">
-                      试听
-                    </t-button>
-                    <t-button
-                      size="small"
-                      variant="text"
-                      :loading="isAudioActionLoading(audio, 'clip')"
-                      :disabled="!canResolveAudio(audio)"
-                      @click="openAudioClipDialog(audio, 'clip')">
-                      截取
-                    </t-button>
-                    <t-button size="small" variant="text" theme="danger" @click="removeAudio(audio.id)">
-                      解绑
-                    </t-button>
-                  </div>
-                </div>
-              </div>
-              <div v-else class="assets-empty">{{ $t("workbench.cornerScape.noAudio") }}</div>
-            </div>
-          </t-form-item>
-          <t-form-item>
-            <div class="drawerActions">
-              <t-button theme="default" variant="outline" :loading="uploadLoading" @click="uploadLocalAssetImage">
-                <template #icon><i-upload /></template>
-                {{ $t("workbench.production.generatedNode.localUpload") }}
-              </t-button>
-              <t-button theme="default" variant="outline" @click="openAssetDialog(currentItem)">
+          </section>
+
+          <section class="detailSection">
+            <div class="detailSectionTitle detailSectionTitleAction">
+              <span>{{ $t("workbench.production.node.assets.addDerivedAsset") }}</span>
+              <t-button size="small" variant="outline" @click="openAssetDialog(currentItem)">
                 <template #icon><i-plus /></template>
                 {{ $t("workbench.production.node.assets.addDerivedAsset") }}
               </t-button>
-              <t-button
-                theme="default"
-                variant="outline"
-                :loading="polishing"
-                @click="polishPrompts"
-                :disabled="isPromptTaskActive(currentItem)">
-                <template #icon><t-icon name="edit" /></template>
-                {{ $t("workbench.cornerScape.aiPolish") }}
-              </t-button>
-              <t-button theme="primary" @click="regenerateItem" :disabled="isImageTaskActive(currentItem)">
-                <template #icon><t-icon name="refresh" /></template>
-                {{ $t("workbench.cornerScape.regenerate") }}
+            </div>
+            <button v-if="currentParentAsset" type="button" class="parentAssetItem" @click="openParentAsset">
+              <div class="derivedEditThumb">
+                <t-image v-if="getAssetPreviewUrl(currentParentAsset)" :src="getAssetPreviewUrl(currentParentAsset)" fit="cover" :lazy="true" />
+                <t-empty v-else size="small" />
+              </div>
+              <div class="derivedEditInfo">
+                <strong>{{ currentParentAsset.name || $t("workbench.cornerScape.unnamed") }}</strong>
+                <span>点击返回主资产，继续查看同级衍生资产</span>
+              </div>
+              <t-tag size="small" theme="primary" variant="light">主资产</t-tag>
+            </button>
+            <div v-if="getDerivedAssets(currentItem).length" class="derivedEditList">
+              <button v-for="child in getDerivedAssets(currentItem)" :key="child.id" type="button" class="derivedEditItem" @click="openDrawer(child)">
+                <div class="derivedEditThumb">
+                  <t-image v-if="getAssetPreviewUrl(child)" :src="getAssetPreviewUrl(child)" fit="cover" :lazy="true" />
+                  <t-empty v-else size="small" />
+                </div>
+                <div class="derivedEditInfo">
+                  <strong>{{ child.name || $t("workbench.cornerScape.unnamed") }}</strong>
+                  <span>{{ getFoundationDisplay(child) || child.prompt || $t("workbench.cornerScape.foundationEmpty") }}</span>
+                </div>
+                <t-tag size="small" theme="warning" variant="light">{{ $t("workbench.production.node.assets.derived") }}</t-tag>
+              </button>
+            </div>
+            <div v-else class="assets-empty">{{ $t("workbench.production.node.assets.noDerivedAssets") }}</div>
+          </section>
+
+          <section class="detailSection">
+            <div class="detailSectionTitle detailSectionTitleAction">
+              <span>{{ $t("workbench.cornerScape.assetsAudioLabel") }}</span>
+              <t-button size="small" theme="primary" variant="outline" @click="selectAudio">
+                <template #icon><i-plus /></template>
+                {{ $t("workbench.cornerScape.selectAudio") }}
               </t-button>
             </div>
-          </t-form-item>
-        </t-form>
+            <div class="audioList" v-if="editForm.relepedAudio.length">
+              <div v-for="audio in editForm.relepedAudio" :key="audio.id" class="audioBindItem">
+                <div class="audioBindInfo">
+                  <i-volume-notice size="16" />
+                  <span>{{ audio.name }}</span>
+                </div>
+                <div class="audioBindActions">
+                  <t-button
+                    size="small"
+                    variant="text"
+                    :loading="isAudioActionLoading(audio, 'preview')"
+                    :disabled="!canResolveAudio(audio)"
+                    @click="openAudioClipDialog(audio, 'preview')">
+                    试听
+                  </t-button>
+                  <t-button
+                    size="small"
+                    variant="text"
+                    :loading="isAudioActionLoading(audio, 'clip')"
+                    :disabled="!canResolveAudio(audio)"
+                    @click="openAudioClipDialog(audio, 'clip')">
+                    截取
+                  </t-button>
+                  <t-button size="small" variant="text" theme="danger" @click="removeAudio(audio.id)">
+                    解绑
+                  </t-button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="assets-empty">{{ $t("workbench.cornerScape.noAudio") }}</div>
+          </section>
+
+          <div class="detailActionBar">
+            <t-button theme="primary" :loading="assetSaving" @click="saveAssetProfile">{{ $t("common.save") }}</t-button>
+            <t-button theme="default" variant="outline" :loading="uploadLoading" @click="uploadLocalAssetImage">
+              <template #icon><i-upload /></template>
+              {{ $t("workbench.production.generatedNode.localUpload") }}
+            </t-button>
+            <t-button theme="default" variant="outline" :loading="polishing" @click="polishPrompts" :disabled="isPromptTaskActive(currentItem)">
+              <template #icon><t-icon name="edit" /></template>
+              {{ $t("workbench.cornerScape.aiPolish") }}
+            </t-button>
+            <t-button theme="primary" variant="outline" @click="regenerateItem" :disabled="isImageTaskActive(currentItem)">
+              <template #icon><t-icon name="refresh" /></template>
+              {{ $t("workbench.cornerScape.regenerate") }}
+            </t-button>
+          </div>
+        </div>
       </t-drawer>
       <t-dialog
         v-model:visible="assetDialogVisible"
-        :header="assetDialogParent ? $t('workbench.production.node.assets.addDerivedAsset') : `${$t('common.add')}${$t('workbench.menu.assetCenter')}`"
+        :header="assetDialogParent ? $t('workbench.production.node.assets.addDerivedAsset') : `${$t('workbench.assets.addPrefix')}${$t('workbench.menu.assetCenter')}`"
         width="520px"
         :confirm-loading="assetDialogSubmitting"
         :confirm-btn="$t('common.confirm')"
@@ -366,9 +346,84 @@
         :title="audioClipMode === 'clip' ? '截取音频片段' : '试听音频'"
         :name="activeAudio?.name"
         :mode="audioClipMode"
-        save-label="截取并绑定"
+        save-label="Save and Bind"
         @save="saveAudioClipAsBoundAsset" />
     </div>
+    <Teleport to="body">
+      <aside class="batchDock" :class="{ expanded: batchDockOpen }" :title="$t('workbench.cornerScape.batchSettings')">
+        <button v-if="!batchDockOpen" type="button" class="dockSideTab" @click="batchDockOpen = true">
+          <span class="sideIcon"><t-icon name="setting" /></span>
+          <strong>{{ selectedIds.length || selectableAssetItems.length }}</strong>
+        </button>
+        <div v-else class="dockPanel">
+          <div class="dockHeader">
+            <div>
+              <strong>{{ $t("workbench.cornerScape.batchSettings") }}</strong>
+              <p>{{ $t("workbench.cornerScape.selectedCount", { count: selectedIds.length }) }}</p>
+            </div>
+            <div class="dockHeaderActions">
+              <t-tag size="small" theme="primary" variant="light">{{ selectableAssetItems.length }}</t-tag>
+              <button type="button" class="dockClose" @click="batchDockOpen = false">
+                <t-icon name="close" />
+              </button>
+            </div>
+          </div>
+          <div class="dockBody">
+            <section class="dockSection">
+              <div class="dockSectionTitle">{{ $t("workbench.cornerScape.quickActions") }}</div>
+              <div class="dockQuickActions">
+                <t-button size="small" theme="primary" variant="outline" @click="selectAll">{{ $t("workbench.cornerScape.selectAll") }}</t-button>
+                <t-button size="small" theme="primary" variant="outline" @click="selectPromptEmpty()">{{ $t("workbench.cornerScape.selectPromptEmpty") }}</t-button>
+                <t-button size="small" theme="primary" variant="outline" @click="selectFoundationMissing">{{ $t("workbench.cornerScape.selectUngenerated") }}</t-button>
+                <t-button size="small" theme="primary" variant="outline" @click="toggleSelectAll">{{ $t("workbench.cornerScape.invertSelection") }}</t-button>
+                <t-button size="small" theme="default" variant="outline" @click="clearSelection">{{ $t("workbench.cornerScape.clearSelection") }}</t-button>
+                <t-button size="small" theme="default" variant="outline" @click="openAssetDialog()">
+                  <template #icon><i-plus /></template>
+                  {{ $t("workbench.assets.addPrefix") }}{{ $t("workbench.menu.assetCenter") }}
+                </t-button>
+              </div>
+            </section>
+            <section class="dockSection">
+              <div class="dockSectionTitle">{{ $t("workbench.cornerScape.assetTypeFilter") }}</div>
+              <t-checkbox-group @change="onChangeFn" v-model="checkboxValue" :options="translatedOptions" class="filterGroup" />
+            </section>
+            <section class="dockSection">
+              <div class="dockSectionTitle">{{ $t("workbench.cornerScape.genModel") }}</div>
+              <div class="dockTwoCol">
+                <modelSelect v-model="batchModelValue" :type="`image`" :popup-props="dockSelectPopupProps" />
+                <t-select
+                  v-model="resolution"
+                  :placeholder="$t('workbench.cornerScape.resolutionPh')"
+                  :options="resolutionOptions"
+                  :popup-props="dockSelectPopupProps" />
+              </div>
+              <t-textarea
+                class="dockTextarea"
+                v-model="otherTextPrompt"
+                :placeholder="$t('workbench.cornerScape.foundationInstructionPh')"
+                :autosize="{ minRows: 3, maxRows: 5 }" />
+              <t-checkbox v-model="foundationOverwrite">{{ $t("workbench.cornerScape.foundationOverwrite") }}</t-checkbox>
+            </section>
+          </div>
+          <div class="dockFooter">
+            <t-button theme="primary" block @click="batchGenerationPrompt">{{ $t("workbench.cornerScape.generateFoundation") }}</t-button>
+            <div class="dockFooterGrid">
+              <t-button theme="primary" variant="outline" @click="batchSelectBindAudio">{{ $t("workbench.cornerScape.batchBingAudio") }}</t-button>
+              <t-button theme="primary" variant="outline" @click="batchGenerationImage">{{ $t("workbench.cornerScape.startBatch") }}</t-button>
+            </div>
+            <t-button block theme="default" variant="outline" :disabled="!hasPreviewImages" @click="openBatchPreview">
+              {{ $t("workbench.cornerScape.batchPreview") }}
+            </t-button>
+          </div>
+        </div>
+      </aside>
+    </Teleport>
+    <t-image-viewer
+      v-model="batchPreviewVisible"
+      :images="previewImages"
+      :imageScale="{ defaultScale: 1.6, min: 0.2, max: 5, step: 0.2 }"
+      :closeOnEscKeydown="true"
+      :closeOnOverlay="true" />
   </div>
 </template>
 
@@ -384,6 +439,7 @@ import { normalizeAssetImageType } from "@/utils/assetImageTask";
 import type { MediaRef } from "@/types/api";
 import { useFileDialog } from "@vueuse/core";
 import AudioClipDialog from "@/components/AudioClipDialog.vue";
+import { generateAssetFoundation } from "@/api/assetFoundation";
 
 const { otherSetting } = storeToRefs(settingStore());
 interface Image {
@@ -406,6 +462,9 @@ interface DataItem {
   model: string;
   resolution: string;
   describe: string;
+  foundationText: string;
+  foundationStatus: string;
+  foundationErrorReason: string;
   promptState: string;
   historyImages: Image[];
   errorReason: string;
@@ -442,9 +501,19 @@ interface AssetGroup {
 
 const checkboxValue = ref<string[]>([]);
 const { project } = storeToRefs(projectStore());
-const selectValue = ref(project.value?.imageModel ?? "");
+const batchModelValue = ref(project.value?.imageModel ?? "");
+const detailModelValue = ref("");
 const resolution = ref("1K");
 const otherTextPrompt = ref("");
+const foundationOverwrite = ref(false);
+const batchDockOpen = ref(false);
+const batchPreviewVisible = ref(false);
+const assetSaving = ref(false);
+const dockSelectPopupProps = {
+  attach: "body",
+  zIndex: 7800,
+  overlayClassName: "cornerScapeDockSelectPopup",
+};
 const resolutionOptions = [
   { label: "1K", value: "1K" },
   { label: "2K", value: "2K" },
@@ -494,6 +563,8 @@ let audioAssetProjectId: number | null = null;
 let audioAssetIndexComplete = false;
 let audioAssetLoadPromise: Promise<Map<number, BoundAudio>> | null = null;
 
+const selectedIds = ref<number[]>([]);
+const activeAssetId = ref<number | null>(null);
 const visibleAssetItems = computed(() => getVisibleAssetItems());
 const groupedDataList = computed<AssetGroup[]>(() => {
   const groups: AssetGroup[] = [
@@ -507,12 +578,14 @@ const groupedDataList = computed<AssetGroup[]>(() => {
     const type = normalizeAssetType(item.type);
     const group = groupMap.get(type) ?? groupMap.get("unknown")!;
     group.items.push(item);
-    group.count += 1 + (item.sonAssets?.length ?? 0);
+    group.count += 1;
   });
   return groups.filter((group) => group.items.length > 0);
 });
+const selectableAssetItems = computed(() => groupedDataList.value.flatMap((group) => group.items));
+const selectedAssetItems = computed(() => selectedIds.value.map((id) => findAssetById(id)).filter((item): item is DataItem => Boolean(item)));
 
-// 用于取消进行中的生成请求
+// 鐢ㄤ簬鍙栨秷杩涜涓殑鐢熸垚璇锋眰
 let abortController: AbortController | null = null;
 
 function createAbortController() {
@@ -551,6 +624,20 @@ function getTypeLabel(type?: string | null) {
 
 function isAssetBusy(item: DataItem) {
   return isImageTaskActive(item) || isPromptTaskActive(item) || isAudioTaskActive(item);
+}
+
+function isDerivedAsset(item: DataItem) {
+  if (!item.assetsId) return false;
+  return Number(item.assetsId) !== Number(item.id);
+}
+
+function getParentAsset(item: DataItem) {
+  if (!item.assetsId || Number(item.assetsId) === Number(item.id)) return null;
+  return findAssetById(Number(item.assetsId));
+}
+
+function getDerivedAssets(item: DataItem) {
+  return item.sonAssets ?? [];
 }
 
 function isActiveTaskStatus(status: ReturnType<typeof normalizeTaskStatus>) {
@@ -603,10 +690,16 @@ function normalizeBoundAudio(row: any): BoundAudio {
 function normalizeDataItem(row: any): DataItem {
   const media = normalizeMediaRef(row?.media ?? row, "image");
   const normalized = attachLegacyMediaFields({ ...row }, media) as DataItem;
-  normalized.assetsId = row?.assetsId ?? row?.assetId ?? null;
+  normalized.id = Number(row?.id);
+  const parentId = row?.assetsId ?? row?.assetId ?? null;
+  normalized.assetsId = parentId == null || parentId === "" ? null : Number(parentId);
+  normalized.describe = row?.describe ?? row?.desc ?? normalized.describe ?? "";
+  normalized.foundationText = row?.foundationText ?? normalized.foundationText ?? "";
+  normalized.foundationStatus = row?.foundationStatus ?? row?.foundationState ?? normalized.foundationStatus ?? "";
+  normalized.foundationErrorReason = row?.foundationErrorReason ?? normalized.foundationErrorReason ?? "";
   normalized.historyImages = normalizeHistoryImages(normalized);
   normalized.relepedAudio = Array.isArray(row?.relepedAudio) ? row.relepedAudio.map(normalizeBoundAudio) : [];
-  normalized.sonAssets = Array.isArray(row?.sonAssets) ? row.sonAssets.map((item: any) => normalizeDataItem(item)) : [];
+  normalized.sonAssets = getRawDerivedRows(row).map((item: any) => normalizeDataItem(item));
   normalized.errorReason = normalized.errorReason ?? "";
   normalized.promptErrorReason = normalized.promptErrorReason ?? "";
   normalized.promptState = normalized.promptState ?? "";
@@ -615,28 +708,80 @@ function normalizeDataItem(row: any): DataItem {
   return normalized;
 }
 
-function normalizeAssetTree(rows: any[]): DataItem[] {
-  const normalizedRows = (rows ?? []).map(normalizeDataItem);
-  const byId = new Map(normalizedRows.map((item) => [item.id, item]));
+function getResponseRows(payload: any): any[] {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.list)) return payload.list;
+  if (Array.isArray(payload?.assets)) return payload.assets;
+  if (Array.isArray(payload?.rows)) return payload.rows;
+  return [];
+}
+
+function getRawDerivedRows(row: any): any[] {
+  return [row?.sonAssets, row?.derive, row?.derivedAssets, row?.deriveAssets, row?.children, row?.childAssets].find(Array.isArray) ?? [];
+}
+
+function flattenRawAssetRows(rows: any) {
+  const result: any[] = [];
+  const visit = (row: any, parentId?: number) => {
+    if (!row) return;
+    const rowId = Number(row.id);
+    const inheritedParentId = parentId != null && !row.assetsId && !row.assetId ? parentId : undefined;
+    const children = getRawDerivedRows(row);
+    result.push({
+      ...row,
+      assetsId: inheritedParentId ?? row.assetsId,
+      assetId: inheritedParentId ?? row.assetId,
+      sonAssets: [],
+      derive: [],
+      derivedAssets: [],
+      deriveAssets: [],
+      children: [],
+      childAssets: [],
+    });
+    children.forEach((child) => visit(child, Number.isFinite(rowId) ? rowId : parentId));
+  };
+  getResponseRows(rows).forEach((row) => visit(row));
+  return result;
+}
+
+function normalizeAssetTree(rows: any): DataItem[] {
+  const byId = new Map<number, DataItem>();
+  const orderedIds: number[] = [];
+  flattenRawAssetRows(rows).forEach((row) => {
+    const item = normalizeDataItem(row);
+    if (!Number.isFinite(item.id)) return;
+    const existing = byId.get(item.id);
+    if (existing) {
+      Object.assign(existing, item);
+      existing.sonAssets = [];
+      return;
+    }
+    item.sonAssets = [];
+    byId.set(item.id, item);
+    orderedIds.push(item.id);
+  });
   const childIds = new Set<number>();
 
-  normalizedRows.forEach((item) => {
-    const parentId = item.assetsId;
-    if (!parentId || parentId === item.id) return;
+  orderedIds.forEach((id) => {
+    const item = byId.get(id);
+    if (!item) return;
+    const parentId = Number(item.assetsId);
+    if (!Number.isFinite(parentId) || parentId === item.id) return;
     const parent = byId.get(parentId);
     if (!parent) return;
-    parent.sonAssets ||= [];
-    if (!parent.sonAssets.some((child) => child.id === item.id)) {
-      parent.sonAssets.push(item);
+    const children = (parent.sonAssets ??= []);
+    if (!children.some((child) => child.id === item.id)) {
+      children.push(item);
     }
     childIds.add(item.id);
   });
 
-  return normalizedRows.filter((item) => !childIds.has(item.id));
+  return orderedIds.map((id) => byId.get(id)).filter((item): item is DataItem => Boolean(item && !childIds.has(item.id)));
 }
 
 function flattenAssetItems(items = dataList.value): DataItem[] {
-  return items.flatMap((item) => [item, ...(item.sonAssets ?? [])]);
+  return items.flatMap((item) => [item, ...flattenAssetItems(item.sonAssets ?? [])]);
 }
 
 function getVisibleAssetItems() {
@@ -646,7 +791,7 @@ function getVisibleAssetItems() {
 function findInAssetTree(items: DataItem[], id: number): DataItem | null {
   for (const item of items) {
     if (item.id === id) return item;
-    const child = (item.sonAssets ?? []).find((row) => row.id === id);
+    const child = findInAssetTree(item.sonAssets ?? [], id);
     if (child) return child;
   }
   return null;
@@ -664,6 +809,7 @@ function syncEditFormFromItem(item: DataItem) {
   editForm.resolution = item.resolution || "";
   editForm.prompt = item.prompt || "";
   editForm.describe = item.describe || "";
+  editForm.foundationText = getFoundationDisplay(item);
   editForm.promptState = item.promptState || "";
   editForm.relepedAudio = item.relepedAudio ?? [];
 }
@@ -693,7 +839,7 @@ async function getFilteredData() {
     syncSelectedIdsWithData();
     syncRuntimeTasks();
   } catch (error) {
-    console.error("加载资产数据失败:", error);
+    console.error("鍔犺浇璧勪骇鏁版嵁澶辫触:", error);
     dataList.value = [];
     selectedIds.value = [];
   } finally {
@@ -701,15 +847,16 @@ async function getFilteredData() {
   }
 }
 
-const selectedIds = ref<number[]>([]);
-
 function syncSelectedIdsWithData() {
-  const visibleIds = new Set(visibleAssetItems.value.map((item) => item.id));
+  const visibleIds = new Set(selectableAssetItems.value.map((item) => item.id));
   selectedIds.value = Array.from(new Set(selectedIds.value)).filter((id) => visibleIds.has(id));
+  if (!activeAssetId.value || !visibleIds.has(activeAssetId.value)) {
+    activeAssetId.value = selectableAssetItems.value[0]?.id ?? null;
+  }
 }
 
 const previewImages = computed((): string[] => {
-  const selectedImageList = visibleAssetItems.value
+  const selectedImageList = selectedAssetItems.value
     .filter((item) => selectedIds.value.includes(item.id))
     .map((item) => getMediaDisplayUrls(item, "image").originalUrl)
     .filter(Boolean);
@@ -718,23 +865,94 @@ const previewImages = computed((): string[] => {
     return selectedImageList;
   }
 
-  return visibleAssetItems.value.map((item) => getMediaDisplayUrls(item, "image").originalUrl).filter(Boolean);
+  return selectableAssetItems.value.map((item) => getMediaDisplayUrls(item, "image").originalUrl).filter(Boolean);
 });
 
 const hasPreviewImages = computed(() => previewImages.value.length > 0);
 
-const toggleSelect = (id: number) => {
-  const idx = selectedIds.value.indexOf(id);
-  if (idx === -1) selectedIds.value.push(id);
-  else selectedIds.value.splice(idx, 1);
-};
+function openBatchPreview() {
+  if (!hasPreviewImages.value) return;
+  batchPreviewVisible.value = true;
+}
 
-const selectByState = (state: string) => {
-  selectedIds.value = visibleAssetItems.value.filter((item) => (state === "" ? !item.state : item.state === state)).map((item) => item.id);
-};
-//全选提示词为空的
+function setSelected(id: number, checked: boolean) {
+  activeAssetId.value = id;
+  const idx = selectedIds.value.indexOf(id);
+  if (checked && idx === -1) selectedIds.value = [...selectedIds.value, id];
+  if (!checked && idx !== -1) selectedIds.value = selectedIds.value.filter((item) => item !== id);
+}
+
+function focusAsset(item: DataItem) {
+  activeAssetId.value = item.id;
+}
+
+function getAssetPreviewUrl(item: DataItem) {
+  return getMediaDisplayUrls(item, "image").previewUrl || getMediaDisplayUrls(item, "image").originalUrl || item.filePath || "";
+}
+
+function getCardImageFit(_item: DataItem) {
+  return "cover" as const;
+}
+
+function getFoundationDisplay(item?: DataItem | null) {
+  return String(item?.foundationText || item?.describe || "").trim();
+}
+
+function getFoundationTaskStatus(item: DataItem) {
+  const rawStatus = String(item.foundationStatus || "").trim();
+  return normalizeTaskStatus(rawStatus, "pending");
+}
+
+function getPromptTaskStatus(item: DataItem) {
+  return normalizeTaskStatus(item.promptState, "pending");
+}
+
+function isFoundationReady(item: DataItem) {
+  return getFoundationTaskStatus(item) === "completed" && String(item.foundationText || "").trim().length > 0;
+}
+
+function isFoundationFailed(item: DataItem) {
+  const foundationStatus = getFoundationTaskStatus(item);
+  const promptStatus = getPromptTaskStatus(item);
+  return foundationStatus === "failed" || foundationStatus === "cancelled" || promptStatus === "failed" || promptStatus === "cancelled";
+}
+
+function getFoundationFailureReason(item?: DataItem | null) {
+  if (!item) return "";
+  return String(item.foundationErrorReason || item.promptErrorReason || "").trim();
+}
+
+function getPromptStateLabel(item: DataItem) {
+  const status = getFoundationTaskStatus(item);
+  if (status === "processing" || status === "queued" || status === "submitting") return $t("workbench.cornerScape.generating");
+  if (isFoundationFailed(item)) return $t("workbench.cornerScape.genFailed");
+  if (isFoundationReady(item)) return $t("workbench.cornerScape.foundationReady");
+  if (item.prompt) return $t("workbench.cornerScape.promptReady");
+  return $t("workbench.cornerScape.foundationMissing");
+}
+
+function getPromptStateTheme(item: DataItem): "default" | "primary" | "success" | "warning" | "danger" {
+  const status = getFoundationTaskStatus(item);
+  if (status === "processing" || status === "queued" || status === "submitting") return "primary";
+  if (isFoundationFailed(item)) return "danger";
+  if (isFoundationReady(item)) return "success";
+  if (item.prompt) return "warning";
+  return "default";
+}
+
+function selectFoundationMissing() {
+  const ids = selectableAssetItems.value.filter((item) => !isFoundationReady(item)).map((item) => item.id);
+  if (ids.length === 0) {
+    window.$message.warning($t("workbench.cornerScape.foundationMissing"));
+    return;
+  }
+  selectedIds.value = ids;
+  window.$message.success($t("workbench.cornerScape.selectedCount", { count: selectedIds.value.length }));
+}
+
+// Select assets whose prompt is empty.
 function selectPromptEmpty() {
-  const lite = visibleAssetItems.value.filter((item) => !item.prompt || item.prompt.trim() === "").map((item) => item.id);
+  const lite = selectableAssetItems.value.filter((item) => !item.prompt || item.prompt.trim() === "").map((item) => item.id);
   if (lite.length === 0) {
     window.$message.warning($t("workbench.cornerScape.noEmptyPrompt"));
     return;
@@ -744,20 +962,20 @@ function selectPromptEmpty() {
 }
 
 function selectAll() {
-  selectedIds.value = visibleAssetItems.value.map((item) => item.id);
+  selectedIds.value = selectableAssetItems.value.map((item) => item.id);
 }
 
 function toggleSelectAll() {
-  if (selectedIds.value.length === visibleAssetItems.value.length) {
+  if (selectedIds.value.length === selectableAssetItems.value.length) {
     selectedIds.value = [];
   } else {
-    selectedIds.value = visibleAssetItems.value.map((item) => item.id);
+    selectedIds.value = selectableAssetItems.value.map((item) => item.id);
   }
 }
 function clearSelection() {
   selectedIds.value = [];
 }
-//取消生成
+//鍙栨秷鐢熸垚
 async function cancelGenerationFn(item: DataItem) {
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.assets.confirmCancellation"),
@@ -781,7 +999,7 @@ async function cancelGenerationFn(item: DataItem) {
         });
         window.$message.success($t("workbench.cornerScape.cancelGeneration") + " " + item.name);
       } catch (e: any) {
-        window.$message.error(e.message ?? $t("workbench.cornerScape.cancelGeneration") + "失败");
+        window.$message.error(e.message ?? $t("workbench.cornerScape.cancelGeneration") + "澶辫触");
       } finally {
         getFilteredData();
         dialog.destroy();
@@ -795,6 +1013,7 @@ const drawerVisible = ref(false);
 const currentItem = ref<DataItem | null>(null);
 const selectedHistoryId = ref<number | null>(null);
 const historyLoading = ref(false);
+const currentParentAsset = computed(() => (currentItem.value ? getParentAsset(currentItem.value) : null));
 
 async function loadAssetImageHistory(assetId: number) {
   historyLoading.value = true;
@@ -847,7 +1066,7 @@ async function toggleHistorySelect(id: number) {
       imageId: selectedImage.id,
       filePath: selectedImage.filePath,
       media: selectedImage.media,
-      state: "已完成",
+      state: "completed",
       status: "completed",
     });
     await refreshAssetWithHistory(assetId);
@@ -866,6 +1085,7 @@ const editForm = reactive({
   prompt: "",
   name: "",
   describe: "",
+  foundationText: "",
   promptState: "",
   relepedAudio: [] as BoundAudio[],
 });
@@ -900,7 +1120,7 @@ async function submitAssetDialog() {
     await getFilteredData();
     if (parent) await refreshAssetDetail(parent.id);
   } catch (e: any) {
-    window.$message.error(e?.message || $t("common.addFailed"));
+    window.$message.error(e?.message || "添加失败");
   } finally {
     assetDialogSubmitting.value = false;
   }
@@ -924,16 +1144,23 @@ async function refreshAssetDetail(id: number) {
 
 async function openDrawer(item: DataItem) {
   selectedHistoryId.value = null;
-  // 先用当前数据打开抽屉
+  if (!detailModelValue.value) detailModelValue.value = project.value?.imageModel ?? "";
+  // 鍏堢敤褰撳墠鏁版嵁鎵撳紑鎶藉眽
   currentItem.value = item;
   syncEditFormFromItem(item);
   drawerVisible.value = true;
-  // 重新获取最新资产数据和当前资产的图片历史。
+  // Refresh current asset details and image history.
   try {
     await refreshAssetWithHistory(item.id);
   } catch (e) {
-    console.error("刷新资产详情失败:", e);
+    console.error("鍒锋柊璧勪骇璇︽儏澶辫触:", e);
   }
+}
+
+async function openParentAsset() {
+  const parent = currentParentAsset.value;
+  if (!parent) return;
+  await openDrawer(parent);
 }
 
 function setItemState(id: number, state: string) {
@@ -942,7 +1169,8 @@ function setItemState(id: number, state: string) {
 
 function regenerateItem() {
   if (!currentItem.value) return;
-  if (!selectValue.value) {
+  const selectedModel = detailModelValue.value;
+  if (!selectedModel) {
     window.$message.warning($t("workbench.cornerScape.msg.selectModel"));
     return;
   }
@@ -955,7 +1183,7 @@ function regenerateItem() {
     return;
   }
   const item = currentItem.value;
-  setItemState(item.id, "生成中");
+  setItemState(item.id, "processing");
   drawerVisible.value = false;
   const controller = createAbortController();
   axios
@@ -967,7 +1195,7 @@ function regenerateItem() {
         name: item.name ?? $t("workbench.cornerScape.unnamed"),
         base64: "",
         prompt: editForm.prompt,
-        model: selectValue.value,
+        model: selectedModel,
         id: item.id,
         resolution: editForm.resolution,
         concurrentCount: 1,
@@ -979,7 +1207,7 @@ function regenerateItem() {
       item.legacyTaskId = data?.legacyTaskId;
       if (data?.status) {
         item.status = normalizeTaskStatus(data.status, "queued");
-        item.state = "生成中";
+        item.state = "processing";
       }
       window.$message.success($t("workbench.cornerScape.msg.genSuccess", { name: item.name }));
       syncRuntimeTasks();
@@ -987,14 +1215,14 @@ function regenerateItem() {
     .catch((e: any) => {
       if (e.name === "CanceledError" || e.code === "ERR_CANCELED") return;
       window.$message.error(e.message ?? $t("workbench.cornerScape.msg.genFailed", { name: item.name }));
-      setItemState(item.id, "生成失败");
+      setItemState(item.id, "failed");
     });
 }
 
-// 提示词失焦保存
+// 鎻愮ず璇嶅け鐒︿繚瀛?
 async function savePromptOnBlur() {
   if (!currentItem.value) return;
-  // 内容没有变化则不保存
+  // 鍐呭娌℃湁鍙樺寲鍒欎笉淇濆瓨
   if (editForm.prompt === currentItem.value.prompt) return;
   try {
     await axios.post("/assets/saveAssets", {
@@ -1003,11 +1231,41 @@ async function savePromptOnBlur() {
       projectId: project.value?.id,
       prompt: editForm.prompt,
     });
-    // 同步更新本地数据
+    // 鍚屾鏇存柊鏈湴鏁版嵁
     mergeAssetPatch(currentItem.value.id, { prompt: editForm.prompt });
     window.$message.success($t("workbench.cornerScape.msg.saveSuccess"));
   } catch (e) {
     window.$message.error($t("workbench.cornerScape.msg.saveFailed"));
+  }
+}
+
+async function saveAssetProfile() {
+  if (!currentItem.value || assetSaving.value) return;
+  const name = editForm.name.trim();
+  if (!name) {
+    window.$message.warning($t("workbench.production.node.assets.assetNameRequired"));
+    return;
+  }
+  assetSaving.value = true;
+  try {
+    await axios.post("/assets/updateAssets", {
+      id: currentItem.value.id,
+      name,
+      describe: editForm.foundationText,
+      remark: "",
+      prompt: editForm.prompt,
+    });
+    mergeAssetPatch(currentItem.value.id, {
+      name,
+      describe: editForm.foundationText,
+      prompt: editForm.prompt,
+    });
+    window.$message.success($t("workbench.cornerScape.msg.saveSuccess"));
+    await refreshAssetDetail(currentItem.value.id);
+  } catch (e: any) {
+    window.$message.error(e?.message || $t("workbench.cornerScape.msg.saveFailed"));
+  } finally {
+    assetSaving.value = false;
   }
 }
 
@@ -1065,7 +1323,7 @@ async function uploadLocalAssetImage() {
   }
 }
 
-// AI 润色
+// AI 娑﹁壊
 const polishing = ref(false);
 async function polishPrompts() {
   if (!editForm.prompt.trim()) {
@@ -1079,12 +1337,12 @@ async function polishPrompts() {
       assetsId: editForm.assetsId,
       type: editForm.type ?? "props",
       name: editForm.name,
-      describe: editForm.describe,
+      describe: editForm.foundationText || editForm.describe,
     });
     window.$message.success($t("workbench.cornerScape.msg.promptGenSuccess"));
     if (data.assetsId === editForm.assetsId) {
       editForm.prompt = data.prompt;
-      mergeAssetPatch(editForm.assetsId, { prompt: data.prompt, promptState: data.promptState ?? "已完成" });
+      mergeAssetPatch(editForm.assetsId, { prompt: data.prompt, promptState: data.promptState ?? "completed" });
     }
   } catch (e) {
     window.$message.error((e as any)?.message ?? $t("workbench.cornerScape.msg.polishFailed"));
@@ -1092,70 +1350,94 @@ async function polishPrompts() {
     polishing.value = false;
   }
 }
-//批量生成提示词
+//鎵归噺鐢熸垚鍩虹璁惧畾
 async function batchGenerationPrompt() {
   if (selectedIds.value.length === 0) {
     window.$message.warning($t("workbench.cornerScape.msg.selectAtLeastOne"));
     return;
   }
+  if (!project.value?.id) {
+    window.$message.warning($t("workbench.project.msg.notFound"));
+    return;
+  }
 
-  const items = visibleAssetItems.value.filter((item) => selectedIds.value.includes(item.id));
+  const items = selectedAssetItems.value;
+  const previousState = new Map(
+    items.map((item) => [
+      item.id,
+      {
+        foundationStatus: item.foundationStatus,
+        foundationErrorReason: item.foundationErrorReason,
+        promptState: item.promptState,
+        promptTaskId: item.promptTaskId,
+        legacyTaskId: item.legacyTaskId,
+        promptErrorReason: item.promptErrorReason,
+      },
+    ]),
+  );
 
-  // 前端先将所有选中项的 promptState 标记为"生成中"，让轮询自动接管状态跟踪
   items.forEach((item) => {
-    mergeAssetPatch(item.id, { promptState: "生成中", promptErrorReason: "" });
+    releasePromptTask(item.id);
+    mergeAssetPatch(item.id, { foundationStatus: "processing", foundationErrorReason: "", promptState: "processing", promptErrorReason: "" });
   });
 
-  // 清除已选中的项
-  selectedIds.value = [];
-
   try {
-    const { data } = await axios.post("/assetsGenerate/batchPolishAssetsPrompt", {
-      projectId: project.value?.id,
-      items: items.map((item) => ({
-        assetsId: item.id,
-        type: item.type ?? "props",
-        name: item.name,
-        describe: item.describe,
-      })),
-      concurrentCount: otherSetting.value.assetsBatchGenereateSize,
-      otherTextPrompt: otherTextPrompt.value,
+    const data = await generateAssetFoundation({
+      projectId: Number(project.value?.id),
+      assetIds: items.map((item) => item.id),
+      mode: "selected",
+      instruction: otherTextPrompt.value.trim() || undefined,
+      overwrite: foundationOverwrite.value,
+      generatePrompt: true,
     });
-    const rows = Array.isArray(data) ? data : (data?.tasks ?? (data ? [data] : []));
-    rows.forEach((row: { assetId?: number; assetsId?: number; id?: number; taskId?: string; legacyTaskId?: number; prompt?: string; promptState?: string }) => {
-      const id = row.assetId ?? row.assetsId ?? row.id;
+    const rows = data?.tasks ?? [];
+    rows.forEach((row: { assetId?: number; taskId?: string; legacyTaskId?: number }) => {
+      const id = row.assetId;
       if (!id) return;
       mergeAssetPatch(id, {
         promptTaskId: row.taskId,
         legacyTaskId: row.legacyTaskId,
-        ...(row.prompt !== undefined ? { prompt: row.prompt } : {}),
-        ...(row.promptState !== undefined ? { promptState: row.promptState } : {}),
+        foundationStatus: "processing",
+        foundationErrorReason: "",
+        promptState: "processing",
+        promptErrorReason: "",
       });
     });
+    const skipped = data?.skipped ?? [];
+    if (rows.length) window.$message.success($t("workbench.cornerScape.foundationStarted", { count: rows.length }));
+    if (skipped.length) {
+      const reasons = skipped
+        .slice(0, 3)
+        .map((item) => item.reason)
+        .filter(Boolean)
+        .join("; ");
+      window.$message.warning($t("workbench.cornerScape.foundationSkipped", { count: skipped.length, reasons }));
+    }
     syncRuntimeTasks();
+    selectedIds.value = [];
   } catch (e: any) {
-    window.$message.error(e?.message ?? $t("workbench.cornerScape.msg.promptGenFail"));
-    // 生成失败时重置 promptState
     items.forEach((item) => {
-      mergeAssetPatch(item.id, { promptState: "" });
+      const previous = previousState.get(item.id);
+      if (previous) mergeAssetPatch(item.id, previous);
     });
+    window.$message.error(e?.message ?? $t("workbench.cornerScape.msg.promptGenFail"));
   }
 }
-//绑定音频
+//缁戝畾闊抽
 async function batchSelectBindAudio() {
   if (selectedIds.value.length === 0) {
     window.$message.warning($t("workbench.cornerScape.msg.selectAtLeastBindOne"));
     return;
   }
 
-  const items = visibleAssetItems.value.filter((item) => selectedIds.value.includes(item.id));
+  const items = selectedAssetItems.value;
 
-  // 前端先将所有选中项的 promptState 标记为"生成中"，让轮询自动接管状态跟踪
+  // Mark selected audio binding tasks as processing before polling takes over.
   items.forEach((item) => {
-    mergeAssetPatch(item.id, { audioBindState: "生成中" });
+    mergeAssetPatch(item.id, { audioBindState: "processing" });
   });
 
-  // 清除已选中的项
+  // 娓呴櫎宸查€変腑鐨勯」
   selectedIds.value = [];
 
   try {
@@ -1177,19 +1459,19 @@ async function batchSelectBindAudio() {
     syncRuntimeTasks();
   } catch (e: any) {
     window.$message.error(e.message ?? $t("workbench.cornerScape.msg.promptGenFail"));
-    // 生成失败时重置 audioBindState
+    // 鐢熸垚澶辫触鏃堕噸缃?audioBindState
     items.forEach((item) => {
       mergeAssetPatch(item.id, { audioBindState: "" });
     });
   }
 }
-// 批量生成图片
+// 鎵归噺鐢熸垚鍥剧墖
 async function batchGenerationImage() {
   if (selectedIds.value.length === 0) {
     window.$message.warning($t("workbench.cornerScape.msg.selectAtLeastOne"));
     return;
   }
-  if (!selectValue.value) {
+  if (!batchModelValue.value) {
     window.$message.warning($t("workbench.cornerScape.msg.selectModel"));
     return;
   }
@@ -1198,12 +1480,12 @@ async function batchGenerationImage() {
     return;
   }
 
-  const items = visibleAssetItems.value.filter((item) => selectedIds.value.includes(item.id) && normalizeAssetImageType(item.type));
+  const items = selectedAssetItems.value.filter((item) => normalizeAssetImageType(item.type));
   if (items.length === 0) {
     window.$message.warning($t("workbench.cornerScape.msg.selectAtLeastOne"));
     return;
   }
-  //检查如果勾选的数据prompt有空的，提示用户勾选的哪一个提示词未生成，然后终止批量生成
+  //妫€鏌ュ鏋滃嬀閫夌殑鏁版嵁prompt鏈夌┖鐨勶紝鎻愮ず鐢ㄦ埛鍕鹃€夌殑鍝竴涓彁绀鸿瘝鏈敓鎴愶紝鐒跺悗缁堟鎵归噺鐢熸垚
   const emptyPrompts = items.filter((item) => !item.prompt);
   if (emptyPrompts.length > 0) {
     const emptyPromptNames = emptyPrompts.map((item) => item.name).join(", ");
@@ -1231,7 +1513,7 @@ async function batchGenerationImage() {
   items.forEach((item) => {
     releaseImageTask(item.id);
     taskCenter.removeTask(createTaskKey("assetImage", Number(project.value?.id), item.id, undefined, item.taskId));
-    mergeAssetPatch(item.id, { state: "生成中", status: "processing", taskId: undefined, legacyTaskId: undefined, errorReason: "" });
+    mergeAssetPatch(item.id, { state: "processing", status: "processing", taskId: undefined, legacyTaskId: undefined, errorReason: "" });
   });
 
   window.$message.success(
@@ -1241,7 +1523,7 @@ async function batchGenerationImage() {
   try {
     const { data } = await axios.post("/assetsGenerate/batchGenerateImageAssets", {
       projectId: Number(project.value?.id),
-      model: selectValue.value,
+      model: batchModelValue.value,
       resolution: resolution.value,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
       items: items.map((item) => ({
@@ -1320,19 +1602,25 @@ function refreshFinishedItem(id: number, field: "historyImages" | "relepedAudio"
       const fresh = await refreshAssetDetail(id);
       if (fresh) mergeAssetPatch(id, { [field]: (fresh as any)[field] } as Partial<DataItem>);
     } catch (e) {
-      console.error("刷新任务结果失败:", e);
+      console.error("鍒锋柊浠诲姟缁撴灉澶辫触:", e);
     }
   });
 }
 
 function applyPromptRuntimeTask(id: number, task: RuntimeTask) {
   const record = (task.result ?? {}) as any;
+  const failed = task.status === "failed" || task.status === "cancelled";
+  const failureReason = String(record.foundationErrorReason || record.promptErrorReason || task.reason || "").trim();
   mergeAssetPatch(id, {
-    promptState: task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中",
-    promptErrorReason: task.reason ?? "",
+    promptState: task.status === "completed" ? "completed" : task.status === "failed" || task.status === "cancelled" ? "failed" : "processing",
+    promptErrorReason: failed ? failureReason : "",
+    foundationStatus: task.status === "completed" ? "completed" : failed ? "failed" : "processing",
+    foundationErrorReason: failed ? failureReason : "",
+    ...(record.foundationText !== undefined ? { foundationText: record.foundationText } : {}),
+    ...(record.describe !== undefined ? { describe: record.describe } : {}),
     ...(record.prompt !== undefined ? { prompt: record.prompt } : {}),
   });
-  if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || $t("workbench.cornerScape.msg.promptGenFail"));
+  if (task.status === "failed" || task.status === "cancelled") window.$message.error(failureReason || $t("workbench.cornerScape.msg.promptGenFail"));
   if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
     queueMicrotask(() => releasePromptTask(id));
     if (task.status === "completed") queueMicrotask(() => void refreshAssetDetail(id));
@@ -1343,7 +1631,7 @@ function applyImageRuntimeTask(id: number, task: RuntimeTask) {
   const record = (task.result ?? {}) as any;
   const media = normalizeMediaRef(record.media ?? record, "image");
   mergeAssetPatch(id, {
-    state: task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中",
+    state: task.status === "completed" ? "completed" : task.status === "failed" || task.status === "cancelled" ? "failed" : "processing",
     status: task.status,
     errorReason: task.reason ?? "",
     ...(media ? { media, filePath: getMediaPreviewUrl(media) } : {}),
@@ -1357,7 +1645,7 @@ function applyImageRuntimeTask(id: number, task: RuntimeTask) {
 
 function applyAudioRuntimeTask(id: number, task: RuntimeTask) {
   mergeAssetPatch(id, {
-    audioBindState: task.status === "completed" ? "已完成" : task.status === "failed" || task.status === "cancelled" ? "生成失败" : "生成中",
+    audioBindState: task.status === "completed" ? "completed" : task.status === "failed" || task.status === "cancelled" ? "failed" : "processing",
   });
   if (task.status === "failed" || task.status === "cancelled") window.$message.error(task.reason || $t("workbench.cornerScape.msg.promptGenFail"));
   if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
@@ -1536,7 +1824,7 @@ async function hydrateBoundAudioDetails() {
   try {
     await loadAudioAssetIndex(ids);
   } catch (error) {
-    console.error("加载绑定音频详情失败:", error);
+    console.error("鍔犺浇缁戝畾闊抽璇︽儏澶辫触:", error);
   }
 }
 
@@ -1656,7 +1944,7 @@ async function bindAudioToCurrentAsset(audio: BoundAudio) {
 
 async function saveAudioClipAsBoundAsset(payload: { base64Data: string; name: string }, controls?: { done: (error?: unknown) => void }) {
   if (!editForm.assetsId) {
-    const error = new Error("当前资产缺少 ID");
+    const error = new Error("褰撳墠璧勪骇缂哄皯 ID");
     controls?.done(error);
     return;
   }
@@ -1709,275 +1997,754 @@ async function selectAudio() {
 </script>
 
 <style lang="scss" scoped>
+/* Stable corner-scape layout. Keep this block last so older experimental rules cannot leak through. */
 .cornerScape {
+  position: relative;
+  display: block;
   width: 100%;
   height: 100%;
   min-height: 0;
-  align-items: flex-start;
-  .left {
-    width: clamp(240px, 22vw, 320px);
-    height: 100%;
-    min-height: 0;
-    flex-shrink: 0;
-    margin-right: 16px;
-    margin-bottom: 16px;
-    display: flex;
-    flex-direction: column;
-    .btnGap {
-      gap: 8px;
-      width: 100%;
-      flex-wrap: wrap;
-    }
-    .selectedInfo {
-      width: 100%;
-      text-align: center;
-    }
-    .card {
-      height: 100%;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      overflow: auto;
-      :deep(.t-card__body) {
-        flex: 1;
-        min-height: 0;
-        overflow: auto;
-      }
-    }
-    :deep(.t-form) {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    :deep(.t-form__item) {
-      margin-bottom: 0;
-    }
-    .quickActions {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      width: 100%;
-      :deep(.t-button) {
-        width: 100%;
-      }
-    }
-    .filterGroup {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-  }
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+
   .content {
-    overflow: auto;
-    height: 100%;
     width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    padding: 0 48px 22px 0;
+    overflow: auto;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    .assetGroup {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      width: 100%;
+    gap: 28px;
+  }
+
+  .assetGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .groupHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 4px;
+    color: var(--td-text-color-primary);
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .groupGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    justify-content: stretch;
+    align-items: start;
+    gap: 16px 14px;
+  }
+
+  .assetFamily {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .assetCard {
+    width: 100%;
+    height: auto;
+    overflow: hidden;
+    border: 1px solid var(--td-component-border);
+    border-radius: 6px;
+    background: var(--td-bg-color-container);
+    box-shadow: none;
+    cursor: pointer;
+    transition:
+      border-color 0.18s ease,
+      box-shadow 0.18s ease,
+      transform 0.18s ease;
+
+    &:hover {
+      border-color: var(--td-brand-color);
+      box-shadow: var(--td-shadow-2);
+      transform: translateY(-1px);
     }
-    .groupHeader {
+
+    :deep(.t-card__body) {
+      padding: 0;
+      display: block;
+    }
+
+    .imageBox {
+      position: relative;
+      width: 100%;
+      height: 180px;
+      margin: 0;
+      overflow: hidden;
+      border-radius: 0;
+      background: #f4f5f7;
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-size: 15px;
-      font-weight: 700;
-      color: var(--td-text-color-primary);
+      justify-content: center;
+
+      .image,
+      :deep(.t-image),
+      :deep(.t-image__wrapper),
+      :deep(.t-image__img) {
+        width: 100%;
+        height: 100%;
+      }
+
+      :deep(.t-image__img) {
+        display: block;
+        object-fit: cover;
+        object-position: center;
+      }
     }
-    .groupGrid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
-      align-items: start;
-      gap: 16px;
+
+    .selectBox {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      z-index: 12;
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      line-height: 16px;
+      background: transparent;
+
+      :deep(.t-checkbox__input) {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        border-radius: 3px;
+        box-shadow: 0 1px 4px rgb(0 0 0 / 14%);
+      }
+
+      &:not(.t-is-checked) :deep(.t-checkbox__input) {
+        background-color: rgba(255, 255, 255, 0.96);
+      }
     }
-    .assetFamily {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      min-width: 0;
+
+    .cardActions {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 12;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
     }
-    .derivedList {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 10px;
-      padding-left: 12px;
-      border-left: 2px solid var(--td-component-border, #e7e7e7);
+
+    .imageToolsWrap {
+      position: absolute;
+      right: 8px;
+      bottom: 8px;
+      z-index: 12;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
     }
-    .card {
-      cursor: pointer;
+
+    .cancelGeneration {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 13;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
+    }
+
+    &:hover {
+      .cardActions,
+      .imageToolsWrap,
+      .cancelGeneration {
+        opacity: 1;
+        pointer-events: auto;
+      }
+    }
+
+    .generatingBox {
       width: 100%;
       height: 100%;
+      display: grid;
+      place-items: center;
+      align-content: center;
+      gap: 10px;
+      background: linear-gradient(135deg, #f0f4ff 0%, #e8f0fe 100%);
+    }
+
+    .generatingText {
+      color: var(--td-brand-color);
+      font-size: 13px;
+    }
+
+    .infoBox {
+      padding: 9px 10px 10px;
+      background: var(--td-bg-color-container);
+      display: grid;
+      gap: 6px;
+    }
+
+    .title {
+      min-width: 0;
       display: flex;
-      flex-direction: column;
-      :deep(.t-card__body) {
-        flex: 1;
-        min-height: 0;
-        display: flex;
-        flex-direction: column;
-      }
-      .imageBox {
-        position: relative;
-        width: 100%;
-        height: 160px;
-        background-color: #f5f7fa;
-        flex-shrink: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        .selectBox {
-          position: absolute;
-          top: 8px;
-          left: 8px;
-          z-index: 10;
-        }
-        .cancelGeneration {
-          position: absolute;
-          top: 8px;
-          right: 8px;
-          z-index: 10;
-          opacity: 0;
-          pointer-events: none;
-          transition: opacity 0.3s;
-          cursor: pointer;
-          font-size: 12px;
-        }
-        .cardActions {
-          position: absolute;
-          right: 8px;
-          bottom: 8px;
-          z-index: 10;
-          opacity: 0;
-          pointer-events: none;
-          transition: opacity 0.2s ease;
-        }
-        .derivedBadge {
-          position: absolute;
-          top: 8px;
-          right: 8px;
-          z-index: 10;
-        }
-        .generatingBox {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          gap: 12px;
-          width: 100%;
-          height: 100%;
-          background: linear-gradient(135deg, #f0f4ff 0%, #e8f0fe 100%);
-          .generatingText {
-            font-size: 13px;
-            color: var(--td-brand-color);
-            letter-spacing: 0.05em;
-          }
-        }
-        .image {
-          width: 100%;
-          height: 100%;
-          :deep(.t-image__img) {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-          }
-        }
-        .imageToolsWrap {
-          opacity: 0;
-          pointer-events: none;
-          transition: opacity 0.2s ease;
-        }
-        :deep(.t-empty) {
-          width: 100%;
-        }
-      }
-      &:hover {
-        .imageToolsWrap {
-          opacity: 1;
-          pointer-events: auto;
-        }
-        .cancelGeneration {
-          opacity: 1;
-          pointer-events: auto;
-        }
-        .cardActions {
-          opacity: 1;
-          pointer-events: auto;
-        }
-      }
-      .infoBox {
-        flex: 1;
-        padding: 8px 0;
-        overflow: hidden;
-        cursor: pointer;
-        .title {
-          font-size: 14px;
-          font-weight: 600;
-          line-height: 1.5;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-        .meta {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 6px;
-          margin-top: 4px;
-          .typeTag {
-            flex-shrink: 0;
-          }
-          .stateTag {
-            flex-shrink: 0;
-          }
-          .modelTag {
-            min-width: 0;
-            max-width: 100%;
-            overflow: hidden;
-            :deep(.t-tag__text) {
-              overflow: hidden;
-              text-overflow: ellipsis;
-              white-space: nowrap;
-            }
-          }
-        }
-        .prompt {
-          margin-top: 4px;
-          font-size: 12px;
-          color: var(--td-text-color-secondary);
-          line-height: 1.5;
-          overflow: hidden;
-          display: -webkit-box;
-          -webkit-line-clamp: 2;
-          line-clamp: 2;
-          -webkit-box-orient: vertical;
-        }
-      }
+      align-items: center;
+      gap: 6px;
+      justify-content: flex-start;
+      overflow: hidden;
+      background: transparent;
+      color: var(--td-text-color-primary);
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 20px;
+      white-space: nowrap;
+    }
+
+    .assetNameText {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .title :deep(.t-tag) {
+      flex-shrink: 0;
+    }
+
+    .meta,
+    .audioChipList {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .prompt {
+      margin: 0;
+      color: var(--td-text-color-secondary);
+      font-size: 12px;
+      line-height: 1.55;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      -webkit-box-orient: vertical;
     }
   }
 }
 
-.drawerHeader {
+:global(.assetDossierPopup) {
+  max-width: 310px;
+}
+
+:global(.assetDossierPopup .t-popup__content) {
+  padding: 0;
+  border: 1px solid var(--td-component-border);
+  border-radius: 8px;
+  background: var(--td-bg-color-container);
+  box-shadow: var(--td-shadow-2);
+}
+
+:global(.assetDossier) {
+  width: 292px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  color: var(--td-text-color-primary);
+}
+
+:global(.dossierHead) {
+  display: grid;
+  gap: 6px;
+}
+
+:global(.dossierHead strong) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+:global(.dossierTags),
+:global(.dossierTagList) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+:global(.dossierBlock) {
+  display: grid;
+  gap: 4px;
+}
+
+:global(.dossierBlock span) {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+:global(.dossierBlock p) {
+  margin: 0;
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+:global(.dossierFailure p) {
+  color: var(--td-error-color-7);
+}
+
+.batchDock {
+  position: fixed;
+  top: 118px;
+  right: 0;
+  z-index: 7600;
+  width: auto;
+  pointer-events: none;
+
+  &.expanded {
+    width: 336px;
+  }
+}
+
+.dockSideTab {
+  pointer-events: auto;
+  width: 46px;
+  min-height: 86px;
+  display: grid;
+  grid-template-rows: 24px 22px;
+  place-items: center;
+  gap: 4px;
+  padding: 9px 6px;
+  border: 1px solid var(--td-component-border);
+  border-right: 0;
+  border-radius: 8px 0 0 8px;
+  background: color-mix(in srgb, var(--td-bg-color-container) 97%, transparent);
+  color: var(--td-text-color-primary);
+  box-shadow: var(--td-shadow-2);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--td-brand-color);
+    color: var(--td-brand-color);
+    box-shadow: var(--td-shadow-3);
+  }
+
+  strong {
+    font-size: 15px;
+    line-height: 1;
+  }
+}
+
+.sideIcon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--td-brand-color-light);
+  color: var(--td-brand-color);
+  font-size: 16px;
+}
+
+.dockPanel {
+  pointer-events: auto;
+  position: fixed;
+  top: 118px;
+  right: 24px;
+  width: 336px;
+  max-height: calc(100vh - 148px);
+  padding: 0;
+  border: 1px solid var(--td-component-border);
+  border-radius: 8px;
+  background: var(--td-bg-color-container);
+  box-shadow: var(--td-shadow-3);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.dockClose {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--td-component-border);
+  border-radius: 50%;
+  background: var(--td-bg-color-container);
+  color: var(--td-text-color-secondary);
+  box-shadow: var(--td-shadow-1);
+  cursor: pointer;
+}
+
+.dockHeader {
+  flex-shrink: 0;
+  padding: 14px 14px 12px;
+  border-bottom: 1px solid var(--td-component-border);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+
+  strong {
+    display: block;
+    font-size: 15px;
+    line-height: 1.4;
+  }
+
+  p {
+    margin: 3px 0 0;
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+  }
+}
+
+.dockHeaderActions {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.audioList {
-  margin-top: 8px;
+
+.dockBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.dockSection {
+  display: grid;
+  gap: 9px;
+}
+
+.dockSectionTitle {
+  color: var(--td-text-color-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dockQuickActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dockTwoCol {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  gap: 10px;
+}
+
+.dockTextarea {
+  width: 100%;
+}
+
+.filterGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.dockFooter {
+  flex-shrink: 0;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--td-component-border);
+  background: var(--td-bg-color-container);
   display: grid;
   gap: 8px;
 }
+
+.dockFooterGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+:global(.cornerScapeDockSelectPopup) {
+  max-width: min(360px, 90vw);
+}
+
+:global(.assetDetailDrawer),
+:global(.assetDetailDrawer .t-drawer),
+:global(.assetDetailDrawer .t-drawer__content-wrapper) {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  height: 100vh;
+  max-height: 100vh;
+}
+
+:global(.assetDetailDrawer .t-drawer__content) {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--td-bg-color-page);
+}
+
+:global(.assetDetailDrawer .t-drawer__header) {
+  flex-shrink: 0;
+  min-height: 56px;
+  border-bottom: 1px solid var(--td-component-border);
+  background: var(--td-bg-color-container);
+}
+
+:global(.assetDetailDrawer .t-drawer__body) {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  padding: 0;
+  overflow: auto;
+  background: var(--td-bg-color-page);
+}
+
+.drawerHeaderV2 {
+  width: 100%;
+  padding-right: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.drawerTitleGroup {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+
+  strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 16px;
+  }
+
+  span {
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+  }
+}
+
+.drawerHeaderTags,
+.detailTags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.detailEditor {
+  min-height: 100%;
+  padding: 16px 18px 20px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.detailHero,
+.detailSection,
+.detailActionBar {
+  border: 1px solid var(--td-component-border);
+  border-radius: 8px;
+  background: var(--td-bg-color-container);
+  box-shadow: var(--td-shadow-1);
+}
+
+.detailHero {
+  padding: 12px;
+  display: grid;
+  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.detailMediaColumn {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.detailHero .drawerImageBox {
+  width: 100%;
+  min-height: 212px;
+  height: 212px;
+  max-height: 212px;
+  margin: 0;
+  border: 1px solid var(--td-component-border);
+  border-radius: 6px;
+  background: #f6f7f9;
+  overflow: hidden;
+}
+
+.detailHero .drawerImageBox :deep(.t-image),
+.detailHero .drawerImageBox :deep(.t-image__wrapper),
+.detailHero .drawerImageBox :deep(.t-image__img) {
+  width: 100%;
+  height: 100%;
+}
+
+.detailHistoryStrip {
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--td-component-border);
+}
+
+.detailHistoryStrip .detailSectionTitle {
+  margin-bottom: 8px;
+}
+
+.detailHistoryStrip .historyImageList {
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+
+.detailIdentityForm {
+  min-width: 0;
+  align-self: stretch;
+
+  :deep(.t-form__item) {
+    margin-bottom: 12px;
+  }
+}
+
+.detailFormGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 10px;
+}
+
+.detailSection {
+  padding: 12px;
+}
+
+.foundationErrorReason {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--td-error-color-3);
+  border-radius: 6px;
+  background: var(--td-error-color-1);
+  color: var(--td-error-color-7);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.detailSectionTitle {
+  margin-bottom: 10px;
+  color: var(--td-text-color-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.detailSectionTitleAction {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.derivedEditList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.derivedEditItem,
+.parentAssetItem {
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 8px;
+  background: var(--td-bg-color-container);
+  box-shadow: none;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--td-brand-color);
+    background: var(--td-brand-color-light);
+  }
+}
+
+.parentAssetItem {
+  margin-bottom: 10px;
+}
+
+.derivedEditThumb {
+  width: 54px;
+  height: 54px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #f5f7fa;
+
+  :deep(.t-image),
+  :deep(.t-image__wrapper),
+  :deep(.t-image__img) {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+.derivedEditInfo {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+
+  strong,
+  span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  span {
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+  }
+}
+
+.audioList {
+  display: grid;
+  gap: 8px;
+}
+
 .audioBindItem {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   padding: 8px 10px;
-  border: 1px solid var(--td-border-level-1-color);
+  border: 1px solid var(--td-component-border);
   border-radius: 6px;
   background: var(--td-bg-color-container);
 }
+
 .audioBindInfo {
   min-width: 0;
   display: flex;
@@ -1990,93 +2757,38 @@ async function selectAudio() {
     white-space: nowrap;
   }
 }
+
 .audioBindActions {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 4px;
 }
-.drawerImageBox {
-  width: 100%;
-  min-height: 120px;
-  max-height: 400px;
-  background-color: #f5f7fa;
-  border-radius: 6px;
-  margin-bottom: 16px;
+
+.detailActionBar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding: 12px;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  position: relative;
-
-  .image {
-    width: 100%;
-    height: auto;
-    :deep(.t-image__img) {
-      max-height: 400px;
-      object-fit: contain;
-    }
-  }
-  .generatingBox {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-    .generatingText {
-      font-size: 13px;
-      color: var(--td-brand-color);
-    }
-  }
-  .imageToolsWrap {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-
-.historyImageList {
-  gap: 10px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  max-width: 100%;
-  width: 0;
-  min-width: 100%;
-  flex-shrink: 1;
-  padding-bottom: 4px;
-
-  &::-webkit-scrollbar {
-    height: 6px;
-  }
-  &::-webkit-scrollbar-thumb {
-    background: #c1c1c1;
-    border-radius: 4px;
-  }
-  &::-webkit-scrollbar-track {
-    background: transparent;
-  }
-}
-
-.historyImageItem {
-  border-radius: 4px;
-  border: 3px solid transparent;
-  cursor: pointer;
-  transition: border-color 0.2s;
-  flex-shrink: 0;
-  overflow: hidden;
-
-  &:hover {
-    border-color: var(--td-brand-color-light);
-  }
-  &.selected {
-    border-color: var(--td-brand-color);
-  }
-}
-
-.drawerActions {
-  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  width: 100%;
-  :deep(.t-button) {
-    flex: 1;
+  justify-content: flex-end;
+}
+
+.assets-empty {
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+}
+
+@media (max-width: 980px) {
+  .cornerScape .groupGrid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    justify-content: stretch;
+  }
+
+  .detailHero {
+    grid-template-columns: 1fr;
   }
 }
 </style>

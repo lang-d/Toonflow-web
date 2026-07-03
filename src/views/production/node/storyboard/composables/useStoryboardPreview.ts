@@ -1,7 +1,6 @@
 import { computed, type Ref, watch } from "vue";
 import type { Storyboard } from "../../../utils/flowBuilder";
 import type { StoryboardGroup } from "../types";
-import { normalizeTaskStatus } from "@/stores/taskCenter";
 
 export function useStoryboardPreview(options: {
   storyboard: Ref<Storyboard[]>;
@@ -37,12 +36,7 @@ export function useStoryboardPreview(options: {
     return groups;
   });
 
-  const isFinished = (item: Storyboard) =>
-    Boolean(
-      (item.media || item.src || item.url || item.imageUrl || item.thumbnail || item.thumb) &&
-        normalizeTaskStatus(item.status ?? item.state, "pending") === "completed",
-    );
-  const previewItems = computed(() => options.storyboard.value.filter(isFinished));
+  const previewItems = computed(() => options.storyboard.value);
   const sliceStoryboardPages = (items: Storyboard[]) => {
     const pages: Storyboard[][] = [];
     for (let i = 0; i < items.length; i += 9) pages.push(items.slice(i, i + 9));
@@ -50,22 +44,14 @@ export function useStoryboardPreview(options: {
   };
   const previewGroups = computed(() => {
     if (!hasTrackGroups.value) return [];
-    return storyboardGroups.value
-      .map((group) => ({
-        ...group,
-        items: group.items.filter(isFinished),
-      }))
-      .filter((group) => group.items.length);
+    return storyboardGroups.value.filter((group) => group.items.length);
   });
   const ungroupedPreviewPages = computed(() => sliceStoryboardPages(previewItems.value));
   const currentPreviewItems = computed(() => {
     if (hasTrackGroups.value) return previewGroups.value[options.previewGroupIndex.value]?.items ?? [];
     return ungroupedPreviewPages.value[options.previewPageIndex.value] ?? [];
   });
-  const timelineItems = computed(() => {
-    if (hasTrackGroups.value) return previewGroups.value[options.previewGroupIndex.value]?.items ?? [];
-    return previewItems.value;
-  });
+  const timelineItems = computed(() => previewItems.value);
   const previewGridStyle = computed(() => {
     if (!hasTrackGroups.value) {
       return {
@@ -97,13 +83,19 @@ export function useStoryboardPreview(options: {
   const timelineCurrent = computed(() => timelineItems.value[options.timelineIndex.value]);
 
   watch(timelineItems, () => {
-    options.timelineIndex.value = 0;
+    const maxIndex = Math.max(timelineItems.value.length - 1, 0);
+    if (options.timelineIndex.value < 0) options.timelineIndex.value = 0;
+    if (options.timelineIndex.value > maxIndex) options.timelineIndex.value = maxIndex;
   });
-  watch(previewItems, () => {
-    options.previewPageIndex.value = 0;
+  watch(ungroupedPreviewPages, () => {
+    const maxIndex = Math.max(ungroupedPreviewPages.value.length - 1, 0);
+    if (options.previewPageIndex.value < 0) options.previewPageIndex.value = 0;
+    if (options.previewPageIndex.value > maxIndex) options.previewPageIndex.value = maxIndex;
   });
   watch(previewGroups, () => {
-    options.previewGroupIndex.value = 0;
+    const maxIndex = Math.max(previewGroups.value.length - 1, 0);
+    if (options.previewGroupIndex.value < 0) options.previewGroupIndex.value = 0;
+    if (options.previewGroupIndex.value > maxIndex) options.previewGroupIndex.value = maxIndex;
   });
 
   function changePreview(delta: number) {

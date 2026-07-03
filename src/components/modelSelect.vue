@@ -3,6 +3,7 @@
     :size="props.size"
     v-model="selectValue"
     :placeholder="props.placeholder ?? $t('components.modelSelect.placeholder')"
+    :popup-props="props.popupProps"
     @change="onChange"
     @popup-visible-change="onPopupVisibleChange">
     <t-option-group v-for="(list, index) in optionsData" :key="index" :label="list.group">
@@ -69,6 +70,10 @@ const props = defineProps({
   placeholder: {
     type: String,
   },
+  popupProps: {
+    type: Object,
+    default: undefined,
+  },
   changeConfig: {
     type: Boolean,
     default: false,
@@ -78,9 +83,9 @@ const emit = defineEmits<{
   change: [value: string, data?: any];
 }>();
 
-async function onChange(value: any, { option }: any) {
+async function onChange(value: any, { option }: any = {}) {
   selectValue.value = value;
-  selectValueLabel.value = option.label;
+  selectValueLabel.value = option?.label ?? "";
   if (props.changeConfig) {
     const { data } = await axios.post("/modelSelect/getModelDetail", {
       modelId: value,
@@ -129,19 +134,37 @@ function handleModelChange() {
         });
       });
       optionsData.value = Array.from(groupMap.values());
-
-      if (
-        optionsData.value
-          .map((i) => i.children)
-          .flat()
-          .every((i) => `${i.id}:${i.value}` !== selectValue.value)
-      ) {
-        selectValue.value = "";
-      }
+      syncSelectedModelValue();
     })
     .catch((error) => {
       console.error($t("components.modelSelect.msg.fetchModelFailed"), error);
     });
+}
+
+function syncSelectedModelValue() {
+  const current = String(selectValue.value || "").trim();
+  if (!current) return;
+
+  const flatOptions = optionsData.value.flatMap((item) => item.children);
+  if (flatOptions.some((item) => `${item.id}:${item.value}` === current)) return;
+
+  const legacyModelName = getLegacyModelName(current);
+  if (!legacyModelName) return;
+
+  const matches = flatOptions.filter((item) => item.value === legacyModelName);
+  if (matches.length === 1) {
+    const matched = matches[0];
+    selectValue.value = `${matched.id}:${matched.value}`;
+    return;
+  }
+  selectValue.value = "";
+}
+
+function getLegacyModelName(value: string) {
+  if (!value.includes(":")) return value;
+  const [providerKey, modelName = ""] = value.split(/:(.+)/);
+  if (!modelName || /^\d+$/.test(providerKey)) return "";
+  return modelName;
 }
 
 function getProviderLogoByModel(label?: string, value?: string) {

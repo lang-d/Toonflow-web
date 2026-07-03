@@ -26,7 +26,7 @@
         <i-left />
       </button>
 
-      <main ref="stageRef" class="lightboxStage" @mousedown="startPan" @dblclick="fitToWindow">
+      <main ref="stageRef" class="lightboxStage" @mousedown="startPan" @click.self="close" @dblclick="fitToWindow">
         <div
           v-if="currentImage"
           class="imageTransform"

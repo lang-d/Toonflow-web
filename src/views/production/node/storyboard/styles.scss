@@ -496,11 +496,34 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.22);
   background: #111;
 }
+.previewGridItem.placeholder {
+  cursor: default;
+}
 .previewGridItem img {
   width: 100%;
   height: 100%;
   border-radius: 0;
   background: #111;
+}
+.previewPlaceholder,
+.timelineHeroPlaceholder,
+.timelineThumbPlaceholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.68);
+  text-align: center;
+}
+.previewPlaceholder {
+  width: 100%;
+  height: 100%;
+  padding: 18px;
+  background: repeating-linear-gradient(135deg, #101010 0, #101010 12px, #151515 12px, #151515 24px);
+}
+.previewPlaceholder strong,
+.timelineHeroPlaceholder strong {
+  font-size: 15px;
+  font-weight: 600;
 }
 .previewShotTag {
   position: absolute;
@@ -546,10 +569,26 @@
   justify-content: center;
   cursor: zoom-in;
 }
+.timelineHero.placeholder {
+  cursor: default;
+}
 .timelineHero img {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+}
+.timelineHeroPlaceholder {
+  width: min(360px, 70%);
+  height: min(220px, 55%);
+  flex-direction: column;
+  gap: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.timelineHeroPlaceholder span {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 13px;
 }
 
 .timelineInfoPanel {
@@ -622,6 +661,9 @@
   background: #1f1f1f;
   cursor: pointer;
 }
+.timelineThumb.placeholder {
+  background: #181818;
+}
 .timelineThumb.active {
   border-color: var(--td-brand-color);
 }
@@ -631,7 +673,15 @@
   object-fit: contain;
   background: #2a2a2a;
 }
-.timelineThumb div {
+.timelineThumbPlaceholder {
+  width: 100%;
+  height: 48px;
+  padding: 0 8px;
+  background: #242424;
+  color: rgba(255, 255, 255, 0.54);
+  font-size: 12px;
+}
+.timelineThumb > div:not(.timelineThumbPlaceholder) {
   display: flex;
   justify-content: space-between;
   padding: 6px 8px 0;
