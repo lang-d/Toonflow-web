@@ -42,7 +42,7 @@
             <i-close size="12" />
           </div>
           <div class="source">
-            <t-tag size="small" :title="getSourceTip(item)">{{ getSourceLabel(item) }}</t-tag>
+            <t-tag size="small" :title="getSourceTip(item)">{{ getReferenceLabel(item) }}</t-tag>
           </div>
         </div>
       </VueDraggable>
@@ -82,7 +82,7 @@
           <i-close size="12" />
         </div>
         <div class="source">
-          <t-tag size="small" :title="getSourceTip(item)">{{ getSourceLabel(item) }}</t-tag>
+          <t-tag size="small" :title="getSourceTip(item)">{{ getReferenceLabel(item) }}</t-tag>
         </div>
       </div>
     </template>
@@ -126,7 +126,7 @@
             <i-close size="12" />
           </div>
           <div class="source">
-            <t-tag size="small" :title="getSourceTip(imageList?.[index])">{{ getSourceLabel(imageList?.[index]) }}</t-tag>
+            <t-tag size="small" :title="getSourceTip(imageList?.[index])">{{ getReferenceLabel(imageList?.[index]) }}</t-tag>
           </div>
         </div>
         <template v-else>
@@ -282,6 +282,10 @@ function getSourceLabel(item?: UploadItem) {
   if (item.sources == "merged") return "合图参考";
   if (item.sources == "directorAsset") return "导演资产";
   return $t("workbench.generate.assets");
+}
+
+function getReferenceLabel(item?: UploadItem) {
+  return item?.referenceToken || item?.visualToken || item?.audioToken || item?.videoToken || getSourceLabel(item);
 }
 
 function getSourceTip(item?: UploadItem) {

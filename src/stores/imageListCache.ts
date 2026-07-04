@@ -18,6 +18,16 @@ type CachedUploadItem = Omit<UploadItem, "src"> & { src?: string };
 
 type ImageListCacheData = Record<CacheKey, Record<CacheKey, Record<CacheKey, CachedUploadItem[]>>>;
 const CACHE_STORAGE_KEY = "imageListCache";
+const REFERENCE_TOKEN_FIELDS = [
+  "inputOrder",
+  "referenceToken",
+  "visualToken",
+  "visualImageIndex",
+  "audioToken",
+  "audioReferenceIndex",
+  "videoToken",
+  "videoReferenceIndex",
+] as const;
 
 /** 用于向后端请求 URL 的标识信息 */
 interface ResolveUrlItem {
@@ -63,6 +73,7 @@ function toCachedItems(items: (UploadItem | TrackMedia)[]): CachedUploadItem[] {
       index: "index" in item ? item.index : undefined,
       slotType: "slotType" in item ? item.slotType : undefined,
       sourceRefs,
+      ...Object.fromEntries(REFERENCE_TOKEN_FIELDS.map((field) => [field, (item as any)[field]])),
     } as CachedUploadItem;
   });
 }

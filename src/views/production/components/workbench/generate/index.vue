@@ -671,6 +671,18 @@ function parseMode(value: string): VideoMode | null {
   return value as Exclude<VideoMode, ReferenceType[]>;
 }
 /** uploadBox 作为 promptEditor 的引用预览 */
+function getReferenceToken(item?: Partial<UploadItem | TrackMedia>) {
+  return item?.referenceToken || item?.visualToken || item?.audioToken || item?.videoToken || "";
+}
+
+function getReferenceGroup(item?: Partial<UploadItem | TrackMedia>) {
+  if (!item) return "";
+  if (item.name) return item.name;
+  if (item.parentName) return item.parentName;
+  if (item.sources === "storyboard" && typeof item.index === "number") return `P${item.index + 1}`;
+  return "";
+}
+
 const references = computed(() => {
   function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" {
     const cleanSrc = src?.split(/[?#]/)[0] ?? "";
@@ -685,6 +697,8 @@ const references = computed(() => {
     .map((item) => ({
       type: item.fileType || getFileTypeByExt(item.src),
       src: item.src ?? "",
+      label: getReferenceToken(item) || undefined,
+      group: getReferenceGroup(item) || undefined,
     }));
 });
 

@@ -18,6 +18,14 @@ interface UploadItemBase {
   name?: string;
   category?: UploadCategory;
   parentName?: string;
+  inputOrder?: number;
+  referenceToken?: string;
+  visualToken?: string;
+  visualImageIndex?: number;
+  audioToken?: string;
+  audioReferenceIndex?: number;
+  videoToken?: string;
+  videoReferenceIndex?: number;
 }
 
 interface UploadItemStoryboard extends UploadItemBase {
@@ -139,6 +147,14 @@ interface TrackMediaBase {
   name?: string;
   category?: UploadCategory;
   parentName?: string;
+  inputOrder?: number;
+  referenceToken?: string;
+  visualToken?: string;
+  visualImageIndex?: number;
+  audioToken?: string;
+  audioReferenceIndex?: number;
+  videoToken?: string;
+  videoReferenceIndex?: number;
 }
 
 interface TrackMediaStoryboard extends TrackMediaBase {

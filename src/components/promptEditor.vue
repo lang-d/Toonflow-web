@@ -40,13 +40,15 @@ import { Popup } from "tdesign-vue-next";
 import { Video, VolumeMute } from "@icon-park/vue-next";
 
 const props = defineProps<{
-  references?: { type: "image" | "video" | "audio" | "text"; src: string; label?: string; group?: string }[];
+  references?: PromptReference[];
   placeholder?: String;
 }>();
 
 const emit = defineEmits<{
   blur: [];
 }>();
+
+type PromptReference = { type: "image" | "video" | "audio" | "text"; src: string; label?: string; group?: string };
 
 const prompt = defineModel<string>({ default: "" });
 
@@ -182,11 +184,27 @@ function createRefTag(index: number): HTMLSpanElement {
   return container;
 }
 
-// 将 prompt 文本渲染到编辑器，处理 @图N 为标签，\n 为 <br>
+function normalizeReferenceToken(value: string | undefined) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function findReferenceIndexByToken(token: string) {
+  const normalized = normalizeReferenceToken(token);
+  if (!normalized) return -1;
+  return (props.references ?? []).findIndex((ref) => normalizeReferenceToken(ref.label) === normalized);
+}
+
+function getReferencePromptToken(index: number) {
+  const label = props.references?.[index]?.label?.trim();
+  if (label) return label;
+  return `@图${index + 1}`;
+}
+
+// 将 prompt 文本渲染到编辑器，处理 @ImageN / @图N 为标签，\n 为 <br>
 function renderPromptToEditor(text: string) {
   if (!editorRef.value) return;
   editorRef.value.innerHTML = "";
-  const regex = /@图(\d+)|\n/g;
+  const regex = /@(Image|图)(\d+)|\n/gi;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(text)) !== null) {
@@ -196,8 +214,16 @@ function renderPromptToEditor(text: string) {
     if (match[0] === "\n") {
       editorRef.value.appendChild(document.createElement("br"));
     } else {
-      editorRef.value.appendChild(createRefTag(Number(match[1]) - 1));
-      editorRef.value.appendChild(document.createTextNode("\u200B"));
+      const token = match[0];
+      const fallbackIndex = Number(match[2]) - 1;
+      const refIndex = findReferenceIndexByToken(token);
+      const targetIndex = refIndex >= 0 ? refIndex : fallbackIndex;
+      if (targetIndex >= 0 && targetIndex < (props.references?.length ?? 0)) {
+        editorRef.value.appendChild(createRefTag(targetIndex));
+        editorRef.value.appendChild(document.createTextNode("\u200B"));
+      } else {
+        editorRef.value.appendChild(document.createTextNode(token));
+      }
     }
     lastIndex = regex.lastIndex;
   }
@@ -393,7 +419,7 @@ function extractContent(parent: Node): string {
       result += "\n";
     } else if ((node as HTMLElement).dataset?.refIndex !== undefined) {
       const refIndex = (node as HTMLElement).dataset.refIndex;
-      result += ` @图${Number(refIndex) + 1} `;
+      result += ` ${getReferencePromptToken(Number(refIndex))} `;
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       // 处理 contenteditable 可能产生的 <div>/<p> 等块级元素
       const inner = extractContent(node);
