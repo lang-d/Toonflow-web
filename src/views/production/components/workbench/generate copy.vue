@@ -1057,9 +1057,10 @@ const references = computed(() => {
   }
   return uploadBox.value
     .filter((item) => item.src)
-    .map((item) => ({
+    .map((item, index) => ({
       type: getFileTypeByExt(item.src) as "image" | "video" | "audio" | "text",
       src: item.src ?? "",
+      token: `@Image${index + 1}`,
     }));
 });
 

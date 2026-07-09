@@ -335,6 +335,7 @@ function normalizeReferenceImage(input: string | ReferenceImage | UploadNodeData
     previewImage: media ? getMediaPreviewUrl(media) : input.previewImage || input.image || "",
     media,
     label: input.label,
+    token: input.token,
     source: input.source,
     sourceId: input.sourceId,
     group: input.group,
@@ -373,6 +374,7 @@ function sameReferenceList(left: ReferenceImage[], right: ReferenceImage[]) {
         left[idx]?.image === img.image &&
         left[idx]?.previewImage === img.previewImage &&
         left[idx]?.label === img.label &&
+        left[idx]?.token === img.token &&
         left[idx]?.source === img.source &&
         left[idx]?.sourceId === img.sourceId,
     )

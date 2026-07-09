@@ -162,6 +162,7 @@ const promptReferences = computed(() =>
     type: item.type,
     src: item.src,
     label: item.label,
+    token: item.token,
     group: item.group,
   })),
 );

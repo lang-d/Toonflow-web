@@ -22,6 +22,7 @@ export interface ReferenceView {
   src: string;
   originalSrc?: string;
   label: string;
+  token?: string;
   group: string;
   type: "image" | "video" | "audio" | "text";
 }

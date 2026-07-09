@@ -616,6 +616,7 @@ function normalizeReferenceImage(reference: ReferenceImage): ReferenceImage {
     previewImage: media ? getMediaPreviewUrl(media) : getReferenceDisplayUrl(reference.previewImage || reference.image, type),
     media,
     label: reference.label,
+    token: reference.token,
     source: reference.source,
     sourceId: reference.sourceId,
     group: reference.group,
@@ -637,6 +638,7 @@ function referenceImageToView(reference: ReferenceImage, index: number): Referen
     src: getReferenceDisplayUrl(preview || original, type),
     originalSrc: getReferenceDisplayUrl(original || preview, type, "original"),
     label: reference.label || $t("workbench.production.editImage.reference", { index: index + 1 }),
+    token: reference.token || `@Image${index + 1}`,
     group: reference.group || assetTypeLabel(reference.source === "local" ? "image" : ""),
     type,
   };

@@ -8,6 +8,7 @@ export interface ReferenceImage {
   previewImage?: string;
   media?: MediaRef;
   label?: string;
+  token?: string;
   source?: "asset" | "local" | "storyboard" | "directorStage" | "directorAsset" | "generated";
   sourceId?: number | string;
   group?: string;
@@ -19,6 +20,7 @@ export interface UploadNodeData {
   previewImage?: string;
   media?: MediaRef;
   label?: string;
+  token?: string;
   source?: ReferenceImage["source"];
   sourceId?: ReferenceImage["sourceId"];
   group?: string;
@@ -360,6 +362,7 @@ function normalizeReferenceData(input: Partial<ReferenceImage> = {}): ReferenceI
     previewImage: media ? getMediaPreviewUrl(media) : input.previewImage || input.image || "",
     media,
     label: input.label,
+    token: input.token,
     source: input.source,
     sourceId: input.sourceId,
     group: input.group,
@@ -480,6 +483,7 @@ export function cleanNodes(nodes: NodeType[]): CleanNode[] {
             previewImage: n.data.previewImage,
             media: normalizeMediaRef(n.data.media ?? n.data, "image"),
             label: n.data.label,
+            token: n.data.token,
             source: n.data.source,
             sourceId: n.data.sourceId,
             group: n.data.group,
@@ -495,6 +499,7 @@ export function cleanNodes(nodes: NodeType[]): CleanNode[] {
                 previewImage: r.previewImage,
                 media: normalizeMediaRef(r.media ?? r, "image"),
                 label: r.label,
+                token: r.token,
                 source: r.source,
                 sourceId: r.sourceId,
                 group: r.group,

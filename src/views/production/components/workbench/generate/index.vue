@@ -697,6 +697,7 @@ const references = computed(() => {
     .map((item) => ({
       type: item.fileType || getFileTypeByExt(item.src),
       src: item.src ?? "",
+      token: getReferenceToken(item) || undefined,
       label: getReferenceToken(item) || undefined,
       group: getReferenceGroup(item) || undefined,
     }));

@@ -48,7 +48,7 @@ const emit = defineEmits<{
   blur: [];
 }>();
 
-type PromptReference = { type: "image" | "video" | "audio" | "text"; src: string; label?: string; group?: string };
+type PromptReference = { type: "image" | "video" | "audio" | "text"; src: string; label?: string; token?: string; group?: string };
 
 const prompt = defineModel<string>({ default: "" });
 
@@ -127,6 +127,7 @@ function createRefTag(index: number): HTMLSpanElement {
   container.className = "prompt-ref-tag-host";
   container.contentEditable = "false";
   container.dataset.refIndex = String(index);
+  container.dataset.refToken = getReferencePromptToken(index);
   container.dataset.imgSrc = refSrc;
   container.style.display = "inline-block";
   container.style.width = "auto";
@@ -188,16 +189,30 @@ function normalizeReferenceToken(value: string | undefined) {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function isReferencePromptToken(value: string | undefined) {
+  return /^@(image|图)\d+$/i.test(String(value ?? "").trim());
+}
+
+function getReferenceStableToken(index: number) {
+  const ref = props.references?.[index];
+  const token = ref?.token?.trim();
+  if (token) return token;
+  const label = ref?.label?.trim();
+  if (isReferencePromptToken(label)) return label!;
+  return "";
+}
+
 function findReferenceIndexByToken(token: string) {
   const normalized = normalizeReferenceToken(token);
   if (!normalized) return -1;
-  return (props.references ?? []).findIndex((ref) => normalizeReferenceToken(ref.label) === normalized);
+  const references = props.references ?? [];
+  const tokenIndex = references.findIndex((ref) => normalizeReferenceToken(ref.token) === normalized);
+  if (tokenIndex >= 0) return tokenIndex;
+  return references.findIndex((ref) => !ref.token && normalizeReferenceToken(ref.label) === normalized);
 }
 
 function getReferencePromptToken(index: number) {
-  const label = props.references?.[index]?.label?.trim();
-  if (label) return label;
-  return `@图${index + 1}`;
+  return getReferenceStableToken(index) || `@Image${index + 1}`;
 }
 
 // 将 prompt 文本渲染到编辑器，处理 @ImageN / @图N 为标签，\n 为 <br>
@@ -418,8 +433,10 @@ function extractContent(parent: Node): string {
     } else if (node.nodeName === "BR") {
       result += "\n";
     } else if ((node as HTMLElement).dataset?.refIndex !== undefined) {
-      const refIndex = (node as HTMLElement).dataset.refIndex;
-      result += ` ${getReferencePromptToken(Number(refIndex))} `;
+      const element = node as HTMLElement;
+      const refIndex = Number(element.dataset.refIndex);
+      const refToken = element.dataset.refToken?.trim() || getReferencePromptToken(refIndex);
+      result += ` ${refToken} `;
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       // 处理 contenteditable 可能产生的 <div>/<p> 等块级元素
       const inner = extractContent(node);

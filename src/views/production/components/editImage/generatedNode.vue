@@ -131,7 +131,9 @@ const referenceImages = computed(() =>
   }),
 );
 const references = computed(() => {
-  return referenceImages.value.map((i) => ({ type: "image" as const, src: i.previewImage || i.image, label: i.label })).filter((i) => i.src);
+  return referenceImages.value
+    .map((i, index) => ({ type: "image" as const, src: i.previewImage || i.image, label: i.label, token: i.token || `@Image${index + 1}` }))
+    .filter((i) => i.src);
 });
 const currentOriginalImage = computed(() =>
   props.data.resultMedia
