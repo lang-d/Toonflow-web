@@ -52,7 +52,8 @@
       "type": {
         "image": "Image",
         "text": "Text",
-        "video": "Video"
+        "video": "Video",
+        "music": "Music"
       },
       "msg": {
         "fetchModelFailed": "Failed to fetch model data:"
@@ -566,6 +567,7 @@
       "scriptManage": "Script Management",
       "cornerScape": "Characters & Scenes",
       "production": "Video Production",
+      "productionMusic": "Music Director",
       "assetCenter": "Asset Center",
       "settings": "Settings",
       "jumpGithub": "Jump to Github",
@@ -968,7 +970,13 @@
         "batchDeleteHeader": "Batch Delete",
         "batchDeleteBody": "Are you sure you want to delete the selected {count} scripts? This cannot be undone.",
         "batchDeleteSuccess": "Batch deletion successful",
+        "extracting": "Extracting assets",
+        "waitExtract": "Waiting to extract",
+        "extractFailed": "Asset extraction failed",
         "extractingInProgress": "Extracting",
+        "extractSubmitted": "{count} script asset extraction tasks submitted",
+        "extractSkippedActive": "{count} scripts already have extraction tasks running",
+        "extractNoTask": "No extraction task was submitted",
         "projectNotFound": "Item not found",
         "selectsExport": "Please choose to export the script"
       },
@@ -1236,7 +1244,20 @@
         "confirmClear": "Clear Memory",
         "confirmClearBody": "Are you sure you want to clear {type}?",
         "confirmClearBtn": "Confirm",
-        "memoryCleared": "{type} cleared"
+        "memoryCleared": "{type} cleared",
+        "runStatusSyncing": "Syncing run status",
+        "runStatusUnknown": "Run status unavailable",
+        "runStatusSyncFailed": "Failed to sync run status",
+        "retryRunStatus": "Retry",
+        "runAlreadyRunning": "A Production Agent run is already active for this episode. Wait for it to finish or stop it before sending another message.",
+        "runStatuses": {
+          "running": "Agent running",
+          "awaiting_user": "Waiting for your input",
+          "completed": "Run completed",
+          "failed": "Run failed",
+          "cancelled": "Run cancelled",
+          "interrupted": "Run interrupted"
+        }
       },
       "wb": {
         "quickPreview": "Quick Preview",
@@ -1620,6 +1641,8 @@
       "deleteFailed": "Failed to delete material",
       "contextPackLoadFailed": "Failed to load context pack",
       "contextPackGenerated": "Context pack generated",
+      "contextPackSubmitted": "Context pack task submitted",
+      "contextPackQueued": "The context pack task has been submitted. The reader will refresh when it finishes.",
       "contextPackGenerateFailed": "Failed to generate context pack",
       "categories": {
         "outline": "Outline",
@@ -1637,6 +1660,155 @@
         "unsupported": "Unsupported",
         "failed": "Failed",
         "archived": "Archived"
+      }
+    },
+    "productionMusic": {
+      "title": "Music Director",
+      "subtitle": "Generate and review the music bible, music plan, cue prompts, and audio versions.",
+      "refresh": "Refresh",
+      "generate": "Generate",
+      "regenerate": "Regenerate",
+      "selectVersion": "Select version",
+      "refreshCues": "Refresh cues",
+      "modelPlaceholder": "Select music model",
+      "instruction": "Instruction",
+      "instructionPlaceholder": "Optional: describe what this run should emphasize or adjust",
+      "audioInstructionPlaceholder": "Optional: describe generation adjustments for this cue",
+      "taskSubmitted": "Task submitted",
+      "taskFailed": "Task failed",
+      "selectSuccess": "Version selected",
+      "untitled": "Untitled",
+      "details": "Details",
+      "compiledPrompt": "Compiled prompt",
+      "noCompiledPrompt": "No compiled prompt yet",
+      "musicSpec": "Music spec",
+      "assetVersions": "Audio versions",
+      "noAssets": "No audio versions",
+      "selected": "Selected",
+      "compilePrompt": "Compile prompt",
+      "reviewPrompt": "Review prompt",
+      "generateAudio": "Generate audio",
+      "selectGenerated": "Select generated audio as current version",
+      "content": "Content",
+      "currentVersion": "Current version",
+      "noVersion": "No version",
+      "mode": {
+        "concept": "Concept",
+        "project": "Project",
+        "episode": "Episode"
+      },
+      "stage": {
+        "ready": "Ready",
+        "waiting": "Waiting",
+        "done": "Done",
+        "advisory": "Advisory review",
+        "selectedCue": "Cue selected",
+        "pickCue": "Pick a cue",
+        "cues": "{count} cues",
+        "issues": "{count} open issues",
+        "status": {
+          "pending": "Pending",
+          "active": "Ready",
+          "running": "Running",
+          "complete": "Complete",
+          "warning": "Needs attention"
+        }
+      },
+      "agent": {
+        "title": "Music Director Agent",
+        "open": "Open Agent",
+        "placeholder": "Tell the music director what you want for this scoring pass",
+        "welcome": "Tell me the music direction for this project. I will start with the Music Bible.",
+        "submitting": "Submitting the task...",
+        "taskSubmitted": "Task submitted. I will refresh the production data when it finishes.",
+        "reply": {
+          "needBible": "The first step is the Music Bible. I can turn your direction into a project-level scoring bible.",
+          "needPlan": "The Music Bible is ready. Next I can review it or generate a Music Plan.",
+          "needCue": "The plan is ready. Select a cue so I can compile prompts or generate audio.",
+          "cueReady": "Cue {cue} is selected. I can compile its prompt, review the prompt, or generate audio."
+        },
+        "action": {
+          "generateBible": "Generate Music Bible",
+          "reviewBible": "Review Bible",
+          "generatePlan": "Generate Music Plan",
+          "regeneratePlan": "Regenerate Plan",
+          "reviewPlan": "Review Plan",
+          "compilePrompt": "Compile Prompt",
+          "reviewPrompt": "Review Prompt",
+          "generateAudio": "Generate Audio"
+        },
+        "done": {
+          "bible": "Music Bible is ready. Review it or move on to the Music Plan.",
+          "bibleReview": "Music Bible review is ready.",
+          "plan": "Music Plan is ready. Cue data has been refreshed.",
+          "planReview": "Music Plan review is ready.",
+          "compilePrompt": "Cue prompt is compiled and available in the cue inspector.",
+          "promptReview": "Cue prompt review is ready.",
+          "audio": "Audio generation finished. The cue version list has been refreshed.",
+          "default": "Task completed."
+        }
+      },
+      "bible": {
+        "title": "Music Bible",
+        "hint": "Project-level music direction, style profile, and motif references.",
+        "empty": "No music bible yet",
+        "emptyGuide": "Tell the Agent the desired music direction, then generate the Music Bible.",
+        "styleProfile": "Style profile",
+        "generateTitle": "Generate Music Bible"
+      },
+      "bibleReview": {
+        "title": "Review Bible",
+        "hint": "Review the music bible for planning and prompt issues.",
+        "needsBible": "Generate or select a Music Bible first."
+      },
+      "plan": {
+        "title": "Music Plan",
+        "hint": "Create cue sheets for concept, project, or episode scoring.",
+        "empty": "No music plan yet",
+        "emptyGuide": "Ask the Agent to generate a plan from the selected Music Bible.",
+        "needsBible": "Generate or select a Music Bible before the Music Plan.",
+        "cueSheet": "Cue sheet",
+        "selectEpisode": "Select an episode before generating an episode plan.",
+        "generateTitle": "Generate Music Plan"
+      },
+      "planReview": {
+        "title": "Review Plan",
+        "hint": "Review the music plan and cue sheet before cue prompt work.",
+        "needsPlan": "Generate or select a Music Plan first."
+      },
+      "cue": {
+        "title": "Cue Assets",
+        "hint": "Compile prompts, review prompts, generate audio, and select versions.",
+        "empty": "No cues yet",
+        "needsPlan": "Generate or select a Music Plan before cue work.",
+        "queue": "Cue queue",
+        "queueHint": "Select one cue to make it the Agent context.",
+        "pickCueFirst": "Select a cue first.",
+        "selectModelFirst": "Select a music model first.",
+        "key": "Cue",
+        "type": "Type",
+        "name": "Title",
+        "duration": "Duration",
+        "state": "State",
+        "selectedVersion": "Selected version",
+        "generationState": "Generation",
+        "reviewState": "Review"
+      },
+      "cuePrompt": {
+        "title": "Cue Prompt",
+        "hint": "Compile and review the selected cue prompt."
+      },
+      "audio": {
+        "title": "Generate Audio",
+        "hint": "Generate an audio version for the selected cue."
+      },
+      "select": {
+        "title": "Select Version",
+        "hint": "Preview complete audio versions and choose the selected cue version."
+      },
+      "review": {
+        "bible": "Music Bible review",
+        "plan": "Music Plan review"
       }
     }
   },
@@ -1899,6 +2071,7 @@
   "workbench.globalTaskCenter.domain.videoPrompt": "Video prompt",
   "workbench.globalTaskCenter.domain.audioBind": "Audio binding",
   "workbench.globalTaskCenter.domain.novelEvent": "Novel analysis",
+  "workbench.globalTaskCenter.domain.scriptAssetExtraction": "Script asset extraction",
   "workbench.globalTaskCenter.domain.media": "Media task",
   "workbench.productionReview.trackTitle": "Track review",
   "workbench.productionReview.state.pending": "Pending review",

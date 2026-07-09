@@ -43,6 +43,15 @@ export interface TaskResult {
   [key: string]: unknown;
 }
 
+export interface AsyncTaskEnvelope {
+  taskId: string;
+  unifiedTaskId?: string;
+  legacyTaskId?: number | string | null;
+  status: TaskStatus | string;
+  targetType: string;
+  targetId?: number | string | null;
+}
+
 export interface TaskStatusEvent {
   eventId?: number;
   taskId: string;

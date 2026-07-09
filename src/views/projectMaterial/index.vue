@@ -151,6 +151,7 @@ import { useI18n } from "vue-i18n";
 import { MdPreview } from "md-editor-v3";
 import { DialogPlugin } from "tdesign-vue-next";
 import AgentChatPanel from "@/components/AgentChatPanel.vue";
+import type { AsyncTaskEnvelope } from "@/types/api";
 import {
   PROJECT_MATERIAL_CATEGORIES,
   deleteProjectMaterial,
@@ -168,6 +169,7 @@ import {
 } from "@/api/projectMaterial";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
+import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 
 interface ContextAgentMessage {
   id: string;
@@ -179,6 +181,7 @@ interface ContextAgentMessage {
 const { project } = storeToRefs(projectStore());
 const { themeSetting } = storeToRefs(settingStore());
 const { t } = useI18n();
+const taskCenter = useTaskCenterStore();
 
 const READ_LIMIT = 64 * 1024;
 const TEXT_EXTENSIONS = new Set(["txt", "md", "markdown", "json", "csv"]);
@@ -218,6 +221,8 @@ const contextGenerating = ref(false);
 const contextDialogVisible = ref(false);
 const contextReviewIssues = ref<ProjectContextPackReviewIssue[]>([]);
 const contextAgentMessages = ref<ContextAgentMessage[]>([]);
+let contextPackTaskRelease: (() => void) | null = null;
+const handledContextPackTasks = new Set<string>();
 
 const projectId = computed(() => Number(project.value?.id || 0));
 const categoryCounts = computed<Record<ProjectMaterialCategory, number>>(() => {
@@ -247,6 +252,11 @@ const readProgressText = computed(() => {
 
 onMounted(() => {
   void loadAll();
+});
+
+onBeforeUnmount(() => {
+  contextPackTaskRelease?.();
+  contextPackTaskRelease = null;
 });
 
 async function loadAll() {
@@ -456,28 +466,68 @@ async function submitContextPackGeneration(instruction: string) {
   contextReviewIssues.value = [];
   try {
     const previousContent = contextContent.value.trim();
-    const result = await generateProjectContextPack({
+    const envelope = await generateProjectContextPack({
       projectId: projectId.value,
       instruction: instruction || undefined,
       previousContent: previousContent || undefined,
     });
-    contextPack.value = { ...result.contextPack, content: result.content || result.contextPack.content };
-    contextReviewIssues.value = result.review?.issues || [];
+    registerContextPackTask(envelope, assistantMessage.id);
     updateContextAgentMessage(assistantMessage.id, {
-      content: result.content || result.contextPack.content || "",
-      status: "complete",
+      content: t("workbench.projectMaterial.contextPackQueued"),
+      status: "loading",
     });
-    window.$message.success(t("workbench.projectMaterial.contextPackGenerated"));
+    window.$message.success(t("workbench.projectMaterial.contextPackSubmitted"));
   } catch (error) {
+    contextGenerating.value = false;
     const message = getErrorMessage(error, t("workbench.projectMaterial.contextPackGenerateFailed"));
     updateContextAgentMessage(assistantMessage.id, {
       content: message,
       status: "error",
     });
     window.$message.error(message);
-  } finally {
-    contextGenerating.value = false;
   }
+}
+
+function registerContextPackTask(envelope: AsyncTaskEnvelope, messageId: string) {
+  const taskId = envelope.unifiedTaskId || envelope.taskId;
+  if (!projectId.value || !taskId) return;
+  contextPackTaskRelease?.();
+  const key = createTaskKey("media", projectId.value, envelope.targetId ?? "project", undefined, taskId);
+  contextPackTaskRelease = taskCenter.registerTask(
+    {
+      key,
+      domain: "media",
+      taskId,
+      unifiedTaskId: taskId,
+      legacyTaskId: envelope.legacyTaskId ?? undefined,
+      targetType: envelope.targetType ?? "projectContextPack",
+      targetId: envelope.targetId ?? "project",
+      projectId: projectId.value,
+      status: normalizeTaskStatus(envelope.status, "queued"),
+    },
+    (task) => handleContextPackTask(task, messageId),
+  );
+}
+
+function handleContextPackTask(task: RuntimeTask, messageId: string) {
+  if (!["completed", "failed", "cancelled"].includes(task.status)) return;
+  const terminalKey = `${task.key}:${task.status}:${task.updatedAt}`;
+  if (handledContextPackTasks.has(terminalKey)) return;
+  handledContextPackTasks.add(terminalKey);
+  contextGenerating.value = false;
+  if (task.status !== "completed") {
+    const message = task.reason || t("workbench.projectMaterial.contextPackGenerateFailed");
+    updateContextAgentMessage(messageId, { content: message, status: "error" });
+    window.$message.error(message);
+    return;
+  }
+  void loadContextPack().then(() => {
+    updateContextAgentMessage(messageId, {
+      content: contextContent.value || t("workbench.projectMaterial.contextPackGenerated"),
+      status: "complete",
+    });
+    window.$message.success(t("workbench.projectMaterial.contextPackGenerated"));
+  });
 }
 
 function updateContextAgentMessage(id: string, patch: Partial<ContextAgentMessage>) {

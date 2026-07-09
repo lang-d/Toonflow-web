@@ -10,6 +10,7 @@ const domainKeys: Record<TaskDomain, string> = {
   videoPrompt: "workbench.globalTaskCenter.domain.videoPrompt",
   audioBind: "workbench.globalTaskCenter.domain.audioBind",
   novelEvent: "workbench.globalTaskCenter.domain.novelEvent",
+  scriptAssetExtraction: "workbench.globalTaskCenter.domain.scriptAssetExtraction",
   media: "workbench.globalTaskCenter.domain.media",
 };
 

@@ -60,7 +60,7 @@ const selectValueLabel = defineModel("label");
 
 const props = defineProps({
   type: {
-    type: String as () => "text" | "image" | "all" | "video",
+    type: String as () => "text" | "image" | "all" | "video" | "music",
     default: "all",
   },
   size: {
@@ -109,6 +109,7 @@ const titleMap = {
   image: $t("components.modelSelect.type.image"),
   text: $t("components.modelSelect.type.text"),
   video: $t("components.modelSelect.type.video"),
+  music: $t("components.modelSelect.type.music"),
 };
 //获取模型选择API数据
 function handleModelChange() {

@@ -12,7 +12,11 @@ export type ProductionReviewTargetType =
   | "storyboardImage"
   | "videoPrompt"
   | "bgmSuggestion"
-  | "videoResult";
+  | "videoResult"
+  | "musicBible"
+  | "musicPlan"
+  | "musicCue"
+  | "musicPrompt";
 
 export type ProductionReviewState = "pending" | "passed" | "hasIssues" | "blocked";
 

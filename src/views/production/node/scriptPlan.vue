@@ -6,6 +6,7 @@
       <Handle :id="props.handleIds.target" type="target" :position="Position.Left" style="left: calc(-1 * var(--td-comp-paddingLR-xl))" />
       <Handle :id="props.handleIds.source" type="source" :position="Position.Right" style="right: calc(-1 * var(--td-comp-paddingLR-xl))" />
     </div>
+    <t-alert v-if="generationMessage" class="generationAlert" :theme="generationTheme" :message="generationMessage" />
     <div class="content">
       <t-empty v-if="!scriptPlan" style="margin-top: 16px"></t-empty>
       <MdPreview v-else v-model="scriptPlan" :theme="mdTheme" />
@@ -43,11 +44,13 @@ import { MdEditor, MdPreview } from "md-editor-v3";
 import type { ToolbarNames } from "md-editor-v3";
 import productionAgentStore from "@/stores/productionAgent";
 import settingStore from "@/stores/setting";
+import type { DirectorPlanGenerationState } from "../utils/flowBuilder";
 const { themeSetting } = storeToRefs(settingStore());
 const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
 
 const props = defineProps<{
   id: string;
+  generation?: DirectorPlanGenerationState;
   handleIds: {
     target: string;
     source: string;
@@ -57,6 +60,46 @@ const props = defineProps<{
 const scriptPlan = defineModel<string>({ required: true });
 const editContent = ref("");
 const dialogVisible = ref(false);
+
+const generationTheme = computed<"info" | "success" | "warning" | "error">(() => {
+  const state = props.generation?.current?.state;
+  if (state === "writing" || state === "committing") return "info";
+  if (state === "committed") return "success";
+  if (props.generation?.lastFailure) return "error";
+  return "info";
+});
+
+const generationMessage = computed(() => {
+  const current = props.generation?.current;
+  if (current?.state === "writing") return "导演规划正在生成中，当前展示的仍是已提交的正式版本。";
+  if (current?.state === "committing") return "导演规划正在提交正式版本，完成后会自动刷新。";
+  if (current?.state === "committed") {
+    const parts = [
+      current.textAssetId ? `文本资产 #${current.textAssetId}` : "",
+      current.version ? `版本 ${current.version}` : "",
+    ].filter(Boolean);
+    return parts.length ? `导演规划已提交：${parts.join(" / ")}` : "导演规划已提交。";
+  }
+  const failure = props.generation?.lastFailure;
+  if (!failure) return "";
+  return `上次导演规划提交失败：${formatFailureReason(failure.errorJson)}`;
+});
+
+function formatFailureReason(errorJson?: string | null) {
+  if (!errorJson) return "请重新生成或检查输入。";
+  try {
+    const parsed = JSON.parse(errorJson);
+    if (typeof parsed?.message === "string" && parsed.message.trim()) return parsed.message;
+    if (Array.isArray(parsed?.issues) && parsed.issues.length) {
+      return parsed.issues
+        .map((issue: any) => issue?.message || issue?.field || "")
+        .filter(Boolean)
+        .slice(0, 3)
+        .join("；");
+    }
+  } catch {}
+  return errorJson;
+}
 
 const toolbars: ToolbarNames[] = [
   "bold",
@@ -124,6 +167,10 @@ function onPaste(e: ClipboardEvent) {
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+
+  .generationAlert {
+    margin-top: 8px;
   }
 
   .title {

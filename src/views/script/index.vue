@@ -49,9 +49,8 @@
             </template>
             <span class="content">{{ item.content }}</span>
 
-            <t-loading v-if="item?.extractState == 0" :text="$t('workbench.script.msg.extracting')" size="small"></t-loading>
-            <t-loading v-if="item?.extractState == 2" :text="$t('workbench.script.msg.waitExtract')" size="small"></t-loading>
-            <t-tooltip :content="item.errorReason" v-if="item?.extractState == -1" theme="light">
+            <t-loading v-if="isScriptExtractionActive(item)" :text="getScriptExtractionText(item)" size="small"></t-loading>
+            <t-tooltip :content="getScriptExtractionReason(item)" v-else-if="isScriptExtractionFailed(item)" theme="light">
               <t-tag theme="danger" size="small">{{ $t("workbench.script.msg.extractFailed") }}</t-tag>
             </t-tooltip>
             <div class="assetTags" v-else-if="item.relatedAssets?.length" @click.stop>
@@ -81,8 +80,11 @@ import batchAddScript from "./components/batchAddScript.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import imageListCacheStore from "@/stores/imageListCache";
+import useTaskCenter, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
+import type { TaskStatus } from "@/types/api";
 
 const { clearScriptCache } = imageListCacheStore();
+const taskCenter = useTaskCenter();
 
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
@@ -101,6 +103,30 @@ interface Script {
   extractState?: -1 | 0 | 1 | 2; // -1 失败 0 正在提取 1 成功 等待提取
   errorReason?: string;
   relatedAssets?: ScriptAsset[];
+  assetExtraction?: {
+    status?: TaskStatus | string;
+    taskId?: string;
+    legacyTaskId?: string | number | null;
+    reason?: string;
+  } | null;
+}
+interface ScriptAssetExtractionTask {
+  scriptIds?: number[];
+  taskId?: string;
+  unifiedTaskId?: string;
+  legacyTaskId?: string | number | null;
+  status?: TaskStatus | string;
+  targetType?: string;
+  targetId?: string | number | null;
+}
+interface ScriptAssetExtractionSkipped {
+  scriptId?: number;
+  reason?: string;
+}
+interface ScriptAssetExtractionResponse {
+  total?: number;
+  tasks?: ScriptAssetExtractionTask[];
+  skipped?: ScriptAssetExtractionSkipped[];
 }
 const scripts = ref<Script[]>([]);
 const searchQuery = ref("");
@@ -108,6 +134,10 @@ const addScriptShow = ref(false);
 const selectedIds = ref<number[]>([]);
 const scriptLoad = ref(false);
 const batchScriptShow = ref(false);
+const extractionTaskReleases = new Map<string, () => void>();
+const handledExtractionTasks = new Set<string>();
+const ACTIVE_EXTRACTION_STATUSES = new Set<TaskStatus>(["queued", "submitting", "processing"]);
+const TERMINAL_EXTRACTION_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled"]);
 const isAllSelected = computed(() => scripts.value.length > 0 && selectedIds.value.length === scripts.value.length);
 function toggleSelect(id: number) {
   const idx = selectedIds.value.indexOf(id);
@@ -126,13 +156,104 @@ function toggleSelectAll(checked: boolean) {
   }
 }
 // 搜索剧本
+function unwrapResponseData<T = any>(response: any): T {
+  return response?.data?.data ?? response?.data ?? response;
+}
+
+function normalizeExtractionStatus(status: unknown, fallback: TaskStatus = "pending") {
+  return normalizeTaskStatus(status, fallback);
+}
+
+function isActiveExtractionStatus(status: unknown) {
+  return ACTIVE_EXTRACTION_STATUSES.has(normalizeExtractionStatus(status));
+}
+
+function isScriptExtractionActive(item: Script) {
+  if (item.assetExtraction?.status) return isActiveExtractionStatus(item.assetExtraction.status);
+  return item.extractState === 0 || item.extractState === 2;
+}
+
+function isScriptExtractionFailed(item: Script) {
+  if (item.assetExtraction?.status) return normalizeExtractionStatus(item.assetExtraction.status) === "failed";
+  return item.extractState === -1;
+}
+
+function getScriptExtractionText(item: Script) {
+  const status = normalizeExtractionStatus(item.assetExtraction?.status, item.extractState === 2 ? "queued" : "processing");
+  return status === "queued" || status === "submitting" ? $t("workbench.script.msg.waitExtract") : $t("workbench.script.msg.extracting");
+}
+
+function getScriptExtractionReason(item: Script) {
+  return item.assetExtraction?.reason || item.errorReason || $t("workbench.script.msg.extractFailed");
+}
+
+function releaseExtractionTask(taskId: string) {
+  extractionTaskReleases.get(taskId)?.();
+  extractionTaskReleases.delete(taskId);
+}
+
+function handleExtractionTaskUpdate(task: RuntimeTask) {
+  if (!TERMINAL_EXTRACTION_STATUSES.has(task.status)) return;
+  const terminalKey = `${task.key}:${task.status}:${task.updatedAt}`;
+  if (handledExtractionTasks.has(terminalKey)) return;
+  handledExtractionTasks.add(terminalKey);
+  void searchScripts();
+  if (task.status === "failed") {
+    window.$message.error(task.reason || $t("workbench.script.msg.extractFailed"));
+  }
+}
+
+function registerExtractionTask(task: ScriptAssetExtractionTask, fallbackTargetId?: string | number | null) {
+  const taskId = task.unifiedTaskId || task.taskId;
+  if (!project.value?.id || !taskId) return;
+  releaseExtractionTask(taskId);
+  const targetId = task.targetId ?? fallbackTargetId ?? task.scriptIds?.join(",") ?? taskId;
+  const key = createTaskKey("scriptAssetExtraction", Number(project.value.id), targetId, undefined, taskId);
+  const release = taskCenter.registerTask(
+    {
+      key,
+      domain: "scriptAssetExtraction",
+      taskId,
+      unifiedTaskId: taskId,
+      legacyTaskId: task.legacyTaskId ?? undefined,
+      targetType: task.targetType ?? "scriptAssetExtraction",
+      targetId,
+      projectId: Number(project.value.id),
+      status: normalizeExtractionStatus(task.status, "queued"),
+    },
+    handleExtractionTaskUpdate,
+  );
+  extractionTaskReleases.set(taskId, release);
+}
+
+function syncScriptExtractionTasksFromList() {
+  scripts.value.forEach((script) => {
+    const extraction = script.assetExtraction;
+    const taskId = extraction?.taskId;
+    if (!taskId || !isActiveExtractionStatus(extraction?.status)) return;
+    registerExtractionTask(
+      {
+        taskId,
+        legacyTaskId: extraction?.legacyTaskId,
+        status: extraction?.status,
+        targetType: "scriptAssetExtraction",
+        targetId: String(script.id),
+        scriptIds: [script.id],
+      },
+      String(script.id),
+    );
+  });
+}
+
 async function searchScripts() {
   try {
     const res = await axios.post("/script/getScrptApi", {
       projectId: project.value?.id,
       name: searchQuery.value,
     });
-    scripts.value = res.data;
+    const data = unwrapResponseData<Script[]>(res);
+    scripts.value = Array.isArray(data) ? data : [];
+    syncScriptExtractionTasksFromList();
   } catch (error) {
     console.error("搜索剧本失败:", error);
     window.$message.error($t("workbench.script.msg.searchFailed"));
@@ -187,6 +308,10 @@ function handleScriptClick(item: Script) {
 // 删除剧本
 async function handleDeleteScript(scriptId: number) {
   //判断是否有资产正在提取中
+  const target = scripts.value.find((item) => item.id === scriptId);
+  if (target && isScriptExtractionActive(target)) {
+    return window.$message.error($t("workbench.script.msg.extractingInProgress"));
+  }
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.script.msg.deleteHeader"),
     body: $t("workbench.script.msg.deleteBody"),
@@ -219,11 +344,24 @@ async function handleExtractAssets() {
   //判断是否有资产正在提取中
   scriptLoad.value = true;
   try {
-    await axios.post("/script/extractAssets", {
+    const response = await axios.post("/script/extractAssets", {
       scriptIds: selectedIds.value,
       projectId: project.value!.id,
       groupSize: otherSetting.value.assetsBatchGenereateSize,
     });
+    const data = unwrapResponseData<ScriptAssetExtractionResponse>(response);
+    const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+    const skipped = Array.isArray(data?.skipped) ? data.skipped : [];
+    tasks.forEach((task) => registerExtractionTask(task));
+    if (tasks.length) {
+      window.$message.success($t("workbench.script.msg.extractSubmitted", { count: tasks.length }));
+    }
+    if (skipped.length) {
+      window.$message.warning($t("workbench.script.msg.extractSkippedActive", { count: skipped.length }));
+    }
+    if (!tasks.length && !skipped.length) {
+      window.$message.warning($t("workbench.script.msg.extractNoTask"));
+    }
     searchScripts();
     selectedIds.value = [];
   } catch (e) {
@@ -239,7 +377,7 @@ async function handleBatchDelete() {
     return;
   }
   //判断是否有资产正在提取中
-  const extractingIds = new Set(notCompletedData.value.map((s) => s.id));
+  const extractingIds = new Set(scripts.value.filter(isScriptExtractionActive).map((s) => s.id));
   if (selectedIds.value.some((id) => extractingIds.has(id))) {
     return window.$message.error($t("workbench.script.msg.extractingInProgress"));
   }
@@ -272,35 +410,14 @@ async function handleBatchDelete() {
   });
 }
 
-let pollingTimer: ReturnType<typeof setInterval> | null = null;
-
-function startPolling() {
-  if (pollingTimer) return;
-  pollingTimer = setInterval(async () => {
-    if (notCompletedData.value.length === 0) {
-      stopPolling();
-      return;
-    }
-    await pollScriptAssets();
-  }, 3000);
-}
-
-function stopPolling() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-  }
-}
-const notCompletedData = computed(() => {
-  return scripts.value.filter((s) => s.extractState == 0);
-});
 // 轮询相关
 
 async function pollScriptAssets() {
-  if (notCompletedData.value.length === 0) return;
-  const ids = notCompletedData.value.map((item) => item.id);
+  return;
+  if (true) return;
+  const ids: number[] = [];
   try {
-    const { data } = await axios.post("/script/pollScriptAssets", { ids });
+    const data: unknown[] = [];
     if (data.length) {
       searchScripts();
     }
@@ -308,18 +425,9 @@ async function pollScriptAssets() {
     console.error("轮询事件状态失败:", e);
   }
 }
-watch(
-  () => notCompletedData.value,
-  (newVal) => {
-    if (newVal.length > 0) {
-      startPolling();
-    } else {
-      stopPolling();
-    }
-  },
-);
 onUnmounted(() => {
-  stopPolling();
+  extractionTaskReleases.forEach((release) => release());
+  extractionTaskReleases.clear();
 });
 </script>
 

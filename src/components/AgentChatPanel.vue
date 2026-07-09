@@ -12,15 +12,27 @@
     </div>
     <div ref="chatBoxRef" class="chatBox">
       <t-chat-list :clear-history="false">
-        <t-chat-message
-          v-for="message in chatMessages"
-          :key="message.id"
-          :message="message"
-          :name="message.name"
-          :placement="message.role === 'user' ? 'right' : 'left'"
-          :variant="message.role === 'user' ? 'base' : 'outline'"
-          :status="message.status"
-          allowContentSegmentCustom />
+        <template v-for="message in chatMessages" :key="message.id">
+          <t-chat-message
+            :message="message"
+            :name="message.name"
+            :placement="message.role === 'user' ? 'right' : 'left'"
+            :variant="message.role === 'user' ? 'base' : 'outline'"
+            :status="message.status"
+            allowContentSegmentCustom />
+          <div v-if="message.actions?.length" class="messageActions">
+            <t-button
+              v-for="action in message.actions"
+              :key="action.value"
+              size="small"
+              :theme="action.theme || 'primary'"
+              :variant="action.variant || 'outline'"
+              :disabled="action.disabled || loading"
+              @click="emit('action', action.value)">
+              {{ action.label }}
+            </t-button>
+          </div>
+        </template>
       </t-chat-list>
       <t-chat-sender
         class="inputBox"
@@ -43,6 +55,15 @@ export interface AgentPanelMessage {
   role: "user" | "assistant";
   content: string;
   status?: "complete" | "pending" | "streaming" | "error" | "loading";
+  actions?: AgentPanelAction[];
+}
+
+export interface AgentPanelAction {
+  label: string;
+  value: string;
+  theme?: "default" | "primary" | "success" | "warning" | "danger";
+  variant?: "base" | "outline" | "dashed" | "text";
+  disabled?: boolean;
 }
 
 const props = defineProps<{
@@ -57,6 +78,7 @@ const emit = defineEmits<{
   close: [];
   send: [text: string];
   stop: [];
+  action: [value: string];
 }>();
 
 const inputValue = ref("");
@@ -86,6 +108,7 @@ const chatMessages = computed(() =>
           data: isLoading ? $t("components.artifactGenerateDialog.generating") : message.content,
         },
       ],
+      actions: message.actions,
     };
   }),
 );
@@ -179,6 +202,13 @@ function scrollToBottom() {
     min-height: 0;
     padding-right: 8px;
     overflow: auto;
+  }
+
+  .messageActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: -4px 0 12px 48px;
   }
 
   .header {

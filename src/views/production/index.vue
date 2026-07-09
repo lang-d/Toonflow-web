@@ -38,7 +38,7 @@
       <scriptNode :id="props.id" v-model="flowData.script" :handleIds="props.data.handleIds" />
     </template>
     <template #node-scriptPlan="props">
-      <scriptPlan :id="props.id" v-model="flowData.scriptPlan" :handleIds="props.data.handleIds" />
+      <scriptPlan :id="props.id" v-model="flowData.scriptPlan" :generation="flowData.directorPlanGeneration" :handleIds="props.data.handleIds" />
     </template>
     <template #node-storyboardTable="props">
       <storyboardTable
@@ -574,7 +574,7 @@ async function loadEpisodeFlow() {
     await agentStore.getFlowData(scriptId);
     if (!isCurrent()) return;
     agentStore.updateContext(scriptId);
-    await agentStore.getHistory(scriptId);
+    await Promise.all([agentStore.getHistory(scriptId), agentStore.syncRunStatus(scriptId)]);
     if (!isCurrent()) return;
     await layoutGraph("LR", { isCurrent, manageLoading: false });
     if (isCurrent()) saveCurrentCanvasMemory();

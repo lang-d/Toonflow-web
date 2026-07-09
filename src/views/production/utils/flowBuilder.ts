@@ -203,9 +203,26 @@ export interface StoryboardGenerationLastFailure {
   updatedAt: number;
 }
 
+export interface DirectorPlanGenerationState {
+  current: null | {
+    generationId: string;
+    state: string;
+    textAssetId?: number | null;
+    version?: number | null;
+    updatedAt: number;
+  };
+  lastFailure: null | {
+    generationId: string;
+    state: "invalid" | "failed" | string;
+    errorJson?: string | null;
+    updatedAt: number;
+  };
+}
+
 export interface FlowData {
   script: string;
   scriptPlan: string;
+  directorPlanGeneration: DirectorPlanGenerationState;
   assets: AssetItem[];
   storyboardTable: string;
   storyboardTableMeta?: StoryboardTableMeta;

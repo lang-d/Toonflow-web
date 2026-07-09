@@ -1,4 +1,5 @@
 import axios from "@/utils/axios";
+import type { AsyncTaskEnvelope } from "@/types/api";
 
 type ApiEnvelope<T> = {
   code?: number;
@@ -112,18 +113,7 @@ export function deleteProjectMaterial(params: { projectId: number; id: number })
 }
 
 export function generateProjectContextPack(params: GenerateProjectContextPackParams) {
-  return axios
-    .post("/project/contextPack/generate", params)
-    .then((response) =>
-      unwrapData<{
-        contextPack: ProjectContextPack;
-        content: string;
-        review: {
-          status: "passed";
-          issues: ProjectContextPackReviewIssue[];
-        };
-      }>(response),
-    );
+  return axios.post("/project/contextPack/generate", params).then((response) => unwrapData<AsyncTaskEnvelope>(response));
 }
 
 export function getProjectContextPack(params: { projectId: number }) {

@@ -15,6 +15,7 @@ export type TaskDomain =
   | "videoPrompt"
   | "audioBind"
   | "novelEvent"
+  | "scriptAssetExtraction"
   | "media";
 export type TaskTransport = "legacy-polling" | "unified-events" | "auto";
 export type TaskSource = "submit" | "socket" | "snapshot" | "legacy";
@@ -60,7 +61,18 @@ type LegacyRecord = Record<string, any>;
 
 const ACTIVE_STATUSES = new Set<TaskStatus>(["queued", "submitting", "processing"]);
 const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled"]);
-const ALL_DOMAINS: TaskDomain[] = ["flowImage", "assetImage", "assetPrompt", "storyboardImage", "video", "videoPrompt", "audioBind", "novelEvent", "media"];
+const ALL_DOMAINS: TaskDomain[] = [
+  "flowImage",
+  "assetImage",
+  "assetPrompt",
+  "storyboardImage",
+  "video",
+  "videoPrompt",
+  "audioBind",
+  "novelEvent",
+  "scriptAssetExtraction",
+  "media",
+];
 const LEGACY_BATCH_SIZE = 20;
 const FLOW_IMAGE_CONCURRENCY = 3;
 const TASK_RETENTION_MS = 60_000;
@@ -73,6 +85,7 @@ function normalizeDomain(value: TaskStatusEvent["taskType"] | TaskDomain, target
   if (hint.includes("assetprompt") || hint.includes("asset_prompt") || hint.includes("polish")) return "assetPrompt";
   if (hint.includes("audiobind") || hint.includes("audio_bind")) return "audioBind";
   if (hint.includes("novelevent") || hint.includes("novel_event")) return "novelEvent";
+  if (hint.includes("scriptassetextraction") || hint.includes("script_asset_extraction")) return "scriptAssetExtraction";
   if (hint.includes("video") && hint.includes("prompt")) return "videoPrompt";
   if (hint.includes("productionasset") || hint.includes("image:asset") || hint.includes("image:assets")) return "assetImage";
   if (hasFlowImageHint) return "flowImage";
@@ -127,6 +140,22 @@ function isMissingTaskError(error: any) {
   return status === 404 || /task.*not found|not found.*task|任务不存在|数据不存在/i.test(message);
 }
 
+function unwrapResponseData(response: any) {
+  return response?.data?.data ?? response?.data ?? response;
+}
+
+function parseJsonObject(value: unknown) {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 export default defineStore("taskCenter", () => {
   const tasks = shallowReactive(new Map<string, RuntimeTask>());
   const listeners = new Map<string, Set<TaskListener>>();
@@ -146,6 +175,7 @@ export default defineStore("taskCenter", () => {
     videoPrompt: 0,
     audioBind: 0,
     novelEvent: 0,
+    scriptAssetExtraction: 0,
     media: 0,
   });
   const lastPollDuration = ref<Record<TaskDomain, number>>({
@@ -157,6 +187,7 @@ export default defineStore("taskCenter", () => {
     videoPrompt: 0,
     audioBind: 0,
     novelEvent: 0,
+    scriptAssetExtraction: 0,
     media: 0,
   });
   const lastLongTask = ref(0);
@@ -573,6 +604,29 @@ export default defineStore("taskCenter", () => {
     });
   }
 
+  function normalizeTaskDetailRecord(task: RuntimeTask, detail: Record<string, any>): Partial<RuntimeTask> {
+    const resultJson = parseJsonObject(detail.resultJson ?? detail.result_json);
+    const result = detail.result ?? detail.resultData ?? detail.resultJson ?? resultJson;
+    const updatedAt = Number(detail.updatedAt ?? detail.updateTime ?? detail.finishedAt ?? detail.createTime) || Date.now();
+    return {
+      unifiedTaskId: detail.taskId ?? detail.unifiedTaskId ?? task.unifiedTaskId,
+      legacyTaskId: detail.legacyTaskId ?? detail.id ?? task.legacyTaskId,
+      taskId: detail.taskId ?? detail.unifiedTaskId ?? task.taskId,
+      targetType: detail.targetType ?? task.targetType,
+      targetId: detail.targetId ?? task.targetId,
+      scriptId: detail.scriptId ?? task.scriptId,
+      nodeId: detail.nodeId ?? task.nodeId,
+      status: normalizeTaskStatus(detail.status, task.status),
+      result: normalizeTaskResult(result && typeof result === "object" ? result : resultJson, mediaFallbackType(task.domain)),
+      reason: detail.reason ?? detail.errorReason ?? detail.message ?? "",
+      phase: detail.phase ?? task.phase,
+      progress: detail.progress ?? task.progress,
+      version: detail.version ?? task.version,
+      source: "snapshot",
+      updatedAt,
+    };
+  }
+
   function reconcileSnapshotMissing(expectedTasks: RuntimeTask[], records: TaskStatusEvent[]) {
     const returnedIds = new Set(records.map((record) => String(record.taskId)));
     expectedTasks.forEach((task) => {
@@ -638,8 +692,27 @@ export default defineStore("taskCenter", () => {
 
   async function resyncTask(key: string) {
     const task = findTaskByKey(key);
-    if (!task?.unifiedTaskId) throw new Error("Task cannot be synced without unified taskId");
-    await refreshUnifiedTasks([task]);
+    const taskId = task?.unifiedTaskId ?? (typeof task?.taskId === "string" ? task.taskId : undefined);
+    if (!task || !taskId) throw new Error("Task cannot be synced without unified taskId");
+    try {
+      const response = await axios.post("/task/taskDetails", { taskId });
+      const data = unwrapResponseData(response);
+      const detail = (data?.task ?? data?.detail ?? data) as Record<string, any>;
+      if (!detail || typeof detail !== "object") throw new Error("Task detail response is empty");
+      updateTask(task.key, normalizeTaskDetailRecord(task, detail));
+      snapshotReconciliations.delete(task.key);
+    } catch (error) {
+      if (isMissingTaskError(error)) {
+        const previous = snapshotReconciliations.get(task.key);
+        snapshotReconciliations.set(task.key, {
+          taskKey: task.key,
+          missingCount: Math.max(previous?.missingCount ?? 0, SNAPSHOT_MISSING_THRESHOLD),
+          lastCheckedAt: Date.now(),
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   async function syncProjectTasks(projectId: number, scriptId?: number) {

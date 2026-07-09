@@ -2,7 +2,14 @@ import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import { useChat, type XmlTagEvent } from "@/utils/useChat";
-import type { DeriveAsset, FlowData, Storyboard, StoryboardGenerationLastFailure, StoryboardTableMeta } from "@/views/production/utils/flowBuilder";
+import type {
+  DeriveAsset,
+  DirectorPlanGenerationState,
+  FlowData,
+  Storyboard,
+  StoryboardGenerationLastFailure,
+  StoryboardTableMeta,
+} from "@/views/production/utils/flowBuilder";
 import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
@@ -11,12 +18,45 @@ import type { Ref, WatchStopHandle } from "vue";
 
 type ProductionChat = ReturnType<typeof useChat>;
 
+export type ProductionAgentRunStatus = "running" | "awaiting_user" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface ProductionAgentRun {
+  runId: string;
+  status: ProductionAgentRunStatus;
+  currentStage: string | null;
+  currentSubAgent: string | null;
+  reason: string | null;
+}
+
+interface ProductionAgentRunStatusPayload {
+  serverTime?: number;
+  activeRun?: unknown;
+  latestRun?: unknown;
+}
+
+interface ProductionAgentRunUpdatePayload {
+  agentKey?: string;
+  projectId?: number | string;
+  scriptId?: number | string;
+  serverTime?: number;
+  status?: ProductionAgentRunStatus;
+  run?: unknown;
+  rejected?: boolean;
+  activeRun?: unknown;
+  reason?: string | null;
+}
+
 interface EpisodeSession {
   episodeId: number;
   isolationKey: string;
   flowData: Ref<FlowData>;
   loadingHistory: Ref<boolean>;
   thinkLevel: Ref<number>;
+  activeRun: Ref<ProductionAgentRun | null>;
+  latestRun: Ref<ProductionAgentRun | null>;
+  runStatusLoading: Ref<boolean>;
+  runStatusError: Ref<string>;
+  submitting: Ref<boolean>;
   chatApi: ProductionChat;
   stopSocketWatch: WatchStopHandle;
   assetTaskBindings: Map<number, () => void>;
@@ -24,6 +64,10 @@ interface EpisodeSession {
   historyRequestId: number;
   historyReconcileId: number;
   flowRequestId: number;
+  runStatusRequestId: number;
+  runServerTime: number;
+  submissionSyncTimer: ReturnType<typeof setTimeout> | null;
+  terminalRunKeys: Set<string>;
   contentSavePromise: Promise<void>;
   flowRefreshPromise: Promise<void> | null;
   completedMessageIds: Set<string>;
@@ -79,6 +123,25 @@ const HISTORY_RECONCILE_RETRY_DELAY_MS = 3_000;
 const HISTORY_RECONCILE_TEXT_TAIL_LENGTH = 80;
 const HISTORY_RECONCILE_MIN_TEXT_LENGTH = 120;
 const PRODUCTION_ASSET_TASK_TTL_MS = 24 * 60 * 60 * 1000;
+const PRODUCTION_AGENT_KEY = "productionAgent";
+const RUN_STATUS_SYNC_DELAY_MS = 3_000;
+const RUN_STATUSES = new Set<ProductionAgentRunStatus>(["running", "awaiting_user", "completed", "failed", "cancelled", "interrupted"]);
+
+function normalizeProductionAgentRun(value: unknown): ProductionAgentRun | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  const status = source.status;
+  if (typeof status !== "string" || !RUN_STATUSES.has(status as ProductionAgentRunStatus)) return null;
+  const runId = source.runId ?? source.run_id;
+  if (runId == null || String(runId).trim() === "") return null;
+  return {
+    runId: String(runId),
+    status: status as ProductionAgentRunStatus,
+    currentStage: (source.currentStage ?? source.current_stage) == null ? null : String(source.currentStage ?? source.current_stage),
+    currentSubAgent: (source.currentSubAgent ?? source.current_sub_agent) == null ? null : String(source.currentSubAgent ?? source.current_sub_agent),
+    reason: source.reason == null || String(source.reason).trim() === "" ? null : String(source.reason),
+  };
+}
 
 function productionAssetTaskStorageKey(projectId: number, episodeId: number) {
   return `productionAssetTasks:${projectId}:${episodeId}`;
@@ -165,6 +228,10 @@ function createEmptyFlowData(): FlowData {
   return {
     script: "",
     scriptPlan: "",
+    directorPlanGeneration: {
+      current: null,
+      lastFailure: null,
+    },
     storyboardTable: "",
     storyboardTableMeta: undefined,
     storyboardGenerationLastFailure: null,
@@ -312,12 +379,55 @@ function normalizeStoryboardGenerationLastFailure(value: any): StoryboardGenerat
   };
 }
 
+function normalizeNullableNumber(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function normalizeDirectorPlanGeneration(value: any): DirectorPlanGenerationState {
+  const current = value?.current && typeof value.current === "object" ? value.current : null;
+  const lastFailure = value?.lastFailure ?? value?.last_failure;
+  return {
+    current: current
+      ? {
+          generationId: String(current.generationId ?? current.generation_id ?? ""),
+          state: String(current.state ?? ""),
+          textAssetId: normalizeNullableNumber(current.textAssetId ?? current.text_asset_id),
+          version: normalizeNullableNumber(current.version),
+          updatedAt: Number(current.updatedAt ?? current.updated_at ?? 0) || 0,
+        }
+      : null,
+    lastFailure:
+      lastFailure && typeof lastFailure === "object"
+        ? {
+            generationId: String(lastFailure.generationId ?? lastFailure.generation_id ?? ""),
+            state: String(lastFailure.state ?? ""),
+            errorJson: lastFailure.errorJson ?? lastFailure.error_json ?? null,
+            updatedAt: Number(lastFailure.updatedAt ?? lastFailure.updated_at ?? 0) || 0,
+          }
+        : null,
+  };
+}
+
 type StoryboardCommitResult =
   | { status: "committed"; rowCount?: number; groupCount?: number; revision?: number }
   | { status: "invalid"; issues?: Array<{ index?: number; field?: string; message?: string }> }
   | { status: "failed"; error?: { message?: string; code?: string } };
 
+type DirectorPlanCommitResult =
+  | { status: "committed"; generationId?: string; textAssetId?: number; version?: number }
+  | { status: "invalid" | "failed"; generationId?: string; errorJson?: string; error?: { message?: string; code?: string } };
+
+function isDirectorPlanCommitResult(value: any): value is DirectorPlanCommitResult {
+  return (
+    (value?.status === "committed" || value?.status === "invalid" || value?.status === "failed") &&
+    (value?.generationId !== undefined || value?.generation_id !== undefined || value?.textAssetId !== undefined || value?.text_asset_id !== undefined)
+  );
+}
+
 function isStoryboardCommitResult(value: any): value is StoryboardCommitResult {
+  if (isDirectorPlanCommitResult(value)) return false;
   return value?.status === "committed" || value?.status === "invalid" || value?.status === "failed";
 }
 
@@ -344,6 +454,20 @@ function extractStoryboardCommitResult(value: any): StoryboardCommitResult | und
   return undefined;
 }
 
+function extractDirectorPlanCommitResult(value: any): DirectorPlanCommitResult | undefined {
+  if (!value) return undefined;
+  if (isDirectorPlanCommitResult(value)) return value;
+  const parsed = parseMaybeJson(value);
+  if (parsed && parsed !== value) return extractDirectorPlanCommitResult(parsed);
+  if (typeof value !== "object") return undefined;
+
+  for (const key of ["result", "data", "commitResult", "directorPlanCommitResult", "directorPlanResult"]) {
+    const found = extractDirectorPlanCommitResult(value[key]);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 function commitResultFromThinkingTitle(title: unknown): StoryboardCommitResult | undefined {
   if (typeof title !== "string") return undefined;
   if (title === "storyboard table committed") return { status: "committed" };
@@ -363,6 +487,23 @@ function storyboardFailureMessage(failure: StoryboardGenerationLastFailure) {
     if (typeof error?.message === "string" && error.message.trim()) return error.message;
   } catch {}
   return "分镜表提交失败，请稍后重试。";
+}
+
+function directorPlanFailureMessage(errorJson?: string | null, fallback?: string) {
+  if (fallback) return fallback;
+  try {
+    const error = errorJson ? JSON.parse(errorJson) : undefined;
+    if (typeof error?.message === "string" && error.message.trim()) return error.message;
+    if (Array.isArray(error?.issues) && error.issues.length) {
+      const summary = error.issues
+        .map((issue: any) => issue?.message || issue?.field || "")
+        .filter(Boolean)
+        .slice(0, 3)
+        .join("；");
+      if (summary) return summary;
+    }
+  } catch {}
+  return errorJson || "导演规划提交失败，请稍后重试。";
 }
 
 function makeProductionAgentStore(projectId: string) {
@@ -404,12 +545,14 @@ function makeProductionAgentStore(projectId: string) {
       const storyboardTable = data?.storyboardTable ?? "";
       const storyboardTableMeta = normalizeStoryboardTableMeta((data as any)?.storyboardTableMeta, storyboardTable);
       const storyboardGenerationLastFailure = normalizeStoryboardGenerationLastFailure((data as any)?.storyboardGenerationLastFailure);
+      const directorPlanGeneration = normalizeDirectorPlanGeneration((data as any)?.directorPlanGeneration);
       return {
         ...createEmptyFlowData(),
         ...(data ?? {}),
         storyboardTable,
         storyboardTableMeta,
         storyboardGenerationLastFailure,
+        directorPlanGeneration,
         assets: (data?.assets ?? []).map((asset: any) =>
           normalizeAssetLike({
             ...asset,
@@ -477,18 +620,6 @@ function makeProductionAgentStore(projectId: string) {
       return true;
     }
 
-    function markAgentMessageTerminal(session: EpisodeSession, messageId: string | undefined, status: "complete" | "error") {
-      if (!messageId) return;
-      const msg = session.chatApi.findMessage(messageId) as any;
-      if (!msg) return;
-      msg.status = status;
-      msg.content?.forEach((content: any) => {
-        if (content.status === "pending" || content.status === "streaming") content.status = status;
-      });
-      session.chatApi.currentMessageId.value = null;
-      session.chatApi.status.value = "idle";
-    }
-
     function getSaveWarnings(response: any): string[] {
       const warnings = response?.data?.warnings ?? response?.warnings;
       return Array.isArray(warnings) ? warnings.filter((item) => typeof item === "string") : [];
@@ -505,6 +636,94 @@ function makeProductionAgentStore(projectId: string) {
 
     function getActiveSession() {
       return getSession(episodesId.value);
+    }
+
+    function clearSubmissionSyncTimer(session: EpisodeSession) {
+      if (session.submissionSyncTimer) clearTimeout(session.submissionSyncTimer);
+      session.submissionSyncTimer = null;
+    }
+
+    function applyRunStatusSnapshot(session: EpisodeSession, payload: ProductionAgentRunStatusPayload) {
+      const serverTime = Number(payload.serverTime ?? 0);
+      if (serverTime > 0 && serverTime < session.runServerTime) return false;
+      if (serverTime > 0) session.runServerTime = serverTime;
+
+      const activeRun = normalizeProductionAgentRun(payload.activeRun);
+      const latestRun = normalizeProductionAgentRun(payload.latestRun);
+      session.activeRun.value = activeRun?.status === "running" ? activeRun : null;
+      session.latestRun.value = latestRun ?? activeRun;
+      session.runStatusError.value = "";
+      session.submitting.value = false;
+      clearSubmissionSyncTimer(session);
+      return true;
+    }
+
+    async function syncRunStatus(scriptId = episodesId.value) {
+      const session = getSession(scriptId);
+      if (!session) return null;
+      const requestId = ++session.runStatusRequestId;
+      session.runStatusLoading.value = true;
+      try {
+        const response: any = await axios.post("/agent/run/status", {
+          agentKey: PRODUCTION_AGENT_KEY,
+          projectId: Number(projectId),
+          scriptId: session.episodeId,
+        });
+        if (requestId !== session.runStatusRequestId) return session.activeRun.value ?? session.latestRun.value;
+        const payload = (response?.data ?? response ?? {}) as ProductionAgentRunStatusPayload;
+        applyRunStatusSnapshot(session, payload);
+        return session.activeRun.value ?? session.latestRun.value;
+      } catch (error: any) {
+        if (requestId === session.runStatusRequestId) {
+          session.runStatusError.value = error?.message || $t("workbench.production.chatBox.runStatusSyncFailed");
+        }
+        return null;
+      } finally {
+        if (requestId === session.runStatusRequestId) session.runStatusLoading.value = false;
+      }
+    }
+
+    function refreshTerminalRun(session: EpisodeSession, run: ProductionAgentRun) {
+      const key = `${run.runId}:${run.status}`;
+      if (session.terminalRunKeys.has(key)) return;
+      session.terminalRunKeys.add(key);
+      if (session.terminalRunKeys.size > 100) {
+        const oldest = session.terminalRunKeys.values().next().value;
+        if (oldest) session.terminalRunKeys.delete(oldest);
+      }
+      void Promise.allSettled([getHistory(session.episodeId), refreshCompletedAgentFlow(session)]);
+    }
+
+    function handleRunUpdate(session: EpisodeSession, payload: ProductionAgentRunUpdatePayload) {
+      if (payload.agentKey && payload.agentKey !== PRODUCTION_AGENT_KEY) return;
+      if (payload.projectId != null && Number(payload.projectId) !== Number(projectId)) return;
+      if (payload.scriptId != null && Number(payload.scriptId) !== session.episodeId) return;
+
+      const serverTime = Number(payload.serverTime ?? 0);
+      if (serverTime > 0 && serverTime < session.runServerTime) return;
+      if (serverTime > 0) session.runServerTime = serverTime;
+
+      const run = normalizeProductionAgentRun(payload.run);
+      const activeRun = normalizeProductionAgentRun(payload.activeRun);
+      const resolvedRun = payload.rejected ? activeRun ?? run : run ?? activeRun;
+      if (resolvedRun && payload.reason && !resolvedRun.reason) resolvedRun.reason = payload.reason;
+      if (resolvedRun) {
+        if (resolvedRun.status === "running") session.activeRun.value = resolvedRun;
+        else session.activeRun.value = null;
+        session.latestRun.value = resolvedRun;
+      }
+
+      session.runStatusError.value = "";
+      session.submitting.value = false;
+      clearSubmissionSyncTimer(session);
+
+      if (payload.rejected) {
+        window.$message?.warning?.(payload.reason || resolvedRun?.reason || $t("workbench.production.chatBox.runAlreadyRunning"));
+        return;
+      }
+      if (resolvedRun && resolvedRun.status !== "running") {
+        refreshTerminalRun(session, resolvedRun);
+      }
     }
 
     function serializeFlowForAgent(session: EpisodeSession) {
@@ -537,14 +756,10 @@ function makeProductionAgentStore(projectId: string) {
 
     async function handleXmlTag(session: EpisodeSession, data: XmlTagEvent) {
       const { tag, value, status, isComplete } = data;
-      if (tag === "script") {
-        session.flowData.value.script = value ?? "";
-      } else if (tag === "scriptPlan") {
-        session.flowData.value.scriptPlan = value ?? "";
-      }
+      if (tag !== "script") return;
+      session.flowData.value.script = value ?? "";
 
       if (status !== "complete" || !isComplete) return;
-      if (tag !== "script" && tag !== "scriptPlan") return;
       session.contentSavePromise = session.contentSavePromise.catch(() => {}).then(() => setFlowData(session.episodeId));
       await session.contentSavePromise;
     }
@@ -573,12 +788,10 @@ function makeProductionAgentStore(projectId: string) {
 
     async function handleStoryboardCommitTerminal(session: EpisodeSession, result: StoryboardCommitResult, messageId?: string) {
       if (result.status === "committed") {
-        markAgentMessageTerminal(session, messageId, "complete");
         await refreshCompletedAgentFlow(session, messageId);
         return;
       }
 
-      markAgentMessageTerminal(session, messageId, "error");
       await refreshCompletedAgentFlow(session, messageId);
       const failure = session.flowData.value.storyboardGenerationLastFailure;
       const notified = notifyStoryboardFailure(session, failure);
@@ -590,7 +803,20 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
+    async function handleDirectorPlanCommitTerminal(session: EpisodeSession, result: DirectorPlanCommitResult, messageId?: string) {
+      await refreshCompletedAgentFlow(session, messageId);
+      if (result.status === "committed") return;
+      const failure = session.flowData.value.directorPlanGeneration.lastFailure;
+      const message = directorPlanFailureMessage(failure?.errorJson ?? result.errorJson, result.error?.message);
+      window.$message?.error?.(message);
+    }
+
     function handleCommitResultPayload(session: EpisodeSession, payload: unknown, messageId?: string) {
+      const directorResult = extractDirectorPlanCommitResult(payload);
+      if (directorResult) {
+        void handleDirectorPlanCommitTerminal(session, directorResult, messageId);
+        return true;
+      }
       const result = extractStoryboardCommitResult(payload);
       if (!result) return false;
       void handleStoryboardCommitTerminal(session, result, messageId);
@@ -658,11 +884,15 @@ function makeProductionAgentStore(projectId: string) {
           if (!socket) return;
           socket.on("connect", () => {
             socket.emit("updateContext", getContext(session.episodeId));
+            void syncRunStatus(session.episodeId);
             if (!hasLiveGenerationMessage(session.chatApi.messages.value)) {
               void getHistory(session.episodeId);
             } else {
               startLiveGenerationHistoryReconcile(session);
             }
+          });
+          socket.on("agent:run:update", (payload: ProductionAgentRunUpdatePayload) => {
+            handleRunUpdate(session, payload ?? {});
           });
           socket.on("getFlowData", (_, callback) => {
             callback(serializeFlowForAgent(session));
@@ -733,8 +963,12 @@ function makeProductionAgentStore(projectId: string) {
             handleCommitResultPayload(session, event.content?.data, event.messageId);
           });
           socket.on("content:update", (event: { messageId?: string; type?: string; data?: any }) => {
-            const result = event.type === "thinking" ? commitResultFromThinkingTitle(event.data?.title) : extractStoryboardCommitResult(event.data);
-            if (result) void handleStoryboardCommitTerminal(session, result, event.messageId);
+            if (event.type === "thinking") {
+              const result = commitResultFromThinkingTitle(event.data?.title);
+              if (result) void handleStoryboardCommitTerminal(session, result, event.messageId);
+              return;
+            }
+            handleCommitResultPayload(session, event.data, event.messageId);
           });
         },
         { immediate: true },
@@ -749,6 +983,11 @@ function makeProductionAgentStore(projectId: string) {
       const flowData = ref<FlowData>(createEmptyFlowData());
       const loadingHistory = ref(false);
       const thinkLevel = ref(0);
+      const activeRun = ref<ProductionAgentRun | null>(null);
+      const latestRun = ref<ProductionAgentRun | null>(null);
+      const runStatusLoading = ref(false);
+      const runStatusError = ref("");
+      const submitting = ref(false);
       const chatApi = useChat({
         url: `${settingStore().baseUrl}/socket/productionAgent`,
         auth: () => getContext(scriptId),
@@ -756,7 +995,6 @@ function makeProductionAgentStore(projectId: string) {
         autoConnect: false,
         xmlTags: [
           { tag: "script", keepInMessage: false },
-          { tag: "scriptPlan", keepInMessage: false },
         ],
         onXmlTag: (event) => {
           void handleXmlTag(session, event);
@@ -770,6 +1008,11 @@ function makeProductionAgentStore(projectId: string) {
         flowData,
         loadingHistory,
         thinkLevel,
+        activeRun,
+        latestRun,
+        runStatusLoading,
+        runStatusError,
+        submitting,
         chatApi,
         stopSocketWatch: () => {},
         assetTaskBindings: new Map(),
@@ -777,6 +1020,10 @@ function makeProductionAgentStore(projectId: string) {
         historyRequestId: 0,
         historyReconcileId: 0,
         flowRequestId: 0,
+        runStatusRequestId: 0,
+        runServerTime: 0,
+        submissionSyncTimer: null,
+        terminalRunKeys: new Set(),
         contentSavePromise: Promise.resolve(),
         flowRefreshPromise: null,
         completedMessageIds: new Set(),
@@ -796,7 +1043,19 @@ function makeProductionAgentStore(projectId: string) {
       },
     });
     const socket = computed(() => getActiveSession()?.chatApi.socket.value ?? null);
-    const status = computed(() => getActiveSession()?.chatApi.status.value ?? "idle");
+    const messageStatus = computed(() => getActiveSession()?.chatApi.status.value ?? "idle");
+    const currentRun = computed(() => {
+      const session = getActiveSession();
+      return session?.activeRun.value ?? session?.latestRun.value ?? null;
+    });
+    const runStatus = computed(() => currentRun.value?.status ?? null);
+    const runReason = computed(() => currentRun.value?.reason ?? null);
+    const runCurrentStage = computed(() => currentRun.value?.currentStage ?? null);
+    const runCurrentSubAgent = computed(() => currentRun.value?.currentSubAgent ?? null);
+    const runRunning = computed(() => getActiveSession()?.activeRun.value?.status === "running");
+    const runStatusLoading = computed(() => getActiveSession()?.runStatusLoading.value ?? false);
+    const runStatusError = computed(() => getActiveSession()?.runStatusError.value ?? "");
+    const submitting = computed(() => getActiveSession()?.submitting.value ?? false);
     const flowData = computed({
       get: () => getActiveSession()?.flowData.value ?? fallbackFlowData.value,
       set: (value: FlowData) => {
@@ -816,6 +1075,7 @@ function makeProductionAgentStore(projectId: string) {
       delete saveData.storyboardTable;
       delete saveData.storyboardTableMeta;
       delete saveData.storyboardGenerationLastFailure;
+      delete saveData.directorPlanGeneration;
       const response = await axios.post("/production/saveFlowData", {
         projectId,
         data: saveData,
@@ -1277,12 +1537,31 @@ function makeProductionAgentStore(projectId: string) {
     function chat(content: string) {
       const session = getActiveSession();
       if (!session) return false;
-      return session.chatApi.chat(content, undefined, getContext(session.episodeId));
+      if (session.activeRun.value?.status === "running" || session.submitting.value) {
+        window.$message?.warning?.(session.activeRun.value?.reason || $t("workbench.production.chatBox.runAlreadyRunning"));
+        return false;
+      }
+
+      session.submitting.value = true;
+      const sent = session.chatApi.chat(content, undefined, getContext(session.episodeId));
+      if (!sent) {
+        session.submitting.value = false;
+        return false;
+      }
+
+      clearSubmissionSyncTimer(session);
+      session.submissionSyncTimer = setTimeout(() => {
+        session.submissionSyncTimer = null;
+        void syncRunStatus(session.episodeId).finally(() => {
+          session.submitting.value = false;
+        });
+      }, RUN_STATUS_SYNC_DELAY_MS);
+      return true;
     }
 
     function stopGenerate() {
       const session = getActiveSession();
-      if (!session) return false;
+      if (!session || session.activeRun.value?.status !== "running") return false;
       return session.chatApi.stopGenerate(undefined, getContext(session.episodeId));
     }
 
@@ -1309,6 +1588,7 @@ function makeProductionAgentStore(projectId: string) {
         session.storyboardTaskBindings.forEach((release) => release());
         session.assetTaskBindings.clear();
         session.storyboardTaskBindings.clear();
+        clearSubmissionSyncTimer(session);
         session.stopSocketWatch();
         session.chatApi.socket.value?.removeAllListeners();
         session.chatApi.disconnect();
@@ -1323,7 +1603,17 @@ function makeProductionAgentStore(projectId: string) {
       chat,
       stopGenerate,
       socket,
-      status,
+      messageStatus,
+      currentRun,
+      runStatus,
+      runReason,
+      runCurrentStage,
+      runCurrentSubAgent,
+      runRunning,
+      runStatusLoading,
+      runStatusError,
+      submitting,
+      syncRunStatus,
       flowData,
       setFlowData,
       getFlowData,
@@ -1366,7 +1656,16 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
   const connected = ref(false);
   const messages = ref<ChatMessagesData[]>([]);
   const socket = ref(null);
-  const status = ref("idle");
+  const messageStatus = ref("idle");
+  const currentRun = ref<ProductionAgentRun | null>(null);
+  const runStatus = ref<ProductionAgentRunStatus | null>(null);
+  const runReason = ref<string | null>(null);
+  const runCurrentStage = ref<string | null>(null);
+  const runCurrentSubAgent = ref<string | null>(null);
+  const runRunning = ref(false);
+  const runStatusLoading = ref(false);
+  const runStatusError = ref("");
+  const submitting = ref(false);
   const flowData = ref<FlowData>(createEmptyFlowData());
   const episodesId = ref<number>();
   const loadingHistory = ref(false);
@@ -1381,7 +1680,17 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
     chat: noopAsync,
     stopGenerate: noop,
     socket,
-    status,
+    messageStatus,
+    currentRun,
+    runStatus,
+    runReason,
+    runCurrentStage,
+    runCurrentSubAgent,
+    runRunning,
+    runStatusLoading,
+    runStatusError,
+    submitting,
+    syncRunStatus: noopAsync,
     flowData,
     setFlowData: noopAsync,
     getFlowData: noopAsync,

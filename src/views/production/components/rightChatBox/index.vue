@@ -11,6 +11,17 @@
       </div>
     </div>
     <div class="chatBox" v-loading="loadingHistory">
+      <div v-if="showRunStatus" class="runStatusBar" :class="runStatusClass">
+        <div class="runStatusMain">
+          <t-loading v-if="runStatusLoading && !runStatus" size="small" />
+          <span class="runStatusLabel">{{ runStatusLabel }}</span>
+          <span v-if="runDetail" class="runStatusDetail">{{ runDetail }}</span>
+          <t-button v-if="runStatusError" size="small" variant="text" @click="productionAgentStore().syncRunStatus()">
+            {{ $t("workbench.production.chatBox.retryRunStatus") }}
+          </t-button>
+        </div>
+        <div v-if="runStatusMessage" class="runStatusMessage">{{ runStatusMessage }}</div>
+      </div>
       <t-chat-list :clear-history="false">
         <t-chat-message
           v-for="message in messages"
@@ -29,9 +40,9 @@
       </t-chat-list>
       <t-chat-sender
         class="inputBox"
-        :disabled="status === 'pending' || status === 'streaming' || !connected"
+        :disabled="senderDisabled"
         v-model="inputValue"
-        :loading="status === 'pending' || status === 'streaming'"
+        :loading="senderLoading"
         :placeholder="$t('workbench.production.chatBox.inputPlaceholder')"
         @send="handleSend"
         @stop="handleStop">
@@ -93,12 +104,12 @@
 
 <script setup lang="ts">
 import { useMousePressed, useMouse } from "@vueuse/core";
-import _ from "lodash";
 import axios from "@/utils/axios";
 import productionAgentStore from "@/stores/productionAgent";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
-const { connected, messages, status, episodesId, loadingHistory, thinkLevel } = storeToRefs(productionAgentStore());
+const { connected, messages, episodesId, loadingHistory, thinkLevel, runStatus, runReason, runCurrentStage, runCurrentSubAgent, runRunning, runStatusLoading, runStatusError, submitting } =
+  storeToRefs(productionAgentStore());
 const thinkLevelOptions = [
   { label: $t("workbench.scriptAgent.thinkLevel.off"), value: 0 },
   { label: $t("workbench.scriptAgent.thinkLevel.light"), value: 1 },
@@ -112,10 +123,20 @@ const props = defineProps({ title: String });
 const emit = defineEmits(["close"]);
 
 const inputValue = ref("");
+const senderDisabled = computed(() => !connected.value || runRunning.value || submitting.value);
+const senderLoading = computed(() => runRunning.value || submitting.value);
+const showRunStatus = computed(() => Boolean(runStatus.value || runStatusLoading.value || runStatusError.value));
+const runStatusLabel = computed(() => {
+  if (runStatusLoading.value && !runStatus.value) return $t("workbench.production.chatBox.runStatusSyncing");
+  if (!runStatus.value) return $t("workbench.production.chatBox.runStatusUnknown");
+  return $t(`workbench.production.chatBox.runStatuses.${runStatus.value}`);
+});
+const runStatusClass = computed(() => (runStatusError.value ? "is-error" : runStatus.value ? `is-${runStatus.value}` : "is-syncing"));
+const runDetail = computed(() => [runCurrentStage.value, runCurrentSubAgent.value].filter(Boolean).join(" / "));
+const runStatusMessage = computed(() => runStatusError.value || runReason.value || "");
 
 function handleSend(text: string) {
-  productionAgentStore().chat(text);
-  inputValue.value = "";
+  if (productionAgentStore().chat(text)) inputValue.value = "";
 }
 function handleStop() {
   productionAgentStore().stopGenerate();
@@ -137,7 +158,8 @@ function handleReconnect() {
 //快捷发送
 const handleActions = {
   suggestion: (data?: any) => {
-    productionAgentStore().chat(data?.content?.prompt);
+    const prompt = data?.content?.prompt;
+    if (prompt) productionAgentStore().chat(prompt);
   },
 };
 
@@ -228,6 +250,55 @@ onMounted(async () => {
     display: flex;
     flex-direction: column;
     padding-left: 8px;
+    .runStatusBar {
+      flex-shrink: 0;
+      margin: 0 8px 4px 0;
+      padding: 7px 10px;
+      border-left: 3px solid var(--td-brand-color);
+      background: var(--td-brand-color-1);
+      font-size: 12px;
+
+      &.is-awaiting_user,
+      &.is-cancelled,
+      &.is-interrupted {
+        border-left-color: var(--td-warning-color);
+        background: var(--td-warning-color-1);
+      }
+
+      &.is-failed,
+      &.is-error {
+        border-left-color: var(--td-error-color);
+        background: var(--td-error-color-1);
+      }
+
+      &.is-completed {
+        border-left-color: var(--td-success-color);
+        background: var(--td-success-color-1);
+      }
+    }
+    .runStatusMain {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 8px;
+    }
+    .runStatusLabel {
+      flex-shrink: 0;
+      font-weight: 600;
+    }
+    .runStatusDetail {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--td-text-color-secondary);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .runStatusMessage {
+      margin-top: 3px;
+      color: var(--td-text-color-secondary);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
     .inputBox {
       padding-right: 8px;
     }

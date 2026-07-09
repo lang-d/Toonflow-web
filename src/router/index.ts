@@ -71,6 +71,11 @@ const router = createRouter({
           component: () => import("@/views/production/index.vue"),
         },
         {
+          path: "/productionMusic",
+          meta: { requiresProject: true },
+          component: () => import("@/views/productionMusic/index.vue"),
+        },
+        {
           path: "/assets",
           meta: { requiresProject: true },
           component: () => import("@/views/assets/index.vue"),

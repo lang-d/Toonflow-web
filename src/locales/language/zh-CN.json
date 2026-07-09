@@ -52,7 +52,8 @@
       "type": {
         "image": "图像",
         "text": "文本",
-        "video": "视频"
+        "video": "视频",
+        "music": "音乐"
       },
       "msg": {
         "fetchModelFailed": "获取模型数据失败:"
@@ -661,6 +662,7 @@
       "scriptManage": "剧本管理",
       "cornerScape": "塑角造景",
       "production": "视频生产",
+      "productionMusic": "配乐导演",
       "assetCenter": "资产中心",
       "settings": "设置",
       "jumpGithub": "跳转Github",
@@ -1051,8 +1053,12 @@
       "exportScript": "导出剧本",
       "msg": {
         "extracting": "资产提取中",
+        "waitExtract": "等待提取",
         "extractFailed": "资产提取失败",
         "extractingInProgress": "正在提取中",
+        "extractSubmitted": "已提交{count}个剧本资产提取任务",
+        "extractSkippedActive": "{count}个剧本已有提取任务在运行",
+        "extractNoTask": "暂无可提交的提取任务",
         "projectNotFound": "项目未找到",
         "selectExport": "请选择导出剧本",
         "deleteHeader": "确认删除",
@@ -1333,7 +1339,20 @@
         "confirmClear": "清除记忆",
         "confirmClearBody": "确定要清除{type}吗？",
         "confirmClearBtn": "确定清除",
-        "memoryCleared": "{type}已清除"
+        "memoryCleared": "{type}已清除",
+        "runStatusSyncing": "正在同步运行状态",
+        "runStatusUnknown": "运行状态未知",
+        "runStatusSyncFailed": "运行状态同步失败",
+        "retryRunStatus": "重试",
+        "runAlreadyRunning": "当前剧集已有正在运行的 Production Agent，请等待完成或停止后再发送。",
+        "runStatuses": {
+          "running": "Agent 运行中",
+          "awaiting_user": "等待你的处理",
+          "completed": "本轮已完成",
+          "failed": "本轮运行失败",
+          "cancelled": "本轮已取消",
+          "interrupted": "本轮已中断"
+        }
       },
       "wb": {
         "quickPreview": "快速预览",
@@ -1724,6 +1743,8 @@
       "deleteFailed": "删除资料失败",
       "contextPackLoadFailed": "加载参考包失败",
       "contextPackGenerated": "参考包已生成",
+      "contextPackSubmitted": "参考包生成任务已提交",
+      "contextPackQueued": "参考包生成任务已提交，完成后会自动刷新。",
       "contextPackGenerateFailed": "生成参考包失败",
       "categories": {
         "outline": "大纲",
@@ -1741,6 +1762,155 @@
         "unsupported": "不可读取",
         "failed": "失败",
         "archived": "已归档"
+      }
+    },
+    "productionMusic": {
+      "title": "配乐导演",
+      "subtitle": "生成并审阅项目配乐圣经、配乐计划和单条 Cue 音频版本。",
+      "refresh": "刷新",
+      "generate": "生成",
+      "regenerate": "重新生成",
+      "selectVersion": "选择版本",
+      "refreshCues": "刷新 Cue",
+      "modelPlaceholder": "选择音乐模型",
+      "instruction": "指令",
+      "instructionPlaceholder": "可选：写下本次生成或调整要求",
+      "audioInstructionPlaceholder": "可选：写下本条 Cue 的生成调整要求",
+      "taskSubmitted": "任务已提交",
+      "taskFailed": "任务失败",
+      "selectSuccess": "已选择版本",
+      "untitled": "未命名",
+      "details": "详情",
+      "compiledPrompt": "编译提示词",
+      "noCompiledPrompt": "暂无编译提示词",
+      "musicSpec": "音乐规格",
+      "assetVersions": "音频版本",
+      "noAssets": "暂无音频版本",
+      "selected": "已选",
+      "compilePrompt": "编译提示词",
+      "reviewPrompt": "审阅提示词",
+      "generateAudio": "生成音频",
+      "selectGenerated": "生成后选为当前版本",
+      "content": "内容",
+      "currentVersion": "当前版本",
+      "noVersion": "暂无版本",
+      "mode": {
+        "concept": "概念",
+        "project": "项目",
+        "episode": "剧集"
+      },
+      "stage": {
+        "ready": "可开始",
+        "waiting": "等待中",
+        "done": "已完成",
+        "advisory": "建议审阅",
+        "selectedCue": "已选 Cue",
+        "pickCue": "选择 Cue",
+        "cues": "{count} 条 Cue",
+        "issues": "{count} 条建议",
+        "status": {
+          "pending": "未开始",
+          "active": "可执行",
+          "running": "运行中",
+          "complete": "已完成",
+          "warning": "需关注"
+        }
+      },
+      "agent": {
+        "title": "配乐导演 Agent",
+        "open": "打开 Agent",
+        "placeholder": "告诉配乐导演这次配乐想要什么方向",
+        "welcome": "告诉我这部片子的配乐方向，我会先生成 Music Bible。",
+        "submitting": "正在提交任务...",
+        "taskSubmitted": "任务已提交，完成后我会刷新生产数据。",
+        "reply": {
+          "needBible": "第一步是 Music Bible。我可以把你的配乐方向整理成项目级配乐圣经。",
+          "needPlan": "Music Bible 已准备好。接下来可以审阅它，或生成 Music Plan。",
+          "needCue": "Music Plan 已准备好。请选择一条 Cue，我会进入提示词或音频生成上下文。",
+          "cueReady": "已选中 Cue {cue}。我可以编译提示词、审阅提示词或生成音频。"
+        },
+        "action": {
+          "generateBible": "生成 Music Bible",
+          "reviewBible": "审阅 Bible",
+          "generatePlan": "生成 Music Plan",
+          "regeneratePlan": "重新生成 Plan",
+          "reviewPlan": "审阅 Plan",
+          "compilePrompt": "编译提示词",
+          "reviewPrompt": "审阅提示词",
+          "generateAudio": "生成音频"
+        },
+        "done": {
+          "bible": "Music Bible 已完成。可以审阅它，或继续生成 Music Plan。",
+          "bibleReview": "Music Bible 审阅已完成。",
+          "plan": "Music Plan 已完成，Cue 数据已刷新。",
+          "planReview": "Music Plan 审阅已完成。",
+          "compilePrompt": "Cue 提示词已编译，可在 Cue 详情里查看。",
+          "promptReview": "Cue 提示词审阅已完成。",
+          "audio": "音频生成已完成，Cue 版本列表已刷新。",
+          "default": "任务已完成。"
+        }
+      },
+      "bible": {
+        "title": "Music Bible",
+        "hint": "项目级音乐方向、风格画像和母题参考。",
+        "empty": "暂无配乐圣经",
+        "emptyGuide": "告诉 Agent 这部片子的配乐方向，然后生成 Music Bible。",
+        "styleProfile": "风格画像",
+        "generateTitle": "生成 Music Bible"
+      },
+      "bibleReview": {
+        "title": "审阅 Bible",
+        "hint": "审阅配乐圣经中的规划和提示词风险。",
+        "needsBible": "请先生成或选择 Music Bible。"
+      },
+      "plan": {
+        "title": "Music Plan",
+        "hint": "按概念、项目或剧集生成 Cue Sheet。",
+        "empty": "暂无配乐计划",
+        "emptyGuide": "让 Agent 基于当前 Music Bible 生成配乐计划。",
+        "needsBible": "请先生成或选择 Music Bible，再生成 Music Plan。",
+        "cueSheet": "Cue Sheet",
+        "selectEpisode": "生成剧集配乐计划前，请先选择剧集。",
+        "generateTitle": "生成 Music Plan"
+      },
+      "planReview": {
+        "title": "审阅 Plan",
+        "hint": "在 Cue 提示词工作前审阅配乐计划和 Cue Sheet。",
+        "needsPlan": "请先生成或选择 Music Plan。"
+      },
+      "cue": {
+        "title": "Cue Assets",
+        "hint": "编译 Cue 提示词、审阅提示词、生成音频并选择版本。",
+        "empty": "暂无 Cue",
+        "needsPlan": "请先生成或选择 Music Plan，再处理 Cue。",
+        "queue": "Cue 队列",
+        "queueHint": "选择一条 Cue，作为 Agent 的当前上下文。",
+        "pickCueFirst": "请先选择一条 Cue。",
+        "selectModelFirst": "请先选择音乐模型。",
+        "key": "Cue",
+        "type": "类型",
+        "name": "标题",
+        "duration": "时长",
+        "state": "状态",
+        "selectedVersion": "选中版本",
+        "generationState": "生成状态",
+        "reviewState": "审阅"
+      },
+      "cuePrompt": {
+        "title": "Cue Prompt",
+        "hint": "编译并审阅当前选中 Cue 的提示词。"
+      },
+      "audio": {
+        "title": "生成音频",
+        "hint": "为当前选中 Cue 生成音频版本。"
+      },
+      "select": {
+        "title": "选择版本",
+        "hint": "试听已完成的音频版本，并选择当前 Cue 的使用版本。"
+      },
+      "review": {
+        "bible": "Music Bible 审阅",
+        "plan": "Music Plan 审阅"
       }
     }
   },
@@ -2025,6 +2195,7 @@
   "workbench.globalTaskCenter.domain.videoPrompt": "视频提示词",
   "workbench.globalTaskCenter.domain.audioBind": "音频绑定",
   "workbench.globalTaskCenter.domain.novelEvent": "小说分析",
+  "workbench.globalTaskCenter.domain.scriptAssetExtraction": "剧本资产提取",
   "workbench.globalTaskCenter.domain.media": "媒体任务",
   "workbench.productionReview.trackTitle": "轨道审阅",
   "workbench.productionReview.state.pending": "待审阅",
