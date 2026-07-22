@@ -42,7 +42,7 @@
             <i-close size="12" />
           </div>
           <div class="source">
-            <t-tag size="small" :title="getSourceTip(item)">{{ getReferenceLabel(item) }}</t-tag>
+            <t-tag size="small" :title="getSourceTip(item)">{{ getReferenceLabel(item, index) }}</t-tag>
           </div>
         </div>
       </VueDraggable>
@@ -82,7 +82,7 @@
           <i-close size="12" />
         </div>
         <div class="source">
-          <t-tag size="small" :title="getSourceTip(item)">{{ getReferenceLabel(item) }}</t-tag>
+          <t-tag size="small" :title="getSourceTip(item)">{{ getReferenceLabel(item, index) }}</t-tag>
         </div>
       </div>
     </template>
@@ -126,7 +126,7 @@
             <i-close size="12" />
           </div>
           <div class="source">
-            <t-tag size="small" :title="getSourceTip(imageList?.[index])">{{ getReferenceLabel(imageList?.[index]) }}</t-tag>
+            <t-tag size="small" :title="getSourceTip(imageList?.[index])">{{ getReferenceLabel(imageList?.[index], index) }}</t-tag>
           </div>
         </div>
         <template v-else>
@@ -187,6 +187,7 @@ import axios from "@/utils/axios";
 import { openImageLightbox } from "@/composables/useImageLightbox";
 import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { deriveReferenceTokens, getDerivedReferenceToken } from "../referenceTokens";
 
 const props = defineProps<{
   mode: VideoMode;
@@ -270,6 +271,7 @@ function parseMode(value: string): VideoMode | null {
 
 const parsedMode = computed(() => parseMode(props.mode as string));
 const isMultiReferenceMode = computed(() => Array.isArray(parsedMode.value));
+const derivedReferenceItems = computed(() => deriveReferenceTokens(imageList.value as any[]));
 
 function normalizeCategory(type: string | undefined): UploadCategory {
   if (type === "role" || type === "scene" || type === "tool" || type === "clip" || type === "audio") return type;
@@ -284,8 +286,9 @@ function getSourceLabel(item?: UploadItem) {
   return $t("workbench.generate.assets");
 }
 
-function getReferenceLabel(item?: UploadItem) {
-  return item?.referenceToken || item?.visualToken || item?.audioToken || item?.videoToken || getSourceLabel(item);
+function getReferenceLabel(item?: UploadItem, index?: number) {
+  const derived = typeof index === "number" ? derivedReferenceItems.value[index] : undefined;
+  return getDerivedReferenceToken(derived) || getSourceLabel(item);
 }
 
 function getSourceTip(item?: UploadItem) {

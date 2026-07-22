@@ -127,10 +127,14 @@ export interface Storyboard {
   location?: string | null;
   timeOfDay?: string | null;
   sceneContinuityId?: string | null;
+  transitionFromPrevious?: string | null;
   picture?: string | null;
-  action?: string | null;
   shotSize?: string | null;
   cameraMove?: string | null;
+  cameraAngle?: string | null;
+  characters?: StoryboardCharacterFact[];
+  requiredAssets?: StoryboardRequiredAssetFact[];
+  action?: string | null;
   dialogue?: string | null;
   sound?: string | null;
   visibleEmotion?: string | null;

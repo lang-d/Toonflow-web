@@ -97,7 +97,7 @@
           </div>
         </t-tooltip> -->
       </div>
-      <div class="openRightChatBoxBtn c" v-show="!openShowVisible" @click.stop="openShowVisible = true">
+      <div class="openRightChatBoxBtn c" v-show="!openShowVisible" @click.stop="openAgentPanel">
         <i-menu-unfold-one theme="outline" size="24" />
       </div>
       <transition name="slide" v-show="openShowVisible" v-if="episodesId">
@@ -571,10 +571,12 @@ async function loadEpisodeFlow() {
   const isCurrent = () => requestId === episodeLoadRequestId && episodesId.value === scriptId;
   loading.value = true;
   try {
-    await agentStore.getFlowData(scriptId);
+    await agentStore.recoverPanel(scriptId);
     if (!isCurrent()) return;
-    agentStore.updateContext(scriptId);
-    await Promise.all([agentStore.getHistory(scriptId), agentStore.syncRunStatus(scriptId)]);
+    await Promise.all([
+      agentStore.getFlowData(scriptId),
+      taskCenter.syncProjectTasks(Number(project.value?.id || 0), scriptId),
+    ]);
     if (!isCurrent()) return;
     await layoutGraph("LR", { isCurrent, manageLoading: false });
     if (isCurrent()) saveCurrentCanvasMemory();
@@ -629,10 +631,14 @@ function animate() {
 }
 
 watch(openShowVisible, (val) => {
-  if (!val) {
-    animate();
-  }
+  if (!val) return animate();
+  if (episodesId.value) void agentStore.recoverPanel(episodesId.value);
 });
+
+function openAgentPanel() {
+  openShowVisible.value = true;
+  if (episodesId.value) void agentStore.recoverPanel(episodesId.value);
+}
 
 onBeforeUnmount(() => {
   if (interactionTimer) clearTimeout(interactionTimer);

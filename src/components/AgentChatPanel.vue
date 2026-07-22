@@ -11,7 +11,9 @@
       </div>
     </div>
     <div ref="chatBoxRef" class="chatBox">
-      <t-chat-list :clear-history="false">
+      <slot name="status" />
+      <slot name="before-messages" />
+      <t-chat-list :clear-history="false" v-loading="historyLoading">
         <template v-for="message in chatMessages" :key="message.id">
           <t-chat-message
             :message="message"
@@ -34,6 +36,7 @@
           </div>
         </template>
       </t-chat-list>
+      <slot name="timeline" />
       <t-chat-sender
         class="inputBox"
         :disabled="loading || !connected"
@@ -42,6 +45,9 @@
         :placeholder="placeholder"
         @send="handleSend"
         @stop="emit('stop')">
+        <template #footer-prefix>
+          <slot name="footer-prefix" />
+        </template>
       </t-chat-sender>
     </div>
   </div>
@@ -53,7 +59,8 @@ import { useMouse, useMousePressed } from "@vueuse/core";
 export interface AgentPanelMessage {
   id: string;
   role: "user" | "assistant";
-  content: string;
+  content: string | Array<Record<string, unknown>>;
+  name?: string;
   status?: "complete" | "pending" | "streaming" | "error" | "loading";
   actions?: AgentPanelAction[];
 }
@@ -72,6 +79,7 @@ const props = defineProps<{
   connected: boolean;
   loading: boolean;
   messages: AgentPanelMessage[];
+  historyLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -96,10 +104,18 @@ const chatMessages = computed(() =>
   props.messages.map((message) => {
     const isLoading = message.status === "loading" || message.status === "pending" || message.status === "streaming";
     const status = isLoading ? "pending" : message.status === "error" ? "error" : "complete";
+    if (Array.isArray(message.content)) {
+      return {
+        ...message,
+        name: message.name || (message.role === "user" ? $t("components.artifactGenerateDialog.you") : $t("components.artifactGenerateDialog.agent")),
+        status,
+        content: message.content,
+      };
+    }
     return {
       id: message.id,
       role: message.role,
-      name: message.role === "user" ? $t("components.artifactGenerateDialog.you") : $t("components.artifactGenerateDialog.agent"),
+      name: message.name || (message.role === "user" ? $t("components.artifactGenerateDialog.you") : $t("components.artifactGenerateDialog.agent")),
       status,
       content: [
         {
@@ -127,15 +143,7 @@ watchEffect(() => {
   }
 });
 
-watch(
-  () => props.messages.length,
-  () => scrollToBottom(),
-);
-
-watch(
-  () => props.messages.map((message) => `${message.id}:${message.status}:${message.content.length}`).join("|"),
-  () => scrollToBottom(),
-);
+watch(() => props.messages, () => scrollToBottom(), { deep: true });
 
 function handleSend(text: string) {
   const value = text.trim();

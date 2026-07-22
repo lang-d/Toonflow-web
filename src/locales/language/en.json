@@ -1249,6 +1249,7 @@
         "runStatusUnknown": "Run status unavailable",
         "runStatusSyncFailed": "Failed to sync run status",
         "retryRunStatus": "Retry",
+        "awaitingStoryboardDecision": "Waiting for your decision",
         "runAlreadyRunning": "A Production Agent run is already active for this episode. Wait for it to finish or stop it before sending another message.",
         "runStatuses": {
           "running": "Agent running",

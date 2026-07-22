@@ -106,6 +106,7 @@
       v-model:prompt="promptDraft"
       v-model:primary-node-id="promptPrimaryNodeId"
       v-model:facts="promptFactDraft"
+      v-model:characters="promptCharacterDraft"
       :loading="promptEditorLoading"
       :saving="promptEditorSaving"
       :shot-label="promptEditorShotLabel"
@@ -170,7 +171,7 @@ import editImage from "../../components/editImage/index.vue";
 import { DialogPlugin, LoadingPlugin } from "tdesign-vue-next";
 import { Handle, Position } from "@vue-flow/core";
 import axios from "@/utils/axios";
-import { parseStoryboardTableRow, type AssetItem, type Storyboard, type StoryboardReference } from "../../utils/flowBuilder";
+import { parseStoryboardTableRow, type AssetItem, type Storyboard, type StoryboardCharacterFact, type StoryboardReference } from "../../utils/flowBuilder";
 import projectStore from "@/stores/project";
 import openAssetsSelector from "@/utils/assetsCheck";
 import productionAgentStore from "@/stores/productionAgent";
@@ -248,10 +249,12 @@ const promptDraft = ref("");
   | "location"
   | "timeOfDay"
   | "sceneContinuityId"
+  | "transitionFromPrevious"
   | "picture"
   | "action"
   | "shotSize"
   | "cameraMove"
+  | "cameraAngle"
   | "dialogue"
   | "sound"
   | "visibleEmotion";
@@ -261,15 +264,18 @@ const promptDraft = ref("");
   "location",
   "timeOfDay",
   "sceneContinuityId",
+  "transitionFromPrevious",
   "picture",
   "action",
   "shotSize",
   "cameraMove",
+  "cameraAngle",
   "dialogue",
   "sound",
   "visibleEmotion",
 ];
 const promptFactDraft = ref<StoryboardFactDraft>(createEmptyStoryboardFacts());
+const promptCharacterDraft = ref<StoryboardCharacterFact[]>([]);
 const promptDraftReferences = ref<ReferenceImage[]>([]);
 const promptPrimaryNodeId = ref("");
 const promptNodeOptions = ref<{ label: string; value: string }[]>([]);
@@ -350,10 +356,12 @@ function createEmptyStoryboardFacts(): StoryboardFactDraft {
     location: "",
     timeOfDay: "",
     sceneContinuityId: "",
+    transitionFromPrevious: "",
     picture: "",
     action: "",
     shotSize: "",
     cameraMove: "",
+    cameraAngle: "",
     dialogue: "",
     sound: "",
     visibleEmotion: "",
@@ -364,19 +372,35 @@ function getStoryboardFacts(row: Storyboard): StoryboardFactDraft {
   const tableRow = parseStoryboardTableRow(row.tableRowJson);
   const facts = createEmptyStoryboardFacts();
   facts.scene = String(row.scene ?? "");
-  facts.location = String(tableRow?.location ?? row.location ?? "");
-  facts.timeOfDay = String(tableRow?.timeOfDay ?? row.timeOfDay ?? "");
-  facts.sceneContinuityId = String(tableRow?.sceneContinuityId ?? row.sceneContinuityId ?? "");
-  facts.picture = String(tableRow?.picture ?? row.picture ?? "");
-  facts.action = String(tableRow?.action ?? row.action ?? "");
-  facts.shotSize = String(tableRow?.shotSize ?? row.shotSize ?? "");
-  facts.cameraMove = String(tableRow?.cameraMove ?? row.cameraMove ?? "");
+  facts.location = String(row.location ?? tableRow?.location ?? "");
+  facts.timeOfDay = String(row.timeOfDay ?? tableRow?.timeOfDay ?? "");
+  facts.sceneContinuityId = String(row.sceneContinuityId ?? tableRow?.sceneContinuityId ?? "");
+  facts.transitionFromPrevious = String(row.transitionFromPrevious ?? tableRow?.transitionFromPrevious ?? "");
+  facts.picture = String(row.picture ?? tableRow?.picture ?? "");
+  facts.action = String(row.action ?? tableRow?.action ?? "");
+  facts.shotSize = String(row.shotSize ?? tableRow?.shotSize ?? "");
+  facts.cameraMove = String(row.cameraMove ?? tableRow?.cameraMove ?? "");
+  facts.cameraAngle = String(row.cameraAngle ?? tableRow?.cameraAngle ?? "");
   facts.dialogue = tableRow?.dialogue?.length
     ? tableRow.dialogue.map((item) => [item.speaker, item.text].filter(Boolean).join("：")).join("\n")
     : String(row.dialogue ?? "");
   facts.sound = tableRow?.soundEffects?.length ? tableRow.soundEffects.join("\n") : String(row.sound ?? "");
   facts.visibleEmotion = String(tableRow?.visibleEmotion ?? row.visibleEmotion ?? "");
   return facts;
+}
+
+function getStoryboardCharacters(row: Storyboard): StoryboardCharacterFact[] {
+  const fallback = parseStoryboardTableRow(row.tableRowJson)?.characters || [];
+  const characters = Array.isArray(row.characters) ? row.characters : fallback;
+  return characters.map((character) => ({
+    name: String(character?.name || ""),
+    spatialPosition: String(character?.spatialPosition || ""),
+    orientation: String(character?.orientation || ""),
+    action: String(character?.action || ""),
+    ...(character?.posture ? { posture: String(character.posture) } : {}),
+    ...(character?.gaze ? { gaze: String(character.gaze) } : {}),
+    ...(character?.handAction ? { handAction: String(character.handAction) } : {}),
+  }));
 }
 
 function getStoryboardFactPayload(row: Storyboard) {
@@ -745,6 +769,7 @@ async function openPromptEditor(row: Storyboard) {
   currentPromptTarget.value = row;
   promptDraft.value = row.prompt || "";
   promptFactDraft.value = getStoryboardFacts(row);
+  promptCharacterDraft.value = getStoryboardCharacters(row);
   promptDraftReferences.value = [...getAssetReferenceImagesByIds(row.associateAssetsIds), ...getLocalReferenceImages(row)];
   promptPrimaryNodeId.value = "";
   promptNodeOptions.value = [];
@@ -1288,6 +1313,8 @@ async function submitStoryboardImageBatch(rows: Storyboard[], compulsory = false
 async function savePromptEditor() {
   const row = currentPromptTarget.value;
   if (!row?.id || promptEditorSaving.value) return;
+  const invalidCharacter = promptCharacterDraft.value.find((character) => !character.name.trim() || !character.spatialPosition.trim() || !character.orientation.trim() || !character.action.trim());
+  if (invalidCharacter) return window.$message.warning("人物事实需填写姓名、空间位置、朝向和动作");
   promptEditorSaving.value = true;
   try {
     const { nodes, edges, primary } = buildPromptFlow(row);
@@ -1315,6 +1342,15 @@ async function savePromptEditor() {
       groupIntent: row.groupIntent,
       beatId: row.beatId,
       ...getStoryboardFactDraftPayload(promptFactDraft.value),
+      characters: promptCharacterDraft.value.map((character) => ({
+        name: character.name.trim(),
+        spatialPosition: character.spatialPosition.trim(),
+        orientation: character.orientation.trim(),
+        action: character.action.trim(),
+        ...(character.posture?.trim() ? { posture: character.posture.trim() } : {}),
+        ...(character.gaze?.trim() ? { gaze: character.gaze.trim() } : {}),
+        ...(character.handAction?.trim() ? { handAction: character.handAction.trim() } : {}),
+      })),
       ...referenceFields,
     });
     notifyStoryboardIssues(editResult);

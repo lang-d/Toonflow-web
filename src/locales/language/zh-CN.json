@@ -658,7 +658,7 @@
       "myProject": "我的项目",
       "taskCenter": "任务中心",
       "novel": "小说原文",
-      "scriptAgent": "剧本Agent",
+        "scriptAgent": "改编剧本",
       "scriptManage": "剧本管理",
       "cornerScape": "塑角造景",
       "production": "视频生产",
@@ -1344,6 +1344,7 @@
         "runStatusUnknown": "运行状态未知",
         "runStatusSyncFailed": "运行状态同步失败",
         "retryRunStatus": "重试",
+        "awaitingStoryboardDecision": "等待用户决定",
         "runAlreadyRunning": "当前剧集已有正在运行的 Production Agent，请等待完成或停止后再发送。",
         "runStatuses": {
           "running": "Agent 运行中",

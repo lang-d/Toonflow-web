@@ -1,6 +1,7 @@
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
 import { getMediaOriginalUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { stripDerivedReferenceTokens } from "@/views/production/components/workbench/generate/referenceTokens";
 
 /**
  * 图片列表缓存 Pinia Store
@@ -18,16 +19,6 @@ type CachedUploadItem = Omit<UploadItem, "src"> & { src?: string };
 
 type ImageListCacheData = Record<CacheKey, Record<CacheKey, Record<CacheKey, CachedUploadItem[]>>>;
 const CACHE_STORAGE_KEY = "imageListCache";
-const REFERENCE_TOKEN_FIELDS = [
-  "inputOrder",
-  "referenceToken",
-  "visualToken",
-  "visualImageIndex",
-  "audioToken",
-  "audioReferenceIndex",
-  "videoToken",
-  "videoReferenceIndex",
-] as const;
 
 /** 用于向后端请求 URL 的标识信息 */
 interface ResolveUrlItem {
@@ -60,7 +51,7 @@ function toCachedItems(items: (UploadItem | TrackMedia)[]): CachedUploadItem[] {
     const sourceRefs = "sourceRefs" in item && Array.isArray(item.sourceRefs)
       ? item.sourceRefs.map((ref) => ({ id: ref.id, sources: ref.sources, order: ref.order }))
       : undefined;
-    return {
+    return stripDerivedReferenceTokens({
       id: item.id ?? null,
       sources: item.sources as CachedUploadItem["sources"],
       fileType: item.fileType,
@@ -73,8 +64,7 @@ function toCachedItems(items: (UploadItem | TrackMedia)[]): CachedUploadItem[] {
       index: "index" in item ? item.index : undefined,
       slotType: "slotType" in item ? item.slotType : undefined,
       sourceRefs,
-      ...Object.fromEntries(REFERENCE_TOKEN_FIELDS.map((field) => [field, (item as any)[field]])),
-    } as CachedUploadItem;
+    } as CachedUploadItem);
   });
 }
 
@@ -91,13 +81,13 @@ function mergeCachedItemsWithBackend(cached: CachedUploadItem[], backendItems: (
     if (item.id == null) return item;
     const key = makeUrlKey(item.id, item.sources);
     const fresh = backendByKey.get(key);
-    if (!fresh) return item;
-    return {
+    if (!fresh) return stripDerivedReferenceTokens(item);
+    return stripDerivedReferenceTokens({
       ...item,
       ...fresh,
       slotType: (item as any).slotType ?? (fresh as any).slotType,
       sourceRefs: (fresh as any).sourceRefs ?? (item as any).sourceRefs,
-    };
+    });
   });
 }
 
@@ -218,7 +208,7 @@ export default defineStore(
       return items.map((item) => {
         const media = normalizeMediaRef(item.media ?? item, item.fileType);
         return {
-          ...item,
+          ...stripDerivedReferenceTokens(item),
           media,
           src: media ? getMediaOriginalUrl(media) : resolveUrlSync(item.id, (item as any).sources, item.src),
         };

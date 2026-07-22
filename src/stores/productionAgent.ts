@@ -28,6 +28,48 @@ export interface ProductionAgentRun {
   reason: string | null;
 }
 
+export interface FullTextAssetMeta {
+  id: number;
+  size: number;
+  summary: string | null;
+  targetType: string;
+}
+
+export interface AgentMemoryExt {
+  fullTextAsset?: FullTextAssetMeta;
+  fullTextAssets?: FullTextAssetMeta[];
+  [key: string]: unknown;
+}
+
+export interface AgentRunTimelineItem {
+  id: number;
+  eventType: string;
+  kind: string;
+  createdAt: number;
+  stage: string | null;
+  subAgent: string | null;
+  status: string | null;
+  title: string | null;
+  detail: string | null;
+  phase: string | null;
+  fullTextAsset: FullTextAssetMeta | null;
+  payload: unknown;
+}
+
+export interface AgentRunDetail {
+  run: ProductionAgentRun | null;
+  timeline: AgentRunTimelineItem[];
+}
+
+export interface AgentBusinessProgress {
+  title: string;
+  detail: string | null;
+  phase: string | null;
+  stage: string | null;
+  subAgent: string | null;
+  createdAt: number;
+}
+
 interface ProductionAgentRunStatusPayload {
   serverTime?: number;
   activeRun?: unknown;
@@ -44,6 +86,7 @@ interface ProductionAgentRunUpdatePayload {
   rejected?: boolean;
   activeRun?: unknown;
   reason?: string | null;
+  terminalPersistenceFailed?: boolean;
 }
 
 interface EpisodeSession {
@@ -56,6 +99,12 @@ interface EpisodeSession {
   latestRun: Ref<ProductionAgentRun | null>;
   runStatusLoading: Ref<boolean>;
   runStatusError: Ref<string>;
+  runtimeNotice: Ref<string>;
+  runtimeRestartRunId: string | null;
+  runDetail: Ref<AgentRunDetail | null>;
+  runTimeline: Ref<AgentRunTimelineItem[]>;
+  runDetailLoading: Ref<boolean>;
+  runDetailError: Ref<string>;
   submitting: Ref<boolean>;
   chatApi: ProductionChat;
   stopSocketWatch: WatchStopHandle;
@@ -65,8 +114,14 @@ interface EpisodeSession {
   historyReconcileId: number;
   flowRequestId: number;
   runStatusRequestId: number;
+  runDetailRequestId: number;
+  recoveryRequestId: number;
   runServerTime: number;
+  recoveryPromise: Promise<void> | null;
   submissionSyncTimer: ReturnType<typeof setTimeout> | null;
+  runStatusPollTimer: ReturnType<typeof setInterval> | null;
+  runStatusPollRunId: string | null;
+  runStatusPollInFlight: boolean;
   terminalRunKeys: Set<string>;
   contentSavePromise: Promise<void>;
   flowRefreshPromise: Promise<void> | null;
@@ -125,6 +180,9 @@ const HISTORY_RECONCILE_MIN_TEXT_LENGTH = 120;
 const PRODUCTION_ASSET_TASK_TTL_MS = 24 * 60 * 60 * 1000;
 const PRODUCTION_AGENT_KEY = "productionAgent";
 const RUN_STATUS_SYNC_DELAY_MS = 3_000;
+const RUN_STATUS_POLL_INTERVAL_MS = 5_000;
+const SOCKET_READY_TIMEOUT_MS = 10_000;
+const CONTEXT_ACK_TIMEOUT_MS = 5_000;
 const RUN_STATUSES = new Set<ProductionAgentRunStatus>(["running", "awaiting_user", "completed", "failed", "cancelled", "interrupted"]);
 
 function normalizeProductionAgentRun(value: unknown): ProductionAgentRun | null {
@@ -140,6 +198,61 @@ function normalizeProductionAgentRun(value: unknown): ProductionAgentRun | null 
     currentStage: (source.currentStage ?? source.current_stage) == null ? null : String(source.currentStage ?? source.current_stage),
     currentSubAgent: (source.currentSubAgent ?? source.current_sub_agent) == null ? null : String(source.currentSubAgent ?? source.current_sub_agent),
     reason: source.reason == null || String(source.reason).trim() === "" ? null : String(source.reason),
+  };
+}
+
+function normalizeFullTextAssetMeta(value: unknown): FullTextAssetMeta | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  const id = Number(source.id ?? source.textAssetId ?? source.text_asset_id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return {
+    id,
+    size: Number(source.size) || 0,
+    summary: source.summary == null || String(source.summary).trim() === "" ? null : String(source.summary),
+    targetType: String(source.targetType ?? source.target_type ?? "text"),
+  };
+}
+
+function normalizeRunTimeline(value: unknown): AgentRunTimelineItem[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .map((item, index) => {
+      const payload = item.payload && typeof item.payload === "object" && !Array.isArray(item.payload) ? (item.payload as Record<string, unknown>) : {};
+      const kind = String(item.kind ?? "event");
+      const fullTextAsset =
+        kind === "agent_output_archived"
+          ? normalizeFullTextAssetMeta({
+              id: payload.textAssetId ?? payload.text_asset_id,
+              size: payload.size,
+              summary: payload.summary,
+              targetType: "agentOutput",
+            })
+          : null;
+      return {
+        id: Number(item.id) || index,
+        eventType: String(item.eventType ?? item.event_type ?? "event"),
+        kind,
+        createdAt: Number(item.createdAt ?? item.created_at ?? 0) || 0,
+        stage: item.stage == null ? null : String(item.stage),
+        subAgent: item.subAgent == null && item.sub_agent == null ? null : String(item.subAgent ?? item.sub_agent),
+        status: item.status == null ? null : String(item.status),
+        title: payload.title == null || String(payload.title).trim() === "" ? null : String(payload.title),
+        detail: payload.detail == null || String(payload.detail).trim() === "" ? null : String(payload.detail),
+        phase: payload.phase == null || String(payload.phase).trim() === "" ? null : String(payload.phase),
+        fullTextAsset,
+        payload: item.payload,
+      };
+    })
+    .sort((left, right) => left.createdAt - right.createdAt || left.id - right.id);
+}
+
+function normalizeAgentRunDetail(value: unknown): AgentRunDetail {
+  const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    run: normalizeProductionAgentRun(source.run ?? source),
+    timeline: normalizeRunTimeline(source.timeline),
   };
 }
 
@@ -249,16 +362,32 @@ function cloneDefaultMessages(messages: ChatMessagesData[]) {
 
 function normalizeHistoryMessages(messages: unknown): ChatMessagesData[] {
   if (!Array.isArray(messages)) return [];
-  return structuredClone(messages).map((message: any) => ({
-    ...message,
-    status: "complete",
-    content: Array.isArray(message?.content)
-      ? message.content.map((content: any) => ({
-          ...content,
-          status: "complete",
+  return structuredClone(messages)
+    .map((message: any) => ({
+      ...message,
+      createTime: Number(message?.createTime ?? new Date(message?.datetime ?? 0).getTime()) || 0,
+      status: "complete",
+      ext: normalizeAgentMemoryExt(message?.ext),
+      content: Array.isArray(message?.content)
+        ? message.content.map((content: any) => ({
+            ...content,
+            status: "complete",
+            ext: normalizeAgentMemoryExt(content?.ext),
+          }))
+        : [],
     }))
-    : [],
-  })) as ChatMessagesData[];
+    .sort((left: any, right: any) => Number(left.createTime) - Number(right.createTime) || Number(left.id) - Number(right.id)) as ChatMessagesData[];
+}
+
+function normalizeAgentMemoryExt(value: unknown): AgentMemoryExt | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const assets = [source.fullTextAsset, ...(Array.isArray(source.fullTextAssets) ? source.fullTextAssets : [])]
+    .map(normalizeFullTextAssetMeta)
+    .filter((item): item is FullTextAssetMeta => Boolean(item));
+  const uniqueAssets = Array.from(new Map(assets.map((item) => [item.id, item])).values());
+  if (!uniqueAssets.length) return { ...source };
+  return { ...source, fullTextAsset: uniqueAssets[0], fullTextAssets: uniqueAssets };
 }
 
 function isLiveGenerationMessage(message: any) {
@@ -276,6 +405,24 @@ function getLiveGenerationMessageIds(messages: ChatMessagesData[]) {
 
 function hasLiveGenerationMessage(messages: ChatMessagesData[]) {
   return getLiveGenerationMessageIds(messages).length > 0;
+}
+
+function completeLiveGenerationMessages(messages: ChatMessagesData[]) {
+  let changed = false;
+  messages.forEach((message: any) => {
+    if (message?.role !== "assistant") return;
+    if (message.status === "pending" || message.status === "streaming") {
+      message.status = "complete";
+      changed = true;
+    }
+    if (!Array.isArray(message.content)) return;
+    message.content.forEach((content: any) => {
+      if (content?.status !== "pending" && content?.status !== "streaming") return;
+      content.status = "complete";
+      changed = true;
+    });
+  });
+  return changed;
 }
 
 function isTerminalHistoryMessage(message: any) {
@@ -528,6 +675,15 @@ function makeProductionAgentStore(projectId: string) {
     const fallbackFlowData = ref<FlowData>(createEmptyFlowData());
     const taskCenter = useTaskCenterStore();
 
+    watch(
+      () => episodesId.value,
+      (_nextEpisodeId, previousEpisodeId) => {
+        if (!previousEpisodeId) return;
+        const previousSession = sessions.get(previousEpisodeId);
+        if (previousSession) stopRunStatusPoll(previousSession);
+      },
+    );
+
     function getContext(scriptId: number) {
       return {
         isolationKey: `${projectId}:productionAgent:${scriptId}`,
@@ -643,6 +799,72 @@ function makeProductionAgentStore(projectId: string) {
       session.submissionSyncTimer = null;
     }
 
+    function stopRunStatusPoll(session: EpisodeSession) {
+      if (session.runStatusPollTimer) clearInterval(session.runStatusPollTimer);
+      session.runStatusPollTimer = null;
+      session.runStatusPollRunId = null;
+      session.runStatusPollInFlight = false;
+    }
+
+    function finalizeNonRunningRun(session: EpisodeSession, completeLiveMessages = true) {
+      session.activeRun.value = null;
+      session.submitting.value = false;
+      clearSubmissionSyncTimer(session);
+      stopRunStatusPoll(session);
+      if (completeLiveMessages && completeLiveGenerationMessages(session.chatApi.messages.value)) {
+        session.chatApi.syncGenerationStatus();
+      }
+    }
+
+    function releaseLocalRunBlock(session: EpisodeSession) {
+      session.submitting.value = false;
+      clearSubmissionSyncTimer(session);
+      stopRunStatusPoll(session);
+      if (completeLiveGenerationMessages(session.chatApi.messages.value)) {
+        session.chatApi.syncGenerationStatus();
+      }
+    }
+
+    function startRunStatusPoll(session: EpisodeSession, runId: string) {
+      if (session.runStatusPollTimer && session.runStatusPollRunId === runId) return;
+      stopRunStatusPoll(session);
+      session.runStatusPollRunId = runId;
+      session.runStatusPollTimer = setInterval(() => {
+        if (session.runStatusPollInFlight) return;
+        const activeRun = session.activeRun.value;
+        if (!activeRun || activeRun.status !== "running" || activeRun.runId !== session.runStatusPollRunId) {
+          stopRunStatusPoll(session);
+          return;
+        }
+        session.runStatusPollInFlight = true;
+        void syncRunStatus(session.episodeId).finally(() => {
+          session.runStatusPollInFlight = false;
+        });
+      }, RUN_STATUS_POLL_INTERVAL_MS);
+    }
+
+    function applyResolvedRunStatus(session: EpisodeSession, latestRun: ProductionAgentRun | null, activeRun?: ProductionAgentRun | null) {
+      const previousActiveRun = session.activeRun.value;
+      const runningRun = activeRun?.status === "running" ? activeRun : null;
+      session.activeRun.value = runningRun;
+      session.latestRun.value = latestRun ?? runningRun;
+
+      if (runningRun) {
+        session.runtimeNotice.value = "";
+        session.submitting.value = false;
+        clearSubmissionSyncTimer(session);
+        startRunStatusPoll(session, runningRun.runId);
+        return { transitionedToNonRunning: false, latestRun: session.latestRun.value };
+      }
+
+      const shouldCompleteLiveMessages = previousActiveRun?.status === "running" || Boolean(session.latestRun.value);
+      finalizeNonRunningRun(session, shouldCompleteLiveMessages);
+      return {
+        transitionedToNonRunning: previousActiveRun?.status === "running" && Boolean(session.latestRun.value) && session.latestRun.value?.status !== "running",
+        latestRun: session.latestRun.value,
+      };
+    }
+
     function applyRunStatusSnapshot(session: EpisodeSession, payload: ProductionAgentRunStatusPayload) {
       const serverTime = Number(payload.serverTime ?? 0);
       if (serverTime > 0 && serverTime < session.runServerTime) return false;
@@ -650,12 +872,9 @@ function makeProductionAgentStore(projectId: string) {
 
       const activeRun = normalizeProductionAgentRun(payload.activeRun);
       const latestRun = normalizeProductionAgentRun(payload.latestRun);
-      session.activeRun.value = activeRun?.status === "running" ? activeRun : null;
-      session.latestRun.value = latestRun ?? activeRun;
+      const result = applyResolvedRunStatus(session, latestRun ?? activeRun, activeRun);
       session.runStatusError.value = "";
-      session.submitting.value = false;
-      clearSubmissionSyncTimer(session);
-      return true;
+      return result;
     }
 
     async function syncRunStatus(scriptId = episodesId.value) {
@@ -671,7 +890,10 @@ function makeProductionAgentStore(projectId: string) {
         });
         if (requestId !== session.runStatusRequestId) return session.activeRun.value ?? session.latestRun.value;
         const payload = (response?.data ?? response ?? {}) as ProductionAgentRunStatusPayload;
-        applyRunStatusSnapshot(session, payload);
+        const result = applyRunStatusSnapshot(session, payload);
+        if (result && typeof result === "object" && result.transitionedToNonRunning && result.latestRun) {
+          refreshTerminalRun(session, result.latestRun);
+        }
         return session.activeRun.value ?? session.latestRun.value;
       } catch (error: any) {
         if (requestId === session.runStatusRequestId) {
@@ -683,6 +905,143 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
+    function waitForProductionAgentSocketConnected(session: EpisodeSession) {
+      if (session.chatApi.socket.value?.connected) return Promise.resolve();
+
+      session.chatApi.connect();
+      const socket = session.chatApi.socket.value;
+      if (!socket) return Promise.reject(new Error("Production Agent socket 未初始化"));
+      if (socket.connected) return Promise.resolve();
+
+      return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          socket.off("connect", onConnect);
+          socket.off("connect_error", onError);
+          socket.off("disconnect", onDisconnect);
+          clearTimeout(timer);
+        };
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (error) reject(error);
+          else resolve();
+        };
+        const onConnect = () => finish();
+        const onError = (error: any) => finish(new Error(error?.message || "Production Agent socket 连接失败"));
+        const onDisconnect = (reason?: string) => finish(new Error(reason ? `Production Agent socket 已断开：${reason}` : "Production Agent socket 已断开"));
+        const timer = setTimeout(() => finish(new Error("Production Agent socket 连接超时")), SOCKET_READY_TIMEOUT_MS);
+
+        socket.once("connect", onConnect);
+        socket.once("connect_error", onError);
+        socket.once("disconnect", onDisconnect);
+      });
+    }
+
+    function confirmProductionAgentContext(session: EpisodeSession) {
+      const socket = session.chatApi.socket.value;
+      if (!socket?.connected) return Promise.reject(new Error("Production Agent socket 未连接"));
+      const context = getContext(session.episodeId);
+
+      return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (error) reject(error);
+          else resolve();
+        };
+        const timer = setTimeout(() => finish(new Error("Production Agent 上下文确认超时")), CONTEXT_ACK_TIMEOUT_MS);
+        socket.emit("updateContext", context, (response: any) => {
+          if (response?.success) {
+            finish();
+            return;
+          }
+          finish(new Error(response?.message || "Production Agent 上下文确认失败"));
+        });
+      });
+    }
+
+    async function ensureProductionAgentSocketReady(session: EpisodeSession) {
+      await waitForProductionAgentSocketConnected(session);
+      await confirmProductionAgentContext(session);
+    }
+
+    async function loadRunDetail(session: EpisodeSession, runId: string, recoveryId?: number) {
+      const requestId = ++session.runDetailRequestId;
+      session.runDetailLoading.value = true;
+      try {
+        const response: any = await axios.post("/agent/run/detail", { runId });
+        if (requestId !== session.runDetailRequestId || (recoveryId != null && recoveryId !== session.recoveryRequestId)) return null;
+        if (session.latestRun.value?.runId && session.latestRun.value.runId !== runId) return null;
+        const detail = normalizeAgentRunDetail(response?.data ?? response ?? {});
+        session.runDetail.value = detail;
+        session.runTimeline.value = detail.timeline;
+        if (detail.run?.status === "interrupted" && detail.timeline.some((item) => item.kind === "runtime_restarted") && session.runtimeRestartRunId !== detail.run.runId) {
+          session.runtimeRestartRunId = detail.run.runId;
+          session.runtimeNotice.value = "Agent runtime 已重启，上一轮运行已中断。";
+          void getHistory(session.episodeId);
+        }
+        if (detail.run) {
+          const activeDetailRun = session.activeRun.value?.runId === detail.run.runId && detail.run.status === "running" ? detail.run : null;
+          applyResolvedRunStatus(session, detail.run, activeDetailRun);
+        }
+        session.runDetailError.value = "";
+        return detail;
+      } catch (error: any) {
+        if (requestId === session.runDetailRequestId && (recoveryId == null || recoveryId === session.recoveryRequestId)) {
+          session.runDetailError.value = error?.message || "运行轨迹同步失败";
+        }
+        return null;
+      } finally {
+        if (requestId === session.runDetailRequestId) session.runDetailLoading.value = false;
+      }
+    }
+
+    function clearRunDetail(session: EpisodeSession) {
+      session.runDetailRequestId++;
+      session.runDetail.value = null;
+      session.runTimeline.value = [];
+      session.runDetailError.value = "";
+      session.runDetailLoading.value = false;
+    }
+
+    async function recoverPanel(scriptId = episodesId.value, force = false) {
+      const session = getSession(scriptId);
+      if (!session) return;
+      if (session.recoveryPromise && !force) return session.recoveryPromise;
+
+      const recoveryId = ++session.recoveryRequestId;
+      const recovery = (async () => {
+        stopRunStatusPoll(session);
+        await ensureProductionAgentSocketReady(session).catch((error) => {
+          console.warn("[productionAgent] failed to confirm socket context during recovery", error);
+        });
+
+        await syncRunStatus(session.episodeId);
+        if (recoveryId !== session.recoveryRequestId) return;
+
+        try {
+          await getHistory(session.episodeId);
+        } catch (error) {
+          console.warn("[productionAgent] failed to recover Memory", error);
+        }
+        if (recoveryId !== session.recoveryRequestId) return;
+
+        const run = session.latestRun.value ?? session.activeRun.value;
+        if (run?.runId) await loadRunDetail(session, run.runId, recoveryId);
+        else clearRunDetail(session);
+      })();
+      session.recoveryPromise = recovery;
+      try {
+        await recovery;
+      } finally {
+        if (session.recoveryPromise === recovery) session.recoveryPromise = null;
+      }
+    }
+
     function refreshTerminalRun(session: EpisodeSession, run: ProductionAgentRun) {
       const key = `${run.runId}:${run.status}`;
       if (session.terminalRunKeys.has(key)) return;
@@ -691,7 +1050,8 @@ function makeProductionAgentStore(projectId: string) {
         const oldest = session.terminalRunKeys.values().next().value;
         if (oldest) session.terminalRunKeys.delete(oldest);
       }
-      void Promise.allSettled([getHistory(session.episodeId), refreshCompletedAgentFlow(session)]);
+      const detailSync = run.runId ? loadRunDetail(session, run.runId).catch(() => null) : Promise.resolve(null);
+      void detailSync.finally(() => refreshCompletedAgentFlow(session));
     }
 
     function handleRunUpdate(session: EpisodeSession, payload: ProductionAgentRunUpdatePayload) {
@@ -708,14 +1068,22 @@ function makeProductionAgentStore(projectId: string) {
       const resolvedRun = payload.rejected ? activeRun ?? run : run ?? activeRun;
       if (resolvedRun && payload.reason && !resolvedRun.reason) resolvedRun.reason = payload.reason;
       if (resolvedRun) {
-        if (resolvedRun.status === "running") session.activeRun.value = resolvedRun;
-        else session.activeRun.value = null;
-        session.latestRun.value = resolvedRun;
+        applyResolvedRunStatus(session, resolvedRun, resolvedRun.status === "running" ? activeRun : null);
       }
 
       session.runStatusError.value = "";
       session.submitting.value = false;
       clearSubmissionSyncTimer(session);
+
+      if (payload.terminalPersistenceFailed) {
+        session.runtimeNotice.value = "运行终态正在持久化，正在重新同步后端状态。";
+        void syncRunStatus(session.episodeId).then(() => {
+          const refreshed = session.activeRun.value ?? session.latestRun.value;
+          if (refreshed?.runId) return loadRunDetail(session, refreshed.runId);
+          return null;
+        }).finally(() => refreshCompletedAgentFlow(session));
+        return;
+      }
 
       if (payload.rejected) {
         window.$message?.warning?.(payload.reason || resolvedRun?.reason || $t("workbench.production.chatBox.runAlreadyRunning"));
@@ -833,7 +1201,8 @@ function makeProductionAgentStore(projectId: string) {
     }
 
     function applyAgentHistory(session: EpisodeSession, data: unknown) {
-      session.chatApi.messages.value = [...cloneDefaultMessages(defMsg), ...normalizeHistoryMessages(data)];
+      const history = normalizeHistoryMessages(data);
+      session.chatApi.messages.value = history.length ? history : cloneDefaultMessages(defMsg);
       session.chatApi.syncGenerationStatus();
     }
 
@@ -883,13 +1252,7 @@ function makeProductionAgentStore(projectId: string) {
         (socket) => {
           if (!socket) return;
           socket.on("connect", () => {
-            socket.emit("updateContext", getContext(session.episodeId));
-            void syncRunStatus(session.episodeId);
-            if (!hasLiveGenerationMessage(session.chatApi.messages.value)) {
-              void getHistory(session.episodeId);
-            } else {
-              startLiveGenerationHistoryReconcile(session);
-            }
+            void recoverPanel(session.episodeId);
           });
           socket.on("agent:run:update", (payload: ProductionAgentRunUpdatePayload) => {
             handleRunUpdate(session, payload ?? {});
@@ -987,12 +1350,18 @@ function makeProductionAgentStore(projectId: string) {
       const latestRun = ref<ProductionAgentRun | null>(null);
       const runStatusLoading = ref(false);
       const runStatusError = ref("");
+      const runtimeNotice = ref("");
+      const runDetail = ref<AgentRunDetail | null>(null);
+      const runTimeline = ref<AgentRunTimelineItem[]>([]);
+      const runDetailLoading = ref(false);
+      const runDetailError = ref("");
       const submitting = ref(false);
       const chatApi = useChat({
         url: `${settingStore().baseUrl}/socket/productionAgent`,
         auth: () => getContext(scriptId),
         manageLifecycle: false,
         autoConnect: false,
+        isolated: true,
         xmlTags: [
           { tag: "script", keepInMessage: false },
         ],
@@ -1012,6 +1381,12 @@ function makeProductionAgentStore(projectId: string) {
         latestRun,
         runStatusLoading,
         runStatusError,
+        runtimeNotice,
+        runtimeRestartRunId: null,
+        runDetail,
+        runTimeline,
+        runDetailLoading,
+        runDetailError,
         submitting,
         chatApi,
         stopSocketWatch: () => {},
@@ -1021,8 +1396,14 @@ function makeProductionAgentStore(projectId: string) {
         historyReconcileId: 0,
         flowRequestId: 0,
         runStatusRequestId: 0,
+        runDetailRequestId: 0,
+        recoveryRequestId: 0,
         runServerTime: 0,
+        recoveryPromise: null,
         submissionSyncTimer: null,
+        runStatusPollTimer: null,
+        runStatusPollRunId: null,
+        runStatusPollInFlight: false,
         terminalRunKeys: new Set(),
         contentSavePromise: Promise.resolve(),
         flowRefreshPromise: null,
@@ -1049,12 +1430,41 @@ function makeProductionAgentStore(projectId: string) {
       return session?.activeRun.value ?? session?.latestRun.value ?? null;
     });
     const runStatus = computed(() => currentRun.value?.status ?? null);
-    const runReason = computed(() => currentRun.value?.reason ?? null);
+    const runReason = computed(() => getActiveSession()?.runtimeNotice.value || currentRun.value?.reason || null);
     const runCurrentStage = computed(() => currentRun.value?.currentStage ?? null);
     const runCurrentSubAgent = computed(() => currentRun.value?.currentSubAgent ?? null);
     const runRunning = computed(() => getActiveSession()?.activeRun.value?.status === "running");
     const runStatusLoading = computed(() => getActiveSession()?.runStatusLoading.value ?? false);
     const runStatusError = computed(() => getActiveSession()?.runStatusError.value ?? "");
+    const agentRunDetail = computed(() => getActiveSession()?.runDetail.value ?? null);
+    const runTimeline = computed(() => getActiveSession()?.runTimeline.value ?? []);
+    const businessProgress = computed<AgentBusinessProgress | null>(() => {
+      if (getActiveSession()?.activeRun.value?.status !== "running") return null;
+      const item = runTimeline.value
+        .slice()
+        .reverse()
+        .find((entry) => entry.kind === "agent_progress" && entry.title);
+      if (!item?.title) return null;
+      return {
+        title: item.title,
+        detail: item.detail,
+        phase: item.phase,
+        stage: item.stage,
+        subAgent: item.subAgent,
+        createdAt: item.createdAt,
+      };
+    });
+    const archivedOutputs = computed<FullTextAssetMeta[]>(() =>
+      Array.from(
+        new Map(
+          runTimeline.value
+            .filter((item) => item.kind === "agent_output_archived" && item.fullTextAsset)
+            .map((item) => [item.fullTextAsset!.id, item.fullTextAsset!] as const),
+        ).values(),
+      ).reverse(),
+    );
+    const runDetailLoading = computed(() => getActiveSession()?.runDetailLoading.value ?? false);
+    const runDetailError = computed(() => getActiveSession()?.runDetailError.value ?? "");
     const submitting = computed(() => getActiveSession()?.submitting.value ?? false);
     const flowData = computed({
       get: () => getActiveSession()?.flowData.value ?? fallbackFlowData.value,
@@ -1506,12 +1916,12 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
-    function updateContext(scriptId = episodesId.value) {
+    async function updateContext(scriptId = episodesId.value) {
       const session = getSession(scriptId);
       if (!session) return;
-      const ctx = getContext(session.episodeId);
-      if (!session.chatApi.connected.value) session.chatApi.connect();
-      session.chatApi.socket.value?.emit("updateContext", ctx);
+      await ensureProductionAgentSocketReady(session).catch((error) => {
+        console.warn("[productionAgent] failed to update socket context", error);
+      });
     }
 
     async function getHistory(scriptId = episodesId.value) {
@@ -1523,10 +1933,15 @@ function makeProductionAgentStore(projectId: string) {
       try {
         const data = await fetchAgentMemory(session);
         if (requestId !== session.historyRequestId) return;
-        if (hasLiveGenerationMessage(session.chatApi.messages.value)) {
+        const hasLiveMessage = hasLiveGenerationMessage(session.chatApi.messages.value);
+        if (hasLiveMessage && session.activeRun.value?.status === "running") {
           session.chatApi.syncGenerationStatus();
           startLiveGenerationHistoryReconcile(session);
           return;
+        }
+        if (hasLiveMessage) {
+          completeLiveGenerationMessages(session.chatApi.messages.value);
+          session.chatApi.syncGenerationStatus();
         }
         applyAgentHistory(session, data);
       } finally {
@@ -1534,25 +1949,47 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
-    function chat(content: string) {
+    async function chat(content: string) {
       const session = getActiveSession();
       if (!session) return false;
       if (session.activeRun.value?.status === "running" || session.submitting.value) {
-        window.$message?.warning?.(session.activeRun.value?.reason || $t("workbench.production.chatBox.runAlreadyRunning"));
+        await syncRunStatus(session.episodeId);
+        if (session.activeRun.value?.status !== "running") {
+          releaseLocalRunBlock(session);
+        }
+        if (session.activeRun.value?.status === "running" || session.submitting.value) {
+          window.$message?.warning?.(session.activeRun.value?.reason || $t("workbench.production.chatBox.runAlreadyRunning"));
+          return false;
+        }
+      }
+
+      const previousLatestRunId = session.latestRun.value?.runId ?? null;
+      session.submitting.value = true;
+      try {
+        await ensureProductionAgentSocketReady(session);
+      } catch (error: any) {
+        session.submitting.value = false;
+        window.$message?.error?.(error?.message || "Production Agent 连接失败，请重试");
         return false;
       }
 
-      session.submitting.value = true;
       const sent = session.chatApi.chat(content, undefined, getContext(session.episodeId));
       if (!sent) {
         session.submitting.value = false;
+        window.$message?.error?.("消息未发送，请检查连接后重试");
         return false;
       }
 
       clearSubmissionSyncTimer(session);
       session.submissionSyncTimer = setTimeout(() => {
         session.submissionSyncTimer = null;
-        void syncRunStatus(session.episodeId).finally(() => {
+        void syncRunStatus(session.episodeId).then(() => {
+          const activeRun = session.activeRun.value;
+          const latestRun = session.latestRun.value;
+          if (!activeRun && (latestRun?.runId ?? null) === previousLatestRunId) {
+            window.$message?.warning?.("消息未被后端接收，请重试");
+          }
+        }).finally(() => {
           session.submitting.value = false;
         });
       }, RUN_STATUS_SYNC_DELAY_MS);
@@ -1589,6 +2026,7 @@ function makeProductionAgentStore(projectId: string) {
         session.assetTaskBindings.clear();
         session.storyboardTaskBindings.clear();
         clearSubmissionSyncTimer(session);
+        stopRunStatusPoll(session);
         session.stopSocketWatch();
         session.chatApi.socket.value?.removeAllListeners();
         session.chatApi.disconnect();
@@ -1612,8 +2050,15 @@ function makeProductionAgentStore(projectId: string) {
       runRunning,
       runStatusLoading,
       runStatusError,
+      agentRunDetail,
+      runTimeline,
+      businessProgress,
+      archivedOutputs,
+      runDetailLoading,
+      runDetailError,
       submitting,
       syncRunStatus,
+      recoverPanel,
       flowData,
       setFlowData,
       getFlowData,
@@ -1665,6 +2110,12 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
   const runRunning = ref(false);
   const runStatusLoading = ref(false);
   const runStatusError = ref("");
+  const agentRunDetail = ref<AgentRunDetail | null>(null);
+  const runTimeline = ref<AgentRunTimelineItem[]>([]);
+  const businessProgress = ref<AgentBusinessProgress | null>(null);
+  const archivedOutputs = ref<FullTextAssetMeta[]>([]);
+  const runDetailLoading = ref(false);
+  const runDetailError = ref("");
   const submitting = ref(false);
   const flowData = ref<FlowData>(createEmptyFlowData());
   const episodesId = ref<number>();
@@ -1689,8 +2140,15 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
     runRunning,
     runStatusLoading,
     runStatusError,
+    agentRunDetail,
+    runTimeline,
+    businessProgress,
+    archivedOutputs,
+    runDetailLoading,
+    runDetailError,
     submitting,
     syncRunStatus: noopAsync,
+    recoverPanel: noopAsync,
     flowData,
     setFlowData: noopAsync,
     getFlowData: noopAsync,

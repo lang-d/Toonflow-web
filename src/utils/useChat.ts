@@ -83,6 +83,8 @@ export interface UseChatOptions {
   onConnect?: () => void;
   onDisconnect?: () => void;
   manageLifecycle?: boolean;
+  /** Prevent different Agent scopes from sharing one Socket.IO manager. */
+  isolated?: boolean;
 }
 
 export interface ChatSocketLike {
@@ -139,6 +141,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     onConnect,
     onDisconnect,
     manageLifecycle = true,
+    isolated = false,
   } = options;
 
   const socket = shallowRef<ChatSocketLike | null>(null);
@@ -739,6 +742,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         reconnectionDelayMax: 5000,
         timeout: 10000,
         auth: { token: localStorage.getItem("token"), ...(typeof auth === "function" ? auth() : auth) },
+        ...(isolated ? { forceNew: true, multiplex: false } : {}),
       });
 
       setupHandlers();
@@ -760,11 +764,19 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
   // 发送方法
   const emit = <E extends keyof ChatSocketEvents & string>(event: E, data?: ChatSocketEvents[E]) => {
+    logChatEvent("emit:attempt", {
+      event,
+      connected: Boolean(socket.value?.connected),
+      socketId: (socket.value as any)?.id,
+      url,
+    });
     if (!socket.value?.connected) {
       console.warn("[Chat] Socket not connected");
+      logChatEvent("emit:failed", { event, reason: "socket_not_connected", url });
       return false;
     }
     socket.value.emit(event, data);
+    logChatEvent("emit:sent", { event, socketId: (socket.value as any)?.id, url });
     return true;
   };
 
@@ -804,9 +816,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       });
     }
 
-    messages.value.push(userMessage);
+    const sent = emit("chat", { content, attachments, ...extraPayload });
+    if (!sent) {
+      logChatEvent("chat:failed", { reason: "emit_failed", contentLength: content.length });
+      return false;
+    }
 
-    return emit("chat", { content, attachments, ...extraPayload });
+    messages.value.push(userMessage);
+    logChatEvent("chat:local-message-added", { messageId: userMessage.id, contentLength: content.length });
+    return true;
   };
 
   const stopGenerate = (messageId?: string, extraPayload?: Record<string, any>) => {

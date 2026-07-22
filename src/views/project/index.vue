@@ -85,11 +85,13 @@ import { handleDynamicImportFailure } from "@/utils/moduleRecovery";
 import useWorkspaceStore from "@/stores/workspace";
 import settingStore from "@/stores/setting";
 import { disposeProductionAgentStore } from "@/stores/productionAgent";
+import { useMusicProductionAgentStore } from "@/stores/musicProductionAgent";
 
 const { clearProjectCache } = imageListCacheStore();
 const projectState = projectStore();
 const { allProject, project } = storeToRefs(projectState);
 const workspace = useWorkspaceStore();
+const musicProductionAgent = useMusicProductionAgentStore();
 const { showSetting, activeMenu, isElectron } = storeToRefs(settingStore());
 
 const dialogShow = ref(false);
@@ -116,6 +118,7 @@ async function getAllProject() {
 
 onMounted(() => {
   disposeProductionAgentStore(project.value?.id);
+  musicProductionAgent.dispose(Number(project.value?.id));
   project.value = null;
   getAllProject();
 });
@@ -138,7 +141,10 @@ async function openProject(projectId: string | undefined) {
   }
 
   openingProjectId.value = projectId;
-  if (project.value?.id && project.value.id !== projectId) disposeProductionAgentStore(project.value.id);
+  if (project.value?.id && project.value.id !== projectId) {
+    disposeProductionAgentStore(project.value.id);
+    musicProductionAgent.dispose(Number(project.value.id));
+  }
   project.value = item;
   const target = getProjectEntryRoute(item);
   logProjectNavigation("push", { projectId, target });
@@ -334,6 +340,7 @@ function delProjcer(projectId: string | undefined) {
         .post("/project/delProject", { id: projectId })
         .then(() => {
           disposeProductionAgentStore(projectId);
+          musicProductionAgent.dispose(Number(projectId));
           clearProjectCache(projectId!);
           window.$message.success($t("workbench.project.msg.deleteSuccess"));
           getAllProject();

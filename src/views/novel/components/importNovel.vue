@@ -196,7 +196,7 @@ async function handleBeforeUpload(file: UploadFile) {
 function onSelectChange(selectedKeys: Array<string | number>, context: { selectedRowData: TableRowData[] }) {
   selectedRowKeys.value = selectedKeys as number[];
 }
-const emit = defineEmits(["select"]);
+const emit = defineEmits<{ select: [eventExtraction?: unknown] }>();
 //保存小说
 async function keep() {
   nextLoading.value = true;
@@ -206,9 +206,10 @@ async function keep() {
     return;
   }
   try {
-    await axios.post("/novel/addNovel", { projectId: project.value?.id, data: selectedRows.value });
+    const response = await axios.post("/novel/addNovel", { projectId: project.value?.id, data: selectedRows.value });
+    const payload = response?.data?.data ?? response?.data ?? response;
     nextLoading.value = false;
-    emit("select");
+    emit("select", payload?.eventExtraction);
     window.$message.success($t("workbench.novel.import.msg.saveSuccess"));
   } catch (e) {
     window.$message.error((e as Error).message);

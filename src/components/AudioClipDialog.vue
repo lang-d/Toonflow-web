@@ -19,9 +19,8 @@
 
       <audio
         ref="audioRef"
-        class="audioPlayer"
-        :src="src"
-        controls
+        class="audioEngine"
+        :src="playbackSource"
         preload="metadata"
         @loadedmetadata="handleLoadedMetadata"
         @durationchange="handleLoadedMetadata"
@@ -30,7 +29,35 @@
         @pause="handleAudioPause"
         @seeking="handleAudioSeeking"
         @seeked="handleAudioSeeked"
-        @ended="handleAudioEnded" />
+        @ended="handleAudioEnded"
+        @error="handleAudioError" />
+
+      <div class="audioTransport" :class="{ disabled: !duration }">
+        <t-tooltip :content="transportPlaying ? labels.pause : labels.play">
+          <t-button
+            class="transportToggle"
+            variant="outline"
+            shape="circle"
+            :disabled="!duration"
+            :aria-label="transportPlaying ? labels.pause : labels.play"
+            @click="togglePlayback">
+            <template #icon><i-pause-one v-if="transportPlaying" /><i-play-one v-else /></template>
+          </t-button>
+        </t-tooltip>
+        <input
+          class="transportSeek"
+          type="range"
+          min="0"
+          :max="duration || 0"
+          step="0.01"
+          :value="currentTime"
+          :disabled="!duration || !canSeekPlayback"
+          :aria-label="labels.progress"
+          @input="seekPlayback" />
+        <span class="transportTime">{{ formatTime(currentTime) }} / {{ duration ? formatTime(duration) : '--:--' }}</span>
+      </div>
+
+      <t-alert v-if="audioError" theme="error" :message="audioError" />
 
       <template v-if="mode === 'clip'">
         <div class="waveformHeader">
@@ -139,7 +166,11 @@ const labels = {
   selectRange: "\u9009\u62e9\u622a\u53d6\u8303\u56f4",
   selectedDuration: "\u5df2\u9009",
   previewSelection: "\u8bd5\u542c\u9009\u533a",
+  play: "\u64ad\u653e",
+  pause: "\u6682\u505c",
+  progress: "\u97f3\u9891\u8fdb\u5ea6",
   loadingDuration: "\u6b63\u5728\u8bfb\u53d6\u97f3\u9891\u4fe1\u606f",
+  playbackFailed: "\u97f3\u9891\u65e0\u6cd5\u64ad\u653e\uff0c\u8bf7\u68c0\u67e5\u97f3\u9891\u8d44\u6e90\u3002",
   loadingWaveform: "\u6b63\u5728\u751f\u6210\u6ce2\u5f62",
   waveformUnavailable: "\u6682\u65e0\u53ef\u7528\u6ce2\u5f62",
   duration: "\u65f6\u957f",
@@ -156,18 +187,22 @@ const props = withDefaults(
     title?: string;
     name?: string;
     mode?: DialogMode;
+    serverTrim?: boolean;
     saveLabel?: string;
     saveDisabled?: boolean;
     saveDisabledReason?: string;
+    defaultClipEnd?: number | null;
   }>(),
   {
     src: "",
     title: "",
     name: "",
     mode: "clip",
+    serverTrim: false,
     saveLabel: "\u4fdd\u5b58\u622a\u53d6",
     saveDisabled: false,
     saveDisabledReason: "",
+    defaultClipEnd: null,
   },
 );
 
@@ -177,6 +212,7 @@ const emit = defineEmits<{
 
 const minClipDuration = 0.05;
 const audioRef = ref<HTMLAudioElement | null>(null);
+const playbackSource = ref("");
 const waveformStage = ref<HTMLElement | null>(null);
 const waveformCanvas = ref<HTMLCanvasElement | null>(null);
 const duration = ref(0);
@@ -186,8 +222,11 @@ const clipEnd = ref(0);
 const decodedBuffer = shallowRef<AudioBuffer | null>(null);
 const waveformData = ref<WaveformPeak[]>([]);
 const decodeError = ref("");
+const audioError = ref("");
 const decoding = ref(false);
 const saving = ref(false);
+const audioPlaying = ref(false);
+const canSeekPlayback = ref(false);
 const selectionPreviewActive = ref(false);
 let selectionPreviewIntent = false;
 let selectionPreviewToken = 0;
@@ -197,6 +236,9 @@ let programmaticSeekTarget: number | null = null;
 let previewFrameId = 0;
 let decodeVersion = 0;
 let decodeController: AbortController | null = null;
+let playbackSourceVersion = 0;
+let playbackSourceController: AbortController | null = null;
+let playbackObjectUrl = "";
 let waveformResizeObserver: ResizeObserver | null = null;
 let waveformDrawFrame = 0;
 let waveformSampleCount = 0;
@@ -214,6 +256,7 @@ const durationLabel = computed(() => (duration.value ? `${labels.duration} ${for
 const selectedDuration = computed(() => Math.max(0, clipEnd.value - clipStart.value));
 const canPreviewSelection = computed(() => Boolean(decodedBuffer.value && duration.value && selectedDuration.value >= minClipDuration));
 const canSave = computed(() => Boolean(canPreviewSelection.value && !props.saveDisabled && !saving.value));
+const transportPlaying = computed(() => audioPlaying.value || selectionPreviewActive.value);
 const clipStartPercent = computed(() => getTimePercent(clipStart.value));
 const clipEndPercent = computed(() => getTimePercent(clipEnd.value));
 const playheadPercent = computed(() => getTimePercent(currentTime.value));
@@ -222,14 +265,17 @@ const startHandleStyle = computed(() => ({ left: `${clipStartPercent.value}%` })
 const endHandleStyle = computed(() => ({ left: `${clipEndPercent.value}%` }));
 
 watch(
-  () => [visible.value, props.src, props.mode],
+  () => [visible.value, props.src, props.mode, props.defaultClipEnd],
   () => {
     stopWaveformDrag();
     invalidateDecode();
     resetPlayback();
+    clearPlaybackSource();
     resetState();
-    if (!visible.value || props.mode !== "clip") return;
-    void decodeSource();
+    if (!visible.value || !props.src) return;
+    playbackSource.value = props.src;
+    void preparePlaybackSource();
+    if (props.mode === "clip") void decodeSource();
   },
   { immediate: true },
 );
@@ -258,8 +304,11 @@ function resetState() {
   waveformData.value = [];
   waveformSampleCount = 0;
   decodeError.value = "";
+  audioError.value = "";
   decoding.value = false;
   saving.value = false;
+  audioPlaying.value = false;
+  canSeekPlayback.value = false;
   selectionPreviewActive.value = false;
   selectionPreviewIntent = false;
   selectionPreviewToken += 1;
@@ -283,6 +332,7 @@ function resetPlayback() {
   selectionPauseToken = 0;
   selectionEndPauseToken = 0;
   programmaticSeekTarget = null;
+  audioPlaying.value = false;
   audioRef.value?.pause();
 }
 
@@ -291,6 +341,7 @@ function cleanupAudioClipDialog() {
   resetPlayback();
   stopWaveformDrag();
   releaseAudioElement();
+  clearPlaybackSource();
   waveformResizeObserver?.disconnect();
   waveformResizeObserver = null;
   cancelWaveformDraw();
@@ -306,15 +357,56 @@ function releaseAudioElement() {
   audio.load();
 }
 
+function clearPlaybackSource() {
+  playbackSourceVersion += 1;
+  playbackSourceController?.abort();
+  playbackSourceController = null;
+  if (playbackObjectUrl) URL.revokeObjectURL(playbackObjectUrl);
+  playbackObjectUrl = "";
+  playbackSource.value = "";
+  canSeekPlayback.value = false;
+}
+
+async function preparePlaybackSource() {
+  const source = props.src;
+  if (!source) return;
+  const version = playbackSourceVersion + 1;
+  playbackSourceVersion = version;
+  const controller = new AbortController();
+  playbackSourceController = controller;
+  try {
+    const response = await fetch(source, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    if (version !== playbackSourceVersion || controller.signal.aborted) return;
+    playbackObjectUrl = URL.createObjectURL(blob);
+    playbackSource.value = playbackObjectUrl;
+    canSeekPlayback.value = true;
+  } catch (error: any) {
+    if (version !== playbackSourceVersion || controller.signal.aborted || error?.name === "AbortError") return;
+    canSeekPlayback.value = false;
+  } finally {
+    if (version === playbackSourceVersion) playbackSourceController = null;
+  }
+}
+
 function handleLoadedMetadata() {
   const audioDuration = audioRef.value?.duration;
   if (!Number.isFinite(audioDuration) || !audioDuration || audioDuration <= 0) return;
   if (props.mode === "clip" && decodedBuffer.value) return;
   const previousDuration = duration.value;
+  audioError.value = "";
   duration.value = normalizeDisplayTime(audioDuration);
   if (props.mode === "clip" && (!clipEnd.value || Math.abs(clipEnd.value - previousDuration) < 0.01)) {
-    clipEnd.value = duration.value;
+    clipEnd.value = getDefaultClipEnd(duration.value);
   }
+}
+
+function getDefaultClipEnd(actualDuration: number) {
+  const targetDuration = Number(props.defaultClipEnd);
+  return Number.isFinite(targetDuration) && targetDuration > 0
+    ? Math.min(targetDuration, actualDuration)
+    : actualDuration;
 }
 
 function handleTimeUpdate() {
@@ -323,6 +415,7 @@ function handleTimeUpdate() {
 }
 
 function handleAudioPlay() {
+  audioPlaying.value = true;
   if (selectionPreviewIntent) return;
   stopSelectionMonitor();
   stopSelectionBufferPlayback();
@@ -331,6 +424,7 @@ function handleAudioPlay() {
 }
 
 function handleAudioPause() {
+  audioPlaying.value = false;
   if (selectionPauseToken === selectionPreviewToken && selectionPreviewIntent) {
     selectionPauseToken = 0;
     return;
@@ -366,12 +460,46 @@ function handleAudioSeeked() {
 }
 
 function handleAudioEnded() {
+  audioPlaying.value = false;
   stopSelectionMonitor();
   stopSelectionBufferPlayback();
   selectionPreviewToken += 1;
   selectionPreviewActive.value = false;
   selectionPreviewIntent = false;
   currentTime.value = duration.value;
+}
+
+function handleAudioError() {
+  audioPlaying.value = false;
+  audioError.value = labels.playbackFailed;
+}
+
+async function togglePlayback() {
+  const audio = audioRef.value;
+  if (!audio || !duration.value) return;
+  if (transportPlaying.value) {
+    resetPlayback();
+    return;
+  }
+  if (currentTime.value >= duration.value - 0.01) {
+    audio.currentTime = 0;
+    currentTime.value = 0;
+  }
+  try {
+    await audio.play();
+  } catch {
+    handleAudioError();
+  }
+}
+
+function seekPlayback(event: Event) {
+  const audio = audioRef.value;
+  const nextTime = Number((event.target as HTMLInputElement).value);
+  if (!audio || !Number.isFinite(nextTime) || !duration.value) return;
+  if (selectionPreviewActive.value || selectionPreviewIntent) resetPlayback();
+  const boundedTime = Math.max(0, Math.min(duration.value, nextTime));
+  audio.currentTime = boundedTime;
+  currentTime.value = boundedTime;
 }
 
 function startSelectionMonitor(token: number) {
@@ -684,7 +812,7 @@ async function decodeSource() {
     waveformSampleCount = 0;
     duration.value = normalizeDisplayTime(buffer.duration);
     clipStart.value = 0;
-    clipEnd.value = duration.value;
+    clipEnd.value = getDefaultClipEnd(duration.value);
     scheduleWaveformDraw();
   } catch (error: any) {
     if (version !== decodeVersion || controller.signal.aborted || error?.name === "AbortError") return;
@@ -818,7 +946,9 @@ async function saveClip() {
   try {
     const start = Math.max(0, Math.min(clipStart.value, buffer.duration));
     const end = Math.max(start, Math.min(clipEnd.value, buffer.duration));
-    const clip = await encodeWavDataUrl(buffer, start, end);
+    const clip = props.serverTrim
+      ? { start, end, duration: end - start, base64Data: "" }
+      : await encodeWavDataUrl(buffer, start, end);
     const payload: SavePayload = {
       base64Data: clip.base64Data,
       name: buildClipName(props.name, clip.start, clip.end),
@@ -962,8 +1092,52 @@ function writeString(view: DataView, offset: number, value: string) {
   font-size: 12px;
 }
 
-.audioPlayer {
+.audioEngine {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.audioTransport {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 10px;
+  border: 1px solid var(--td-border-level-1-color);
+  border-radius: 6px;
+  background: var(--td-bg-color-secondarycontainer);
+}
+
+.audioTransport.disabled {
+  opacity: 0.65;
+}
+
+.transportToggle {
+  flex: 0 0 auto;
+}
+
+.transportSeek {
   width: 100%;
+  min-width: 0;
+  accent-color: var(--td-brand-color);
+  cursor: pointer;
+}
+
+.transportSeek:disabled {
+  cursor: not-allowed;
+}
+
+.transportTime {
+  min-width: 100px;
+  color: var(--td-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  text-align: right;
 }
 
 .waveformHeader {
@@ -1079,6 +1253,16 @@ function writeString(view: DataView, offset: number, value: string) {
 }
 
 @media (max-width: 640px) {
+  .audioTransport {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .transportTime {
+    grid-column: 2;
+    min-width: 0;
+    text-align: left;
+  }
+
   .waveformShell {
     height: 96px;
   }

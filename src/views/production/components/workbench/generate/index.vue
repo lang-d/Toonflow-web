@@ -138,6 +138,7 @@ import AudioClipDialog from "@/components/AudioClipDialog.vue";
 import imageListCacheStore from "@/stores/imageListCache";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
+import { deriveReferenceTokens, getDerivedReferenceToken } from "./referenceTokens";
 import {
   resolveProductionReviewBatch,
   reviewVideoTracks,
@@ -670,11 +671,6 @@ function parseMode(value: string): VideoMode | null {
   }
   return value as Exclude<VideoMode, ReferenceType[]>;
 }
-/** uploadBox 作为 promptEditor 的引用预览 */
-function getReferenceToken(item?: Partial<UploadItem | TrackMedia>) {
-  return item?.referenceToken || item?.visualToken || item?.audioToken || item?.videoToken || "";
-}
-
 function getReferenceGroup(item?: Partial<UploadItem | TrackMedia>) {
   if (!item) return "";
   if (item.name) return item.name;
@@ -692,13 +688,13 @@ const references = computed(() => {
     return "image";
   }
 
-  return (imageList.value as any[])
+  return deriveReferenceTokens(imageList.value as any[])
     .filter((item) => item.src)
     .map((item) => ({
       type: item.fileType || getFileTypeByExt(item.src),
       src: item.src ?? "",
-      token: getReferenceToken(item) || undefined,
-      label: getReferenceToken(item) || undefined,
+      token: getDerivedReferenceToken(item) || undefined,
+      label: getDerivedReferenceToken(item) || undefined,
       group: getReferenceGroup(item) || undefined,
     }));
 });

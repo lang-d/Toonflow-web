@@ -83,6 +83,35 @@
               <t-input v-else v-model="facts[field.key]" :placeholder="field.placeholder" />
             </label>
           </div>
+          <div class="characterFactsEditor">
+            <div class="sectionHeader">
+              <div>
+                <strong>人物站位与朝向</strong>
+                <span class="sectionHint">姓名、站位、朝向与动作会作为本镜头的结构化事实保存。</span>
+              </div>
+              <t-button size="small" variant="outline" @click="addCharacter">添加人物</t-button>
+            </div>
+            <div v-if="characters.length" class="characterFactList">
+              <article v-for="(character, index) in characters" :key="index" class="characterFactCard">
+                <div class="characterFactHeader">
+                  <strong>人物 {{ index + 1 }}</strong>
+                  <t-button size="small" shape="circle" variant="text" theme="danger" @click="removeCharacter(index)">
+                    <template #icon><i-delete /></template>
+                  </t-button>
+                </div>
+                <div class="characterFactGrid">
+                  <label><span>姓名</span><t-input v-model="character.name" /></label>
+                  <label><span>空间位置</span><t-input v-model="character.spatialPosition" /></label>
+                  <label><span>朝向</span><t-input v-model="character.orientation" /></label>
+                  <label><span>动作</span><t-input v-model="character.action" /></label>
+                  <label><span>姿态</span><t-input v-model="character.posture" /></label>
+                  <label><span>视线</span><t-input v-model="character.gaze" /></label>
+                  <label class="characterWide"><span>手部动作</span><t-input v-model="character.handAction" /></label>
+                </div>
+              </article>
+            </div>
+            <span v-else class="sectionHint">暂无可见人物。</span>
+          </div>
         </section>
 
         <section class="promptEditorSection promptTextSection">
@@ -107,10 +136,12 @@ type StoryboardFactKey =
   | "location"
   | "timeOfDay"
   | "sceneContinuityId"
+  | "transitionFromPrevious"
   | "picture"
   | "action"
   | "shotSize"
   | "cameraMove"
+  | "cameraAngle"
   | "dialogue"
   | "sound"
   | "visibleEmotion";
@@ -124,10 +155,12 @@ const facts = defineModel<Record<StoryboardFactKey, string>>("facts", {
     location: "",
     timeOfDay: "",
     sceneContinuityId: "",
+    transitionFromPrevious: "",
     picture: "",
     action: "",
     shotSize: "",
     cameraMove: "",
+    cameraAngle: "",
     dialogue: "",
     sound: "",
     visibleEmotion: "",
@@ -139,10 +172,12 @@ const factFields: Array<{ key: StoryboardFactKey; label: string; placeholder: st
   { key: "location", label: "地点", placeholder: "明确的拍摄地点或空间" },
   { key: "timeOfDay", label: "时间", placeholder: "早晨、白天、黄昏、夜晚等" },
   { key: "sceneContinuityId", label: "场景连续性", placeholder: "连续场景标识，可选" },
+  { key: "transitionFromPrevious", label: "承接 / 转场", placeholder: "上一个镜头的承接或转场方式", multiline: true },
   { key: "picture", label: "画面", placeholder: "画面主体与构图", multiline: true },
   { key: "action", label: "动作", placeholder: "人物或镜头内动作", multiline: true },
   { key: "shotSize", label: "景别", placeholder: "远景/中景/近景/特写" },
   { key: "cameraMove", label: "运镜", placeholder: "推拉摇移跟等" },
+  { key: "cameraAngle", label: "轴线 / 机位", placeholder: "完整机位签名，例如轴线、人物朝向与相机位置", multiline: true },
   { key: "dialogue", label: "对白", placeholder: "本镜头对白", multiline: true },
   { key: "sound", label: "声音", placeholder: "音效、环境声、音乐提示", multiline: true },
   { key: "visibleEmotion", label: "可见情绪", placeholder: "可被画面看见的情绪" },
@@ -155,6 +190,18 @@ const props = defineProps<{
   references: ReferenceView[];
   nodeOptions: { label: string; value: string }[];
 }>();
+
+type CharacterFactDraft = {
+  name: string;
+  spatialPosition: string;
+  orientation: string;
+  action: string;
+  posture?: string;
+  gaze?: string;
+  handAction?: string;
+};
+
+const characters = defineModel<CharacterFactDraft[]>("characters", { default: () => [] });
 
 const primaryRequired = computed(() => props.nodeOptions.length > 1 && !primaryNodeId.value);
 const promptReferences = computed(() =>
@@ -175,6 +222,14 @@ const emit = defineEmits<{
   removeReference: [ref: ReferenceView];
   previewReference: [ref: ReferenceView];
 }>();
+
+function addCharacter() {
+  characters.value.push({ name: "", spatialPosition: "", orientation: "", action: "" });
+}
+
+function removeCharacter(index: number) {
+  characters.value.splice(index, 1);
+}
 </script>
 
 <style lang="scss">
@@ -240,6 +295,54 @@ const emit = defineEmits<{
 .factField span {
   color: var(--td-text-color-secondary);
   font-size: 12px;
+}
+
+.characterFactsEditor {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--td-border-level-1-color);
+}
+
+.characterFactList {
+  display: grid;
+  gap: 10px;
+}
+
+.characterFactCard {
+  padding: 12px;
+  border: 1px solid var(--td-border-level-1-color);
+  border-radius: 6px;
+  background: var(--td-bg-color-secondarycontainer);
+}
+
+.characterFactHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.characterFactGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.characterFactGrid label {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.characterFactGrid span {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.characterWide {
+  grid-column: 1 / -1;
 }
 
 .referenceActions {

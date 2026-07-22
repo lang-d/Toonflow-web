@@ -1,817 +1,281 @@
 <template>
-  <div class="scriptAgent">
-    <Splitpanes class="default-theme data f">
-      <Pane :size="30" :min-size="15" class="operate">
-        <div class="box pr">
-          <t-chat-list :clear-history="false">
-            <t-chat-message
-              v-for="message in messages"
-              :key="message.id"
-              :message="message"
-              :name="(message as any).name"
-              :placement="message.role === 'user' ? 'right' : 'left'"
-              :variant="message.role === 'user' ? 'base' : 'outline'"
-              :handleActions="message.role === 'user' ? {} : handleActions"
-              :status="message.status"
-              allowContentSegmentCustom></t-chat-message>
-          </t-chat-list>
-          <t-chat-sender
-            class="inputBox"
-            :disabled="status === 'pending' || status === 'streaming'"
-            v-model="inputValue"
-            :loading="status === 'pending' || status === 'streaming'"
-            placeholder="$t('workbench.scriptAgent.inputPlaceholder')"
-            @send="handleSend"
-            @stop="handleStop">
-            <template #footer-prefix>
-              <t-popup trigger="click" placement="top-left">
-                <t-button shape="square" variant="outline" size="small" :disabled="status === 'pending' || status === 'streaming'">
-                  <template #icon>
-                    <i-setting-config size="16" />
-                  </template>
-                </t-button>
-                <template #content>
-                  <div class="settingMenu">
-                    <div class="settingMenuItem" @click="handleReconnect()">
-                      <i-api size="14" />
-                      <span>{{ $t("workbench.scriptAgent.reconnect") }}</span>
-                    </div>
-                    <div class="settingMenuItem" @click="handleClearMemory('message')">
-                      <i-delete size="14" />
-                      <span>{{ $t("workbench.scriptAgent.clearMessageMemory") }}</span>
-                    </div>
-                    <div class="settingMenuItem" @click="handleClearMemory('summary')">
-                      <i-close size="14" />
-                      <span>{{ $t("workbench.scriptAgent.clearSummaryMemory") }}</span>
-                    </div>
-                    <div class="settingMenuItem danger" @click="handleClearMemory('all')">
-                      <i-delete-one size="14" />
-                      <span>{{ $t("workbench.scriptAgent.clearAllMemory") }}</span>
-                    </div>
-                  </div>
-                </template>
-              </t-popup>
-              <t-popup trigger="click" placement="top" v-if="showThink">
-                <t-button
-                  size="small"
-                  variant="outline"
-                  :theme="(['default', 'success', 'warning', 'danger'] as const)[thinkLevel] || 'default'"
-                  style="margin-left: 8px">
-                  <template #icon>
-                    <i-tips size="16" />
-                  </template>
-                  {{ thinkLevelOptions[thinkLevel]?.label }}
-                </t-button>
-                <template #content>
-                  <div class="settingMenu">
-                    <div
-                      v-for="opt in thinkLevelOptions"
-                      :key="opt.value"
-                      class="settingMenuItem"
-                      :class="{ active: thinkLevel === opt.value }"
-                      @click="scriptAgentStore().updateThinkConfig(opt.value)">
-                      <span>{{ opt.label }}</span>
-                    </div>
-                  </div>
-                </template>
-              </t-popup>
-            </template>
-          </t-chat-sender>
-          <i-dot class="dot" theme="outline" :fill="connected ? 'green' : 'red'" />
-          <transition name="fade">
-            <div v-if="forceGenerateVisible" class="forceGenerateMask">
-              <div class="forceGenerateCard">
-                <div class="forceGenerateDesc">{{ $t("workbench.scriptAgent.forceGenerate.desc") }}</div>
-                <div class="forceGenerateActions">
-                  <t-button @click="forceGenerateVisible = false">{{ $t("workbench.scriptAgent.forceGenerate.confirm") }}</t-button>
-                </div>
-              </div>
-            </div>
-          </transition>
-        </div>
-      </Pane>
-      <Pane :size="70" :min-size="30" class="data">
-        <div class="tabsWrapper">
-          <t-tabs v-model="currentTable">
-            <template #action>
-              <div class="ac" v-if="currentTable == 1">
-                <t-button @click="editMdPreview">{{ $t("workbench.scriptAgent.edit") }}</t-button>
-              </div>
-              <div class="ac" v-else-if="currentTable == 2">
-                <t-button @click="editMdPreview">{{ $t("workbench.scriptAgent.edit") }}</t-button>
-              </div>
-            </template>
-            <!-- <t-tab-panel :value="1" :label="$t('workbench.scriptAgent.chapterEvents')">
-              <pre>{{ planData.event }}</pre>
-            </t-tab-panel> -->
-            <t-tab-panel :value="1" :label="$t('workbench.scriptAgent.storySkeleton')">
-              <div class="panelContent">
-                <MdPreview
-                  v-if="planData.storySkeleton"
-                  :modelValue="planData.storySkeleton"
-                  :theme="themeSetting.mode === 'auto' ? undefined : themeSetting.mode" />
-                <t-empty v-else :title="$t('workbench.scriptAgent.noContent')" />
-              </div>
-            </t-tab-panel>
-            <t-tab-panel :value="2" :label="$t('workbench.scriptAgent.adaptationStrategy')">
-              <div class="panelContent">
-                <MdPreview
-                  v-if="planData.adaptationStrategy"
-                  :modelValue="planData.adaptationStrategy"
-                  :theme="themeSetting.mode === 'auto' ? undefined : themeSetting.mode" />
-                <t-empty v-else :title="$t('workbench.scriptAgent.noContent')" />
-              </div>
-            </t-tab-panel>
-            <t-tab-panel :value="3" :label="$t('workbench.scriptAgent.script')">
-              <div class="panelContent">
-                <t-empty v-if="!planData.script?.length" :title="$t('workbench.scriptAgent.noContent')" />
-                <div v-else class="scriptList">
-                  <div
-                    v-for="(item, index) in planData.script"
-                    :key="getScriptCardKey(item, index)"
-                    class="scriptCard"
-                    :class="{ collapsed: isCardCollapsed(item, index) }">
-                    <div class="scriptCardHeader">
-                      <div class="scriptCardHeaderLeft">
-                        <span class="scriptIndex">#{{ index + 1 }}</span>
-                        <span class="scriptTitle">{{ item.name }}</span>
-                      </div>
-                      <div class="scriptCardActions">
-                        <t-button size="small" variant="outline" @click="toggleCardCollapse(item, index)">
-                          <template #icon>
-                            <i-down v-if="!isCardCollapsed(item, index)" size="14" />
-                            <i-right v-else size="14" />
-                          </template>
-                        </t-button>
-                        <t-button size="small" @click="editScript(index)">
-                          <template #icon><i-edit size="14" /></template>
-                        </t-button>
-                        <t-button theme="danger" variant="outline" size="small" @click="delScript(index)">
-                          <template #icon><i-delete size="14" /></template>
-                        </t-button>
-                      </div>
-                    </div>
-                    <div class="scriptCardBody" v-if="!isCardCollapsed(item, index)">
-                      <pre v-if="item.content">{{ item.content }}</pre>
-                      <span v-else class="emptyContent">{{ $t("workbench.scriptAgent.noContent") }}</span>
-                    </div>
-                  </div>
-                </div>
-                <!-- 悬浮折叠按钮 -->
-                <div class="floatCollapseBtn" v-if="planData.script?.length">
-                  <t-button shape="circle" size="large" theme="primary" @click="toggleAllCards">
-                    <template #icon>
-                      <i-right v-if="isAllCollapsed" title="" size="18" />
-                      <i-down v-else size="18" />
-                    </template>
-                  </t-button>
-                </div>
-              </div>
-            </t-tab-panel>
-          </t-tabs>
-        </div>
-      </Pane>
-    </Splitpanes>
-    <editMdPreivew v-model="dialogVisible" @save="onConfirm" :content="editContent" />
-
-    <!-- 剧本编辑对话框 -->
-    <t-dialog
-      v-model:visible="scriptEditVisible"
-      :header="$t('workbench.scriptAgent.editScript')"
-      width="80%"
-      top="10vh"
-      placement="center"
-      :confirm-btn="{ content: $t('workbench.scriptAgent.save'), theme: 'primary' }"
-      @confirm="saveScript"
-      @close="scriptEditVisible = false">
-      <div class="scriptEditForm">
-        <div class="scriptEditField">
-          <strong>{{ scriptEditData.name }}</strong>
-        </div>
-        <div class="scriptEditField">
-          <label>{{ $t("workbench.scriptAgent.content") }}</label>
-          <MdEditor
-            v-model="scriptEditData.content"
-            :theme="themeSetting.mode === 'auto' ? undefined : themeSetting.mode"
-            :toolbars="toolbars"
-            :footers="[]"
-            style="height: 50vh"
-            @onUploadImg="() => {}"
-            @drop.prevent />
-        </div>
-      </div>
-    </t-dialog>
+  <div class="scriptAgent" :class="{ agentHidden: !agentVisible }">
+    <section class="workspace" v-loading="loadingWorkspace">
+      <t-alert v-if="workspaceError" theme="error" :message="workspaceError" close @close="store.loadWorkspace()" />
+      <t-tabs v-model="activeTab">
+        <template #action>
+          <t-space size="small">
+            <t-button size="small" variant="outline" @click="agentVisible = !agentVisible"><template #icon><i-message /></template>{{ agentVisible ? "收起 Agent" : "打开 Agent" }}</t-button>
+            <t-button v-if="activeTab !== 'scripts'" size="small" :disabled="runRunning" @click="openStageEditor(activeTab)"><template #icon><i-edit /></template>编辑</t-button>
+            <t-button v-else size="small" theme="primary" :disabled="runRunning" @click="openCreateScript"><template #icon><i-add /></template>新建剧本</t-button>
+          </t-space>
+        </template>
+        <t-tab-panel value="storySkeleton" label="故事骨架"><div class="reading"><MdPreview v-if="workspace.storySkeleton" :model-value="workspace.storySkeleton" :theme="mdTheme" /><t-empty v-else title="暂无故事骨架" /></div></t-tab-panel>
+        <t-tab-panel value="adaptationStrategy" label="改编策略"><div class="reading"><MdPreview v-if="workspace.adaptationStrategy" :model-value="workspace.adaptationStrategy" :theme="mdTheme" /><t-empty v-else title="暂无改编策略" /></div></t-tab-panel>
+        <t-tab-panel value="scripts" label="剧本"><div class="scriptList"><t-empty v-if="!workspace.scripts.length" title="暂无剧本" /><article v-for="script in workspace.scripts" :key="script.id" class="scriptCard"><header><strong>{{ script.name }}</strong><div><t-tooltip content="全屏查看"><t-button size="small" variant="text" @click="openScriptFullscreen(script)"><template #icon><i-full-screen-one /></template></t-button></t-tooltip><t-button size="small" variant="text" :disabled="runRunning" @click="openScriptEditor(script)"><template #icon><i-edit /></template></t-button><t-button size="small" variant="text" theme="danger" :disabled="runRunning" @click="removeScript(script.id)"><template #icon><i-delete /></template></t-button></div></header><MdPreview class="scriptMarkdown" :model-value="script.content" :theme="mdTheme" preview-only /></article></div></t-tab-panel>
+      </t-tabs>
+    </section>
+    <aside v-if="agentVisible" class="agentSlot">
+    <AgentChatPanel title="剧本 Agent" placeholder="描述你希望剧本 Agent 推进的工作" :connected="connected" :loading="runRunning || submitting" :history-loading="loadingHistory" :messages="agentMessages" @send="handleSend" @stop="handleStop" @close="agentVisible = false">
+      <template #status>
+        <section v-if="runStatusText || businessProgress || runStatusError" class="runStatus" :class="{ running: runRunning, error: runStatusError }">
+          <strong>{{ runStatusText }}</strong>
+          <span v-if="businessProgress?.title">{{ businessProgress.title }}</span>
+          <small v-if="businessProgress?.detail || businessProgress?.phase">{{ businessProgress?.detail || businessProgress?.phase }}</small>
+          <small v-else-if="runStatusError">{{ runStatusError }}</small>
+          <small v-else-if="latestRun?.reason && latestRun?.status !== 'awaiting_user'">{{ latestRun.reason }}</small>
+        </section>
+        <section v-if="archivedOutputs.length" class="archivedOutputs">
+          <article v-for="asset in archivedOutputs" :key="asset.id"><div><strong>过程输出</strong><p>{{ asset.summary || '可展开查看归档长文' }}</p></div><t-button size="small" variant="outline" @click="openFullText(asset)">查看长文</t-button></article>
+        </section>
+      </template>
+      <template #before-messages>
+        <t-collapse v-if="timeline.length" class="timeline" expand-icon-placement="right"><t-collapse-panel value="timeline"><template #header>执行轨迹 <small>{{ timeline.length }} 项</small></template><ol><li v-for="item in timeline" :key="`${item.id}-${item.createdAt}`"><div><strong>{{ timelineLabel(item.kind) }}</strong><span>{{ timelineDetail(item) }}</span><small>{{ formatTime(item.createdAt) }}</small></div><t-button v-if="item.archivedOutput" size="small" variant="text" @click="openFullText(item.archivedOutput)">查看长文</t-button></li></ol></t-collapse-panel></t-collapse>
+      </template>
+      <template #footer-prefix><t-popup trigger="click" placement="top-left"><t-button shape="square" variant="outline" size="small"><template #icon><i-setting-config size="16" /></template></t-button><template #content><div class="settingMenu"><button type="button" @click="store.reconnect()"><i-api size="14" />重连 Agent</button><button type="button" @click="clearMemory('message')"><i-delete size="14" />清除消息记忆</button><button type="button" @click="clearMemory('summary')"><i-close size="14" />清除摘要记忆</button><button type="button" class="danger" @click="clearMemory('all')"><i-delete-one size="14" />清除全部记忆</button></div></template></t-popup></template>
+    </AgentChatPanel>
+    </aside>
+    <t-dialog v-model:visible="editorVisible" :header="editorTitle" width="min(1000px, 90vw)" :confirm-btn="{ content: '保存', theme: 'primary', loading: savingEditor }" @confirm="saveEditor" @close="editorVisible = false"><div class="editorForm"><t-input v-if="editor.kind === 'script'" v-model="editor.name" placeholder="剧本名称" /><MdEditor v-model="editor.content" :theme="mdTheme" :toolbars="toolbars" :footers="[]" style="height: 58vh" @onUploadImg="() => {}" @drop.prevent /></div></t-dialog>
+    <t-dialog v-model:visible="scriptFullscreenVisible" :header="fullscreenScript?.name || '剧本阅读'" :footer="false" fullscreen attach="body" class="scriptFullscreenDialog"><article class="scriptFullscreenReader"><MdPreview v-if="fullscreenScript" class="scriptMarkdown fullscreenMarkdown" :model-value="fullscreenScript.content" :theme="mdTheme" preview-only /></article></t-dialog>
+    <t-dialog v-model:visible="fullTextVisible" :header="fullTextAsset?.summary || '长文转录'" width="min(900px, 92vw)" :footer="false" attach="body"><div class="fullText"><MdPreview v-if="fullTextContent" :model-value="fullTextContent" :theme="mdTheme" /><p v-else>暂无可读取内容</p><footer><span>已加载 {{ fullTextContent.length }} 字符 · 文件 {{ fullTextAsset?.size || 0 }} bytes</span><t-button v-if="!fullTextEof" size="small" :loading="fullTextLoading" @click="loadMoreText">加载更多</t-button><span v-else>已加载完整内容</span></footer></div></t-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { MdEditor } from "md-editor-v3";
-import type { ToolbarNames } from "md-editor-v3";
-import { MdPreview } from "md-editor-v3";
-import settingStore from "@/stores/setting";
-const { themeSetting } = storeToRefs(settingStore());
-import { Splitpanes, Pane } from "splitpanes";
+import { computed, onMounted, ref, watch } from "vue";
+import { MdEditor, MdPreview, type ToolbarNames } from "md-editor-v3";
 import axios from "@/utils/axios";
-import type { ChatMessagesData } from "@tdesign-vue-next/chat";
+import { getTextAssetContent } from "@/api/textAsset";
 import projectStore from "@/stores/project";
+import settingStore from "@/stores/setting";
+import scriptAgentStore, { type ScriptAgentArchivedOutput, type ScriptAgentTimelineItem } from "@/stores/scriptAgent";
+import AgentChatPanel, { type AgentPanelMessage } from "@/components/AgentChatPanel.vue";
+
+const store = scriptAgentStore();
 const { project } = storeToRefs(projectStore());
-import editMdPreivew from "@/components/editMdPreivew.vue";
-import scriptAgentStore from "@/stores/scriptAgent";
-const { connected, messages, status, planData, thinkLevel } = storeToRefs(scriptAgentStore());
-const thinkLevelOptions = [
-  { label: $t("workbench.scriptAgent.thinkLevel.off"), value: 0 },
-  { label: $t("workbench.scriptAgent.thinkLevel.light"), value: 1 },
-  { label: $t("workbench.scriptAgent.thinkLevel.deep"), value: 2 },
-  { label: $t("workbench.scriptAgent.thinkLevel.extreme"), value: 3 },
-];
-import productionAgentStore from "@/stores/productionAgent";
-const currentTable = ref(1);
-const inputValue = ref("");
-const toolbars: ToolbarNames[] = [
-  "bold",
-  "underline",
-  "italic",
-  "strikeThrough",
-  "-",
-  "title",
-  "sub",
-  "sup",
-  "quote",
-  "unorderedList",
-  "orderedList",
-  "task",
-  "-",
-  "codeRow",
-  "code",
-  "table",
-  "-",
-  "revoke",
-  "next",
-  "=",
-  "preview",
-];
-const defMsg: ChatMessagesData[] = [
-  {
-    id: "welcome",
-    role: "assistant",
-    content: [
-      { type: "text", status: "complete", data: $t("workbench.scriptAgent.welcomeMsg") },
-      {
-        type: "suggestion",
-        status: "complete",
-        data: [{ title: $t("workbench.scriptAgent.start"), prompt: $t("workbench.scriptAgent.start") }],
-      },
-    ],
-  },
-];
-
-onMounted(() => {
-  if (messages.value.length <= 0) messages.value = [...defMsg, ...messages.value];
-  getPlanData();
-  getNovel();
-  scriptAgentStore().connect();
-
-  if (messages.value.length <= 1) getHistory();
+const { themeSetting } = storeToRefs(settingStore());
+const { connected, messages, latestRun, workspace, timeline, businessProgress, archivedOutputs, runRunning, submitting, loadingHistory, loadingWorkspace, runStatusError, workspaceError } = storeToRefs(store);
+const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
+const activeTab = ref<"storySkeleton" | "adaptationStrategy" | "scripts">("storySkeleton");
+const agentVisible = ref(true);
+const toolbars: ToolbarNames[] = ["bold", "underline", "italic", "strikeThrough", "-", "title", "quote", "unorderedList", "orderedList", "task", "-", "codeRow", "table", "-", "revoke", "next", "=", "preview"];
+const lifecycleLabels: Record<string, string> = { running: "Agent 运行中", awaiting_user: "等待用户决定", completed: "本轮已完成", failed: "任务失败", cancelled: "已取消", interrupted: "运行已中断" };
+const runStatusText = computed(() => businessProgress.value?.title || lifecycleLabels[latestRun.value?.status || ""] || (connected.value ? "已连接" : "连接中"));
+const agentMessages = computed<AgentPanelMessage[]>(() => {
+  const history = messages.value as unknown as AgentPanelMessage[];
+  return awaitingDecisionMessage.value ? [...history, awaitingDecisionMessage.value as AgentPanelMessage] : history;
 });
-const agentWorkDataId = ref<number>();
-async function getPlanData() {
-  const { data } = await axios.post("/scriptAgent/getPlanData", { projectId: project.value?.id, agentType: "scriptAgent" });
-  planData.value.storySkeleton = data.data.storySkeleton;
-  planData.value.adaptationStrategy = data.data.adaptationStrategy;
-  planData.value.script = data.data.script || [];
-  agentWorkDataId.value = data.id;
+
+const editorVisible = ref(false);
+const savingEditor = ref(false);
+const editor = ref<{ kind: "stage" | "script"; stage?: "storySkeleton" | "adaptationStrategy"; id?: number; name: string; content: string }>({ kind: "stage", name: "", content: "" });
+const editorTitle = computed(() => editor.value.kind === "script" ? (editor.value.id ? "编辑剧本" : "新建剧本") : editor.value.stage === "storySkeleton" ? "编辑故事骨架" : "编辑改编策略");
+const scriptFullscreenVisible = ref(false);
+const fullscreenScript = ref<{ id: number; name: string; content: string } | null>(null);
+
+const fullTextVisible = ref(false);
+const fullTextAsset = ref<ScriptAgentArchivedOutput | null>(null);
+const fullTextContent = ref("");
+const fullTextOffset = ref(0);
+const fullTextLoading = ref(false);
+const fullTextEof = ref(false);
+const FULL_TEXT_PAGE_SIZE = 12_000;
+
+const awaitingDecisionMessage = computed(() => {
+  if (latestRun.value?.status !== "awaiting_user") return null;
+  const raw = latestRun.value.resultJson;
+  let result: Record<string, unknown> = {};
+  try { result = typeof raw === "string" ? JSON.parse(raw) : raw && typeof raw === "object" ? raw as Record<string, unknown> : {}; } catch { result = {}; }
+  const lines = [latestRun.value.reason, result.question, Array.isArray(result.options) && result.options.length ? `可选项：${result.options.map((item) => typeof item === "string" ? item : JSON.stringify(item)).join("；")}` : "", result.context].filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+  if (!lines.length) return null;
+  return { id: `awaiting-${latestRun.value.runId}`, role: "assistant", status: "complete", content: [{ type: "markdown", status: "complete", data: lines.join("\n\n") }] } as any;
+});
+
+onMounted(() => { void store.recover(); });
+watch(() => project.value?.id, (id, previous) => {
+  if (!id || id === previous) return;
+  store.activate(Number(id));
+  void store.recover(Number(id));
+});
+
+async function handleSend(text: string) {
+  await store.chat(text);
 }
 
-//快捷发送
-const handleActions = {
-  suggestion: (data?: any) => {
-    scriptAgentStore().chat(data?.content?.prompt);
-  },
-};
+function handleStop() { void store.stop(); }
 
-function handleSend(text: string) {
-  scriptAgentStore().chat(text);
-  inputValue.value = "";
-}
-function handleStop() {
-  scriptAgentStore().stopGenerate();
+function openStageEditor(stage: "storySkeleton" | "adaptationStrategy") {
+  editor.value = { kind: "stage", stage, name: "", content: workspace.value[stage] };
+  editorVisible.value = true;
 }
 
-const memoryTypeLabel: Record<string, string> = {
-  message: $t("workbench.scriptAgent.memoryType.message"),
-  summary: $t("workbench.scriptAgent.memoryType.summary"),
-  all: $t("workbench.scriptAgent.memoryType.all"),
-};
-function handleClearMemory(type: "message" | "summary" | "all" | "reconnect") {
-  const dialog = DialogPlugin.confirm({
-    header: $t("workbench.scriptAgent.msg.clearConfirm"),
-    body: $t("workbench.scriptAgent.msg.clearBody", { type: memoryTypeLabel[type] }),
-    confirmBtn: $t("workbench.scriptAgent.msg.confirmClear"),
-    cancelBtn: $t("workbench.scriptAgent.msg.cancel"),
-    theme: "warning",
-    onConfirm: async () => {
-      await axios.post(`/agents/clearMemory`, { projectId: project.value?.id, agentType: "scriptAgent", type });
-      window.$message.success($t("workbench.scriptAgent.msg.memoryCleared", { type: memoryTypeLabel[type] }));
-      dialog.destroy();
-      getHistory();
-    },
-  });
-}
-function handleReconnect() {
-  const dialog = DialogPlugin.confirm({
-    header: $t("workbench.scriptAgent.msg.reconnect"),
-    body: $t("workbench.scriptAgent.msg.notReconnect"),
-    confirmBtn: $t("workbench.scriptAgent.msg.keepReconnect"),
-    cancelBtn: $t("workbench.scriptAgent.msg.cancel"),
-    theme: "warning",
-    onConfirm: async () => {
-      productionAgentStore().reconnect();
-      dialog.destroy();
-    },
-  });
+function openCreateScript() {
+  editor.value = { kind: "script", name: "", content: "" };
+  editorVisible.value = true;
 }
 
-const loadingHistory = ref(false);
-async function getHistory() {
-  loadingHistory.value = true;
-  const { data } = await axios.post(`/agents/getMemory`, {
-    projectId: project.value?.id,
-    agentType: "scriptAgent",
-  });
-  messages.value = [...defMsg, ...data];
-  loadingHistory.value = false;
+function openScriptEditor(script: { id: number; name: string; content: string }) {
+  editor.value = { kind: "script", id: script.id, name: script.name, content: script.content };
+  editorVisible.value = true;
 }
 
-// 强制生成蒙层
-const forceGenerateVisible = ref(false);
-const novelData = ref([]);
+function openScriptFullscreen(script: { id: number; name: string; content: string }) {
+  fullscreenScript.value = script;
+  scriptFullscreenVisible.value = true;
+}
 
-function getNovel() {
-  axios.post("/novel/getNovelData", { projectId: project.value?.id }).then(({ data }: any) => {
-    novelData.value = data;
-    const hasUnfinished = (novelData.value as any[]).some((item: any) => item.eventState === 0);
-    if (hasUnfinished && !forceGenerateVisible.value) {
-      forceGenerateVisible.value = true;
+async function saveEditor() {
+  if (runRunning.value) return;
+  savingEditor.value = true;
+  try {
+    if (editor.value.kind === "stage" && editor.value.stage) {
+      await store.saveStage(editor.value.stage, editor.value.content);
+    } else {
+      const name = editor.value.name.trim();
+      if (!name) { window.$message.warning("请输入剧本名称"); return; }
+      await store.upsertScript({ id: editor.value.id, name, content: editor.value.content });
     }
-  });
+    editorVisible.value = false;
+    window.$message.success("已保存到剧本工作区");
+  } catch (error: any) {
+    if (Number(error?.response?.status ?? error?.status) === 409) window.$message.error("Agent 正在保存工作区，已刷新后端内容；请在完成后再提交当前草稿。");
+    else window.$message.error(error?.response?.data?.message || error?.message || "保存失败");
+  } finally {
+    savingEditor.value = false;
+  }
 }
 
-const dialogVisible = ref(false);
-const editContent = ref("");
-//编辑markdown
-function editMdPreview() {
-  if (currentTable.value == 1) editContent.value = planData.value.storySkeleton;
-  else if (currentTable.value == 2) editContent.value = planData.value.adaptationStrategy;
-  dialogVisible.value = true;
-}
-
-const scriptEditIndex = ref(-1);
-const scriptEditData = ref({
-  name: "",
-  content: "",
-});
-const scriptEditVisible = ref(false);
-
-function editScript(index: number) {
-  const item = planData.value.script[index];
-  scriptEditIndex.value = index;
-  scriptEditData.value = {
-    name: item.name,
-    content: item.content,
-  };
-  scriptEditVisible.value = true;
-}
-
-async function saveScript() {
-  if (scriptEditIndex.value < 0) return;
-  planData.value.script[scriptEditIndex.value] = { ...scriptEditData.value };
-  await scriptAgentStore().setPlanData();
-  await getPlanData();
-  window.$message.success($t("workbench.scriptAgent.msg.scriptUpdated"));
-  scriptEditVisible.value = false;
-}
-async function delScript(index: number) {
-  const item = planData.value.script[index];
+function removeScript(id: number) {
   const dialog = DialogPlugin.confirm({
-    header: $t("workbench.scriptAgent.msg.deleteConfirm"),
-    body: $t("workbench.scriptAgent.msg.deleteBody"),
-    confirmBtn: $t("workbench.scriptAgent.msg.confirmDelete"),
-    cancelBtn: $t("workbench.scriptAgent.msg.cancel"),
+    header: "删除剧本",
+    body: "删除后不可恢复，确认继续吗？",
     theme: "danger",
     onConfirm: async () => {
-      if (item.id) {
-        await axios.post("/script/delScript", { ids: [item.id] });
-        planData.value.script.splice(index, 1);
-      } else {
-        planData.value.script.splice(index, 1);
-      }
-      await scriptAgentStore().setPlanData();
-      await getPlanData();
-      window.$message.success($t("workbench.scriptAgent.msg.scriptDeleted"));
-      dialog.destroy();
+      try { await store.deleteScript(id); window.$message.success("剧本已删除"); dialog.destroy(); }
+      catch (error: any) { window.$message.error(Number(error?.response?.status ?? error?.status) === 409 ? "Agent 正在运行，已刷新工作区。" : error?.message || "删除失败"); }
     },
   });
 }
-function onConfirm(value: string) {
-  axios
-    .post("/scriptAgent/updateData", {
-      id: agentWorkDataId.value,
-      data: {
-        storySkeleton: currentTable.value == 1 ? value : planData.value.storySkeleton,
-        adaptationStrategy: currentTable.value == 2 ? value : planData.value.adaptationStrategy,
-        script: planData.value.script,
-      },
-    })
-    .then(() => {
-      window.$message.success($t("workbench.scriptAgent.msg.updated"));
-      getPlanData();
-    })
-    .catch((err) => {
-      window.$message.error(err?.message ?? $t("workbench.scriptAgent.msg.error"));
-    });
-}
 
-const showThink = ref(false);
-onMounted(async () => {
-  const { data } = await axios.post(`/project/getModelDetails`, { key: "scriptAgent" });
-  if (data && data.think) {
-    showThink.value = true;
-  }
-});
-
-type ScriptCardItem = {
-  id?: number;
-  name: string;
-  content: string;
-};
-
-// 剧本卡片折叠状态
-const collapsedCards = ref<Record<string, boolean>>({});
-
-function getScriptCardKey(item: ScriptCardItem, index: number) {
-  if (item.id !== undefined && item.id !== null) {
-    return `id:${item.id}`;
-  }
-  return `index:${index}`;
-}
-
-function isCardCollapsed(item: ScriptCardItem, index: number) {
-  return Boolean(collapsedCards.value[getScriptCardKey(item, index)]);
-}
-
-watch(
-  () => planData.value.script?.map((item, index) => getScriptCardKey(item, index)) || [],
-  (keys) => {
-    const nextCollapsedCards: Record<string, boolean> = {};
-    keys.forEach((key) => {
-      if (collapsedCards.value[key]) {
-        nextCollapsedCards[key] = true;
-      }
-    });
-    collapsedCards.value = nextCollapsedCards;
-  },
-  { immediate: true },
-);
-
-// 是否全部折叠
-const isAllCollapsed = computed(() => {
-  if (!planData.value.script?.length) return false;
-  return planData.value.script.every((item, index) => isCardCollapsed(item, index));
-});
-
-// 切换单个卡片折叠状态
-function toggleCardCollapse(item: ScriptCardItem, index: number) {
-  const key = getScriptCardKey(item, index);
-  collapsedCards.value[key] = !collapsedCards.value[key];
-}
-
-// 一键折叠/展开所有卡片
-function toggleAllCards() {
-  const nextCollapsed = !isAllCollapsed.value;
-  const nextCollapsedCards = { ...collapsedCards.value };
-  planData.value.script?.forEach((item, index) => {
-    nextCollapsedCards[getScriptCardKey(item, index)] = nextCollapsed;
+function clearMemory(type: "message" | "summary" | "all") {
+  const names = { message: "消息记忆", summary: "摘要记忆", all: "全部记忆" };
+  const dialog = DialogPlugin.confirm({
+    header: "清除记忆",
+    body: `确认清除${names[type]}吗？`,
+    theme: type === "all" ? "warning" : "default",
+    onConfirm: async () => {
+      try {
+        await axios.post("/agents/clearMemory", { projectId: project.value?.id, agentType: "scriptAgent", type });
+        await store.getHistory();
+        window.$message.success("记忆已清除");
+        dialog.destroy();
+      } catch (error: any) { window.$message.error(error?.message || "清除失败"); }
+    },
   });
-  collapsedCards.value = nextCollapsedCards;
+}
+
+function timelineLabel(kind: string) {
+  return ({ agent_progress: "业务进度", agent_output_archived: "过程输出", runtime_restarted: "运行时已重启", active_scope_deduplicated: "历史运行已收口", client_detached: "客户端暂离", client_resumed: "客户端恢复", interrupted: "运行已中断", finished: "运行结束", stage: "阶段更新" } as Record<string, string>)[kind] || "运行事件";
+}
+
+function timelineDetail(item: ScriptAgentTimelineItem) {
+  if (item.kind === "agent_progress") return [item.title, item.phase, item.detail].filter(Boolean).join(" / ");
+  if (item.kind === "agent_output_archived") return item.archivedOutput?.summary || item.archivedOutput?.target || "已归档长文";
+  return [item.stage, item.subAgent, item.status, typeof item.payload.reason === "string" ? item.payload.reason : ""].filter(Boolean).join(" / ");
+}
+
+function formatTime(value: number) { return value ? new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""; }
+
+async function openFullText(asset: ScriptAgentArchivedOutput) {
+  fullTextAsset.value = asset;
+  fullTextContent.value = "";
+  fullTextOffset.value = 0;
+  fullTextEof.value = false;
+  fullTextVisible.value = true;
+  await loadMoreText();
+}
+
+async function loadMoreText() {
+  if (!fullTextAsset.value || fullTextLoading.value || fullTextEof.value || !project.value?.id) return;
+  fullTextLoading.value = true;
+  try {
+    const data: any = await getTextAssetContent({ projectId: Number(project.value.id), id: fullTextAsset.value.id, offset: fullTextOffset.value, limit: FULL_TEXT_PAGE_SIZE });
+    const chunk = String(data?.content ?? data?.text ?? "");
+    fullTextContent.value += chunk;
+    fullTextOffset.value += chunk.length;
+    fullTextEof.value = Boolean(data?.eof) || !chunk.length;
+  } catch (error: any) { window.$message.error(error?.message || "长文读取失败"); }
+  finally { fullTextLoading.value = false; }
 }
 </script>
 
 <style lang="scss" scoped>
-.scriptAgent {
-  height: calc(100% - 16px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  :deep(.splitpanes__pane) {
-    background-color: transparent !important;
-  }
-  :deep(.splitpanes__splitter) {
-    border-left: none;
-    margin-left: 1px;
-  }
-  .data {
-    flex: 1;
-    overflow: hidden;
-    :deep(.operate) {
-      display: flex;
-      flex-direction: column;
-      min-height: 0;
-      min-width: 250px;
-      height: 100%;
-      .box {
-        padding-top: 8px;
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        border-radius: 10px;
-        border: 1px solid var(--td-border-level-1-color);
-        background-color: var(--td-bg-color-container);
-        overflow: hidden;
-        position: relative;
-        width: 100%;
-        height: 100%;
-        padding-left: 8px;
-        .inputBox {
-          padding-right: 8px;
-          padding-bottom: 8px;
-        }
-        .dot {
-          position: absolute;
-          top: 10px;
-          left: 10px;
-        }
-      }
-      .t-chat__list {
-        padding-right: 8px;
-      }
-    }
-    :deep(.data) {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      position: relative;
-      .tabsWrapper {
-        flex: 1;
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-        transition: padding-bottom 0.3s ease;
-        .t-tabs {
-          display: flex;
-          flex-direction: column;
-          height: 100%;
-          .t-tabs__header {
-            flex-shrink: 0;
-          }
-          .t-tabs__content {
-            flex: 1;
-            overflow: hidden;
-          }
-          .t-tab-panel {
-            height: 100%;
-          }
-        }
-      }
-    }
-  }
-}
-
-.panelContent {
-  height: 100%;
-  overflow-y: auto;
-  padding: 12px 16px;
-  box-sizing: border-box;
-  position: relative;
-
-  &::-webkit-scrollbar-thumb {
-    background-color: var(--td-border-level-2-color);
-    border-radius: 4px;
-  }
-  &::-webkit-scrollbar-track {
-    background-color: var(--td-bg-color-secondarycontainer);
-  }
-}
-
-.scriptList {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  align-items: start;
-}
-
-.scriptCard {
-  border: 1px solid var(--td-border-level-2-color);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--td-bg-color-container);
-  display: flex;
-  flex-direction: column;
-  align-self: start;
-  transition: box-shadow 0.2s ease;
-  .scriptCardHeader {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 8px 12px;
-    background-color: var(--td-bg-color-secondarycontainer);
-    border-bottom: 1px solid var(--td-border-level-2-color);
-    .scriptCardHeaderLeft {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-    .scriptCardActions {
-      flex-shrink: 0;
-      display: flex;
-      gap: 4px;
-    }
-    .scriptIndex {
-      font-size: 12px;
-      font-weight: 600;
-      flex-shrink: 0;
-      background: var(--td-bg-color-component);
-      padding: 1px 6px;
-      border-radius: 4px;
-    }
-    .scriptTitle {
-      font-size: 14px;
-      font-weight: 600;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  }
-  .scriptCardBody {
-    font-size: 13px;
-    line-height: 1.7;
-    padding: 10px 12px;
-    max-height: 300px;
-    overflow-y: auto;
-    &::-webkit-scrollbar-thumb {
-      background-color: var(--td-border-level-2-color);
-      border-radius: 4px;
-    }
-    &::-webkit-scrollbar-track {
-      background-color: var(--td-bg-color-secondarycontainer);
-    }
-    pre {
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-all;
-      font-family: inherit;
-    }
-    .emptyContent {
-      display: block;
-      font-size: 13px;
-    }
-    :deep(.md-editor-preview-wrapper) {
-      padding: 0;
-    }
-  }
-  .scriptCardFooter {
-    gap: 8px;
-    padding: 8px 12px;
-    border-top: 1px solid var(--td-border-level-1-color);
-    background-color: var(--td-bg-color-secondarycontainer);
-    .assetsLabel {
-      display: flex;
-      align-items: center;
-      gap: 3px;
-      font-size: 12px;
-      white-space: nowrap;
-      margin-top: 2px;
-      flex-shrink: 0;
-    }
-    .assetsTags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5.6px;
-    }
-  }
-}
-
-.scriptEditForm {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 4px 0;
-  .scriptEditField {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    label {
-      font-size: 13px;
-      font-weight: 500;
-    }
-    .assets-list {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 5px;
-      margin-top: 10px;
-    }
-  }
-  .assetsEditor {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    border-radius: 6px;
-    padding: 8px 12px;
-    background: var(--td-bg-color-secondarycontainer);
-    .assetsTagList {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5.6px;
-      min-height: 24px;
-    }
-    .assetsInputRow {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-  }
-}
-
-.forceGenerateMask {
-  position: absolute;
-  inset: 0;
-  background: var(--td-mask-active);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  border-radius: 10px;
-  .forceGenerateCard {
-    background: var(--td-bg-color-container);
-    border-radius: 12px;
-    padding: 28px 32px 24px;
-    max-width: 300px;
-    width: 90%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    .forceGenerateActions {
-      display: flex;
-      gap: 12px;
-      margin-top: 8px;
-      width: 100%;
-      justify-content: center;
-    }
-  }
-}
-.settingMenu {
-  padding: 4px 0;
-  .settingMenuItem {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 16px;
-    font-size: 13px;
-    cursor: pointer;
-    white-space: nowrap;
-    &:hover {
-      background-color: var(--td-bg-color-container-hover);
-    }
-    &.danger {
-      color: var(--td-error-color);
-    }
-  }
-}
-:deep(.t-tabs__operations--right) {
-  top: 0;
-  bottom: 0;
-}
-:deep(.t-tabs__btn--right) {
-  display: none;
-}
-
-// 悬浮折叠按钮样式
-.floatCollapseBtn {
-  position: fixed;
-  right: 40px;
-  bottom: 40px;
-  z-index: 100;
-  .t-button {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    transition:
-      transform 0.2s ease,
-      box-shadow 0.2s ease;
-    &:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
-    }
-  }
-}
-
-// 折叠状态样式
-.scriptCard {
-  &.collapsed {
-    .scriptCardHeader {
-      border-bottom: none;
-    }
-  }
-}
+.scriptAgent { display: grid; grid-template-columns: minmax(0, 1fr) 408px; gap: 16px; height: 100%; min-height: 0; overflow: hidden; }
+.scriptAgent.agentHidden { display: block; }
+.workspace { min-width: 0; height: 100%; min-height: 0; display: flex; flex-direction: column; padding: 0 12px; background: var(--td-bg-color-container); }
+.agentSlot { width: 408px; height: 100%; min-height: 320px; overflow: hidden; }
+.agentSlot :deep(.rightChatBox) { position: relative; top: auto; right: auto; bottom: auto; width: 100% !important; min-width: 0; height: 100%; min-height: 0; margin: 0; overflow: hidden; }
+.agentSlot :deep(.rightChatBox .chatBox) { height: auto; min-height: 0; flex: 1 1 auto; padding-bottom: 8px; }
+.agentSlot :deep(.rightChatBox .t-chat__list) { flex: 1 1 0; min-height: 0; height: 0; overflow-y: auto; }
+.agentSlot :deep(.rightChatBox .inputBox) { flex: 0 0 auto; margin-top: auto; }
+.runStatus, .archivedOutputs, .timeline { margin: 8px; flex: 0 0 auto; }
+.runStatus { display: grid; gap: 3px; padding: 8px 10px; border-left: 3px solid var(--td-border-level-2-color); background: var(--td-bg-color-secondarycontainer); font-size: 13px; }
+.runStatus.running { border-color: var(--td-brand-color); }
+.runStatus.error { border-color: var(--td-error-color); }
+.runStatus small, .timeline span, .timeline small { color: var(--td-text-color-secondary); line-height: 1.45; }
+.archivedOutputs { display: grid; gap: 6px; }
+.archivedOutputs article { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-left: 3px solid var(--td-brand-color); background: var(--td-bg-color-secondarycontainer); }
+.archivedOutputs p { margin: 3px 0 0; font-size: 12px; color: var(--td-text-color-secondary); }
+.timeline ol { margin: 0; padding: 0; list-style: none; }
+.timeline li { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 7px 0; border-top: 1px solid var(--td-border-level-1-color); }
+.timeline li div { display: grid; gap: 2px; min-width: 0; }
+.timeline strong { font-size: 12px; }
+.settingMenu { padding: 4px 0; }
+.settingMenu button { width: 100%; display: flex; align-items: center; gap: 7px; padding: 7px 14px; border: 0; background: transparent; text-align: left; cursor: pointer; color: var(--td-text-color-primary); }
+.settingMenu button:hover { background: var(--td-bg-color-container-hover); }
+.settingMenu button.danger { color: var(--td-error-color); }
+.workspace :deep(.t-tabs) { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.workspace :deep(.t-tabs__operations--right) { top: 0; bottom: 0; display: flex; align-items: center; }
+.workspace :deep(.t-tabs__operations--right > *) { display: flex; align-items: center; }
+.workspace :deep(.t-tabs__content) { flex: 1 1 0; min-height: 0; overflow: hidden; }
+.workspace :deep(.t-tab-panel) { height: 100%; min-height: 0; overflow: hidden; }
+.reading, .scriptList { height: 100%; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 12px 4px; }
+.reading :deep(.md-editor-preview-wrapper) { padding: 0; }
+.scriptList { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 14px; }
+.scriptCard { display: flex; flex-direction: column; height: 480px; min-height: 0; overflow: hidden; border: 1px solid var(--td-border-level-2-color); background: var(--td-bg-color-container); }
+.scriptCard header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; background: var(--td-bg-color-secondarycontainer); border-bottom: 1px solid var(--td-border-level-2-color); }
+.scriptCard header > div { display: flex; align-items: center; }
+.scriptMarkdown { min-height: 0; padding: 14px 16px 18px; overflow: auto; overscroll-behavior: contain; background: transparent; }
+.scriptMarkdown :deep(.md-editor-preview-wrapper), .scriptMarkdown :deep(.md-editor-preview) { padding: 0; background: transparent; color: var(--td-text-color-primary); font-size: 13px; line-height: 1.72; word-break: break-word; }
+.scriptMarkdown :deep(.md-editor-preview > :first-child) { margin-top: 0; }
+.scriptMarkdown :deep(.md-editor-preview > :last-child) { margin-bottom: 0; }
+.scriptMarkdown :deep(h1), .scriptMarkdown :deep(h2), .scriptMarkdown :deep(h3), .scriptMarkdown :deep(h4) { color: var(--td-text-color-primary); line-height: 1.35; }
+.scriptMarkdown :deep(h1) { margin: 0 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--td-border-level-2-color); font-size: 20px; }
+.scriptMarkdown :deep(h2) { margin: 22px 0 10px; font-size: 17px; }
+.scriptMarkdown :deep(h3) { margin: 18px 0 8px; font-size: 15px; }
+.scriptMarkdown :deep(h4) { margin: 18px 0 8px; font-size: 14px; }
+.scriptMarkdown :deep(p), .scriptMarkdown :deep(ul), .scriptMarkdown :deep(ol) { margin: 10px 0; }
+.scriptMarkdown :deep(ul), .scriptMarkdown :deep(ol) { padding-left: 24px; }
+.scriptMarkdown :deep(li + li) { margin-top: 5px; }
+.scriptMarkdown :deep(hr) { margin: 22px 0; border: 0; border-top: 1px solid var(--td-border-level-2-color); }
+.scriptMarkdown :deep(blockquote) { margin: 14px 0; padding: 8px 12px; border-left: 3px solid var(--td-brand-color); background: var(--td-bg-color-secondarycontainer); color: var(--td-text-color-secondary); }
+.scriptMarkdown :deep(pre) { margin: 14px 0; padding: 12px; overflow: auto; background: var(--td-bg-color-secondarycontainer); }
+.scriptMarkdown :deep(code) { padding: 1px 4px; border-radius: 3px; background: var(--td-bg-color-secondarycontainer); }
+.scriptMarkdown :deep(table) { display: block; width: 100%; margin: 14px 0; overflow-x: auto; border-collapse: collapse; }
+.scriptMarkdown :deep(th), .scriptMarkdown :deep(td) { padding: 8px 10px; border: 1px solid var(--td-border-level-2-color); text-align: left; vertical-align: top; }
+.scriptMarkdown :deep(th) { background: var(--td-bg-color-secondarycontainer); }
+.scriptFullscreenReader { height: calc(100vh - 124px); overflow: auto; overscroll-behavior: contain; padding: 32px clamp(24px, 8vw, 160px); background: var(--td-bg-color-container); }
+.fullscreenMarkdown { height: auto; overflow: visible; padding: 0; }
+.fullscreenMarkdown :deep(.md-editor-preview-wrapper), .fullscreenMarkdown :deep(.md-editor-preview) { font-size: 15px; line-height: 1.9; }
+.fullscreenMarkdown :deep(h1) { margin-bottom: 24px; padding-bottom: 16px; font-size: 28px; }
+.fullscreenMarkdown :deep(h2) { margin-top: 34px; font-size: 22px; }
+.fullscreenMarkdown :deep(h3) { margin-top: 26px; font-size: 18px; }
+.editorForm { display: grid; gap: 12px; }
+.fullText { max-height: 70vh; overflow: auto; }
+.fullText :deep(.md-editor-preview-wrapper) { padding: 0; }
+.fullText footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; bottom: 0; padding: 10px 0; background: var(--td-bg-color-container); color: var(--td-text-color-secondary); font-size: 12px; }
+@media (max-width: 1100px) { .scriptAgent { display: block; }.agentSlot { position: fixed; z-index: 30; top: 70px; right: 8px; bottom: 16px; width: 400px; height: auto; min-height: 0; } }
+@media (max-width: 900px) { .scriptList { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .agentSlot { left: 8px; width: auto; }.scriptMarkdown { padding: 14px; }.scriptMarkdown :deep(h1) { font-size: 20px; } }
+@media (min-width: 1540px) { .scriptAgent.agentHidden .scriptList { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 </style>
