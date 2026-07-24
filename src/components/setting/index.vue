@@ -14,23 +14,26 @@
       <div class="settingRight">
         <div class="sectionTitle">{{ currentMenuItem ? $t(currentMenuItem.label) : "" }}</div>
         <div class="settingContent">
-          <uiConfig v-if="activeMenu === 'ui'" />
-          <languageConfig v-if="activeMenu === 'language'" />
-          <vendorConfig v-if="activeMenu === 'vendorConfig'" />
-          <requestConfig v-if="activeMenu === 'requestConfig'" />
-          <loginConfig v-if="activeMenu === 'loginConfig'" />
-          <agentConfog v-if="activeMenu === 'agentConfog'" />
-          <promptManage v-if="activeMenu === 'promptManage'" />
-          <otherConfig v-if="activeMenu === 'otherConfig'" />
-          <dbConfig v-if="activeMenu === 'dbConfig'" />
-          <about v-if="activeMenu === 'about'" />
-          <logoutConfig v-if="activeMenu === 'logoutConfig'" />
-          <memoryConfig v-if="activeMenu === 'memoryConfig'" />
-          <fileManagement v-if="activeMenu === 'fileManagement'" />
-          <workspaceConfig v-if="activeMenu === 'workspace'" />
-          <skillManagement v-if="activeMenu === 'skillManagement'" />
-          <devConfig v-if="activeMenu === 'devConfig'" />
-          <modelMap v-if="activeMenu === 'modelMap'" />
+          <t-alert v-if="panelError" class="panelError" theme="error" :message="panelError" close @close="panelError = ''" />
+          <template v-else>
+            <uiConfig v-if="activeMenu === 'ui'" />
+            <languageConfig v-if="activeMenu === 'language'" />
+            <vendorConfig v-if="activeMenu === 'vendorConfig'" />
+            <requestConfig v-if="activeMenu === 'requestConfig'" />
+            <loginConfig v-if="activeMenu === 'loginConfig'" />
+            <agentConfog v-if="activeMenu === 'agentConfog'" />
+            <promptManage v-if="activeMenu === 'promptManage'" />
+            <otherConfig v-if="activeMenu === 'otherConfig'" />
+            <dbConfig v-if="activeMenu === 'dbConfig'" />
+            <about v-if="activeMenu === 'about'" />
+            <logoutConfig v-if="activeMenu === 'logoutConfig'" />
+            <memoryConfig v-if="activeMenu === 'memoryConfig'" />
+            <fileManagement v-if="activeMenu === 'fileManagement'" />
+            <workspaceConfig v-if="activeMenu === 'workspace'" />
+            <skillManagement v-if="activeMenu === 'skillManagement'" />
+            <devConfig v-if="activeMenu === 'devConfig'" />
+            <modelMap v-if="activeMenu === 'modelMap'" />
+          </template>
         </div>
       </div>
     </div>
@@ -38,8 +41,25 @@
 </template>
 
 <script setup lang="ts">
+import { onErrorCaptured, ref, watch } from "vue";
 import settingStore from "@/stores/setting";
 const { showSetting, activeMenu, needUpdate } = storeToRefs(settingStore());
+const panelError = ref("");
+
+watch(activeMenu, () => {
+  panelError.value = "";
+});
+
+watch(showSetting, (visible) => {
+  if (!visible) panelError.value = "";
+});
+
+onErrorCaptured((error) => {
+  const detail = error instanceof Error ? error.message : String(error || "未知错误");
+  panelError.value = `设置面板加载失败：${detail}`;
+  console.error("[settings] panel error", error);
+  return false;
+});
 
 import uiConfig from "./components/uiConfig.vue";
 import languageConfig from "./components/languageConfig.vue";
@@ -118,6 +138,10 @@ const currentMenuItem = computed(() => menuItems.find((item) => item.key === act
     .settingContent {
       width: 100%;
       height: calc(70vh - 5vh - 4px);
+
+      .panelError {
+        margin-top: 16px;
+      }
     }
   }
 }

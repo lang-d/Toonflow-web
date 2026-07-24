@@ -2,6 +2,7 @@
   <div class="skillManagement">
     <aside class="sidebarPanel">
       <t-input v-model="keyword" clearable :placeholder="$t('setting.skillManagement.search')" />
+      <t-alert v-if="listError" theme="error" :message="listError" close @close="listError = ''" />
       <div class="treeWrap">
         <t-tree v-if="treeData.length" activable hover line expand-on-click-node :data="treeData" :actived="activedKeys" @active="onTreeActive">
           <template #icon="{ node }">
@@ -20,6 +21,7 @@
         <t-button size="small" theme="primary" variant="outline" @click="openEditDialog">{{ $t("setting.skillManagement.edit") }}</t-button>
       </div>
 
+      <t-alert v-if="contentError" class="contentError" theme="error" :message="contentError" close @close="contentError = ''" />
       <div v-if="activeEntry" class="previewWrap">
         <MdPreview :theme="mdTheme" :modelValue="content" :toolbars="[]" preview-only preview-theme="github" code-theme="atom" />
       </div>
@@ -81,30 +83,41 @@ interface TreeItem {
   children?: TreeItem[];
   isFile?: boolean;
   isRoot?: boolean;
+  source?: string;
+  sourceRoot?: string;
 }
 
-const entries = ref<string[]>([]);
+interface SkillListEntry {
+  path: string;
+  source?: string;
+  sourceRoot?: string;
+}
+
+const entries = ref<SkillListEntry[]>([]);
 const activeEntry = ref("");
 const keyword = ref("");
 const content = ref("");
 const draft = ref("");
 const editVisible = ref(false);
 const isSaving = ref(false);
+const listError = ref("");
+const contentError = ref("");
 
 const activedKeys = computed(() => (activeEntry.value ? [activeEntry.value] : []));
 
 const filteredEntries = computed(() => {
-  let result = entries.value.filter((e) => e.endsWith(".md"));
+  let result = entries.value.filter((entry) => entry.path.endsWith(".md"));
   if (!keyword.value) return result;
   const kw = keyword.value.toLowerCase();
-  return result.filter((e) => e.toLowerCase().includes(kw));
+  return result.filter((entry) => entry.path.toLowerCase().includes(kw));
 });
 
 const treeData = computed<TreeItem[]>(() => {
   const dirMap = new Map<string, TreeItem>();
   const rootItems: TreeItem[] = [];
 
-  for (const filePath of filteredEntries.value) {
+  for (const entry of filteredEntries.value) {
+    const filePath = entry.path;
     const parts = filePath.split("/").filter(Boolean);
     let parentChildren = rootItems;
     let cur = "";
@@ -115,7 +128,14 @@ const treeData = computed<TreeItem[]>(() => {
 
       if (isFile) {
         if (!parentChildren.some((c) => c.value === cur)) {
-          parentChildren.push({ label: parts[i], value: cur, isFile: true, isRoot: parts.length === 1 });
+          parentChildren.push({
+            label: parts[i],
+            value: cur,
+            isFile: true,
+            isRoot: parts.length === 1,
+            source: entry.source,
+            sourceRoot: entry.sourceRoot,
+          });
         }
       } else {
         let dir = dirMap.get(cur);
@@ -141,22 +161,47 @@ const treeData = computed<TreeItem[]>(() => {
   return rootItems;
 });
 
+function normalizeEntries(data: unknown): SkillListEntry[] {
+  if (!Array.isArray(data)) return [];
+
+  const seen = new Set<string>();
+  const result: SkillListEntry[] = [];
+  for (const item of data) {
+    const path = typeof item === "string" ? item : typeof item === "object" && item ? (item as { path?: unknown }).path : undefined;
+    if (typeof path !== "string" || !path.trim() || seen.has(path)) continue;
+
+    const metadata = typeof item === "object" && item ? (item as { source?: unknown; sourceRoot?: unknown }) : {};
+    seen.add(path);
+    result.push({
+      path,
+      source: typeof metadata.source === "string" ? metadata.source : undefined,
+      sourceRoot: typeof metadata.sourceRoot === "string" ? metadata.sourceRoot : undefined,
+    });
+  }
+  return result;
+}
+
 async function fetchList() {
+  listError.value = "";
   try {
     const { data } = await axios.post("/setting/skillManagement/getSkillList");
-    entries.value = Array.isArray(data) ? data : [];
+    entries.value = normalizeEntries(data);
   } catch (e) {
     console.error(e);
+    entries.value = [];
+    listError.value = "读取技能文件列表失败，请稍后重试。";
   }
 }
 
 async function loadContent(path: string) {
+  contentError.value = "";
   try {
     const { data } = await axios.post("/setting/skillManagement/getSkillContent", { path });
     content.value = typeof data === "string" ? data : data?.content || "";
   } catch (e) {
     console.error(e);
     content.value = "";
+    contentError.value = "读取技能文件失败，请稍后重试。";
   }
 }
 
@@ -186,6 +231,7 @@ async function onSave() {
     editVisible.value = false;
   } catch (e) {
     console.error(e);
+    window.$message.error("保存技能文件失败，请稍后重试。");
   } finally {
     isSaving.value = false;
   }
@@ -224,6 +270,10 @@ onMounted(() => fetchList());
     border: 1px solid var(--td-component-stroke);
     border-radius: 8px;
     overflow: hidden;
+
+    .contentError {
+      margin: 12px 16px 0;
+    }
 
     .viewHeader {
       display: flex;
