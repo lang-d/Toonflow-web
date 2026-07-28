@@ -14,7 +14,7 @@
               v-model="props.item.content"
               :placeholder="$t('workbench.script.edit.scriptContentPh')"
               :autosize="{ minRows: 20, maxRows: 20 }" />
-            <div class="scriptLen">{{ props.item.content.length }}/{{ otherSetting.scriptEpisodeLength }}</div>
+            <div class="scriptLen">{{ props.item.content.length }} 字</div>
           </div>
         </t-form-item>
         <t-form-item :label="$t('workbench.script.edit.relatedAssets')" name="assets">
@@ -39,7 +39,6 @@
         <t-button
           theme="primary"
           style="margin-left: 10px"
-          :disabled="props.item.content.length > otherSetting.scriptEpisodeLength"
           @click="onConfirm">
           保存
         </t-button>
@@ -51,8 +50,6 @@
 <script setup lang="ts">
 import axios from "@/utils/axios";
 import openAssetsSelector from "@/utils/assetsCheck";
-import settingStore from "@/stores/setting";
-const { otherSetting } = storeToRefs(settingStore());
 interface ScriptAsset {
   id: number;
   name: string;

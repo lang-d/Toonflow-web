@@ -510,10 +510,7 @@
       "scroll": "滚动",
       "isInteracting": "生产页无限画布拖拽性能优化",
       "closeIsInteracting": "关闭",
-      "openIsInteracting": "开启",
-      "scriptEpisodeLength": "剧本单集长度限制",
-      "chars": "字",
-      "inputChars": "请输入字数"
+      "openIsInteracting": "开启"
     },
     "request": {
       "warning": "如非特殊情况，不需要修改或者配置",
@@ -1080,7 +1077,7 @@
         "scriptNamePh": "请输入剧本名称",
         "uploadFile": "上传文件",
         "dragUpload": "拖拽剧本文件到此处或点击上传",
-        "uploadHint": "支持 .txt, .md, .docx 格式，建议文件大小不超过 10MB",
+        "uploadHint": "支持 .txt、.md、.markdown、.docx 格式，单次上传内容总量不超过 100MB",
         "scriptContent": "剧本内容",
         "scriptContentPh": "请上传或输入剧本内容...",
         "relatedAssets": "关联资产",
@@ -1092,7 +1089,7 @@
           "fileReadFailed": "文件读取失败",
           "docNotSupported": ".doc文件不支持解析,请转换为.txt、.md或.docx文件",
           "unsupportedType": "不支持的文件类型",
-          "fileTooLarge": "文件大小超过10MB，请上传更小的文件",
+          "fileTooLarge": "文件大小超过100MB，请上传更小的文件",
           "parsing": "文件解析中...",
           "parseFailed": "文件解析失败，请重新上传",
           "selectAssetsTitle": "选择关联资产",

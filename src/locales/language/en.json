@@ -419,10 +419,7 @@
       "zoom": "Zoom",
       "scroll": "scroll",
       "isInteracting": "Unlimited canvas drag performance optimization on production page",
-      "closeIsInteracting": "closure",
-      "scriptEpisodeLength": "Script Episode Length Limit",
-      "chars": "chars",
-      "inputChars": "Please enter character count"
+      "closeIsInteracting": "closure"
     },
     "request": {
       "warning": "Do not modify unless absolutely necessary",
@@ -986,7 +983,7 @@
         "scriptNamePh": "Please enter script name",
         "uploadFile": "Upload File",
         "dragUpload": "Drag and drop your script file here or click to upload",
-        "uploadHint": "Supports .txt, .md, .docx. Recommended file size under 10MB",
+        "uploadHint": "Supports .txt, .md, .markdown, and .docx. Total uploaded content must stay under 100MB",
         "scriptContent": "Script Content",
         "scriptContentPh": "Please upload or enter script content...",
         "relatedAssets": "Related Assets",
@@ -998,7 +995,7 @@
           "fileReadFailed": "Failed to read file",
           "docNotSupported": ".doc parsing is not supported. Please convert to .txt, .md, or .docx",
           "unsupportedType": "Unsupported file type",
-          "fileTooLarge": "File exceeds 10MB. Please upload a smaller file",
+          "fileTooLarge": "File exceeds 100MB. Please upload a smaller file",
           "parsing": "Parsing file...",
           "parseFailed": "Failed to parse file, please re-upload",
           "selectAssetsTitle": "Select Related Assets",

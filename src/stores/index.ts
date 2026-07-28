@@ -21,7 +21,7 @@ export default defineStore(
     async function setProjectById(id: number) {
       const res = await axios.post("/general/getSingleProject", { id: id });
       project.value = res.data[0];
-      const scriptData = await axios.post("/script/getScrptApi", { projectId: id });
+      const scriptData = await axios.post("/script/getScrptApi", { projectId: id, includeContent: false });
       currentScriptId.value = scriptData.data?.id || null;
     }
 

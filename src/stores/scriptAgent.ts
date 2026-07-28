@@ -19,10 +19,12 @@ export interface ScriptAgentRun {
 
 export interface ScriptAgentWorkspace {
   workspaceId: number | null;
-  storySkeleton: string;
-  adaptationStrategy: string;
-  scripts: Array<{ id: number; name: string; content: string }>;
+  storySkeletonAsset: ScriptAgentTextAsset | null;
+  adaptationStrategyAsset: ScriptAgentTextAsset | null;
+  scripts: Array<{ id: number; name: string; contentAsset: ScriptAgentTextAsset | null }>;
 }
+
+export interface ScriptAgentTextAsset { id: number; size: number; hash?: string; updateTime?: number; }
 
 export interface ScriptAgentArchivedOutput {
   id: number;
@@ -78,7 +80,7 @@ const SCRIPT_AGENT_SCRIPT_ID = 0;
 const RUN_STATUS_POLL_MS = 5_000;
 const SOCKET_READY_TIMEOUT_MS = 10_000;
 
-const emptyWorkspace = (): ScriptAgentWorkspace => ({ workspaceId: null, storySkeleton: "", adaptationStrategy: "", scripts: [] });
+const emptyWorkspace = (): ScriptAgentWorkspace => ({ workspaceId: null, storySkeletonAsset: null, adaptationStrategyAsset: null, scripts: [] });
 
 function payloadOf<T>(response: any): T {
   return (response?.data ?? response ?? {}) as T;
@@ -127,12 +129,19 @@ function normalizeTimelineItem(value: unknown, index: number): ScriptAgentTimeli
 
 function normalizeWorkspace(value: unknown): ScriptAgentWorkspace {
   const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const stageAssets = source.stageAssets && typeof source.stageAssets === "object" ? source.stageAssets as Record<string, unknown> : {};
+  const normalizeTextAsset = (asset: unknown): ScriptAgentTextAsset | null => {
+    if (!asset || typeof asset !== "object") return null;
+    const sourceAsset = asset as Record<string, unknown>;
+    const id = Number(sourceAsset.id);
+    return Number.isFinite(id) && id > 0 ? { id, size: Number(sourceAsset.size) || 0, ...(sourceAsset.hash == null ? {} : { hash: String(sourceAsset.hash) }), ...(sourceAsset.updateTime == null ? {} : { updateTime: Number(sourceAsset.updateTime) || 0 }) } : null;
+  };
   return {
     workspaceId: Number(source.workspaceId) || null,
-    storySkeleton: String(source.storySkeleton ?? ""),
-    adaptationStrategy: String(source.adaptationStrategy ?? ""),
+    storySkeletonAsset: normalizeTextAsset(stageAssets.storySkeleton ?? source.storySkeletonAsset),
+    adaptationStrategyAsset: normalizeTextAsset(stageAssets.adaptationStrategy ?? source.adaptationStrategyAsset),
     scripts: Array.isArray(source.scripts)
-      ? source.scripts.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object")).map((item) => ({ id: Number(item.id), name: String(item.name ?? ""), content: String(item.content ?? "") })).filter((item) => Number.isFinite(item.id) && item.id > 0)
+      ? source.scripts.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object")).map((item) => ({ id: Number(item.id), name: String(item.name ?? ""), contentAsset: normalizeTextAsset(item.contentAsset) })).filter((item) => Number.isFinite(item.id) && item.id > 0)
       : [],
   };
 }
@@ -256,7 +265,7 @@ const useScriptAgentSessionsStore = defineStore("scriptAgentSessions", () => {
   async function loadWorkspace(session: ScriptAgentSession) {
     session.loadingWorkspace.value = true;
     try {
-      const response = await axios.post("/scriptAgent/workspaceDetail", { projectId: session.projectId });
+      const response = await axios.post("/scriptAgent/workspaceDetail", { projectId: session.projectId, includeContent: false });
       session.workspace.value = normalizeWorkspace(payloadOf(response));
       session.workspaceError.value = "";
     } catch (error) {

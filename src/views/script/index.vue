@@ -47,7 +47,7 @@
                 <t-checkbox :checked="selectedIds.includes(item.id)" @click.stop @change="toggleSelect(item.id)" class="cardCheckbox" />
               </div>
             </template>
-            <span class="content">{{ item.content }}</span>
+            <span class="content">{{ item.contentAsset ? `正文 ${formatTextSize(item.contentAsset.size)}` : "暂无正文" }}</span>
 
             <t-loading v-if="isScriptExtractionActive(item)" :text="getScriptExtractionText(item)" size="small"></t-loading>
             <t-tooltip :content="getScriptExtractionReason(item)" v-else-if="isScriptExtractionFailed(item)" theme="light">
@@ -82,6 +82,7 @@ import settingStore from "@/stores/setting";
 import imageListCacheStore from "@/stores/imageListCache";
 import useTaskCenter, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import type { TaskStatus } from "@/types/api";
+import { getFullTextAssetContent } from "@/api/textAsset";
 
 const { clearScriptCache } = imageListCacheStore();
 const taskCenter = useTaskCenter();
@@ -99,6 +100,7 @@ interface Script {
   id: number;
   name: string;
   content: string;
+  contentAsset?: { id: number; size: number; hash?: string; updateTime?: number } | null;
   createTime?: number;
   extractState?: -1 | 0 | 1 | 2; // -1 失败 0 正在提取 1 成功 等待提取
   errorReason?: string;
@@ -134,6 +136,7 @@ const addScriptShow = ref(false);
 const selectedIds = ref<number[]>([]);
 const scriptLoad = ref(false);
 const batchScriptShow = ref(false);
+const scriptDetailLoading = ref(false);
 const extractionTaskReleases = new Map<string, () => void>();
 const handledExtractionTasks = new Set<string>();
 const ACTIVE_EXTRACTION_STATUSES = new Set<TaskStatus>(["queued", "submitting", "processing"]);
@@ -250,9 +253,10 @@ async function searchScripts() {
     const res = await axios.post("/script/getScrptApi", {
       projectId: project.value?.id,
       name: searchQuery.value,
+      includeContent: false,
     });
     const data = unwrapResponseData<Script[]>(res);
-    scripts.value = Array.isArray(data) ? data : [];
+    scripts.value = Array.isArray(data) ? data.map((item) => ({ ...item, content: "" })) : [];
     syncScriptExtractionTasksFromList();
   } catch (error) {
     console.error("搜索剧本失败:", error);
@@ -300,10 +304,23 @@ const selectedScript = ref<Script>({
   content: "",
 });
 const detailsShow = ref(false);
-// 点击剧本卡片
-function handleScriptClick(item: Script) {
-  selectedScript.value = { ...item };
-  detailsShow.value = true;
+function formatTextSize(size?: number) {
+  if (!size) return "0 B";
+  return size < 1024 * 1024 ? `${Math.ceil(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+// 点击剧本卡片：列表只保存元数据，正文在编辑时按需读取。
+async function handleScriptClick(item: Script) {
+  if (!project.value?.id || scriptDetailLoading.value) return;
+  scriptDetailLoading.value = true;
+  try {
+    const content = item.contentAsset ? await getFullTextAssetContent({ projectId: Number(project.value.id), id: item.contentAsset.id }) : "";
+    selectedScript.value = { ...item, content };
+    detailsShow.value = true;
+  } catch (error: any) {
+    window.$message.error(error?.message || "剧本正文读取失败，请重试");
+  } finally {
+    scriptDetailLoading.value = false;
+  }
 }
 // 删除剧本
 async function handleDeleteScript(scriptId: number) {

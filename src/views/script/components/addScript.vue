@@ -39,7 +39,7 @@
             :placeholder="$t('workbench.script.add.scriptContentPh')"
             name="description"
             :autosize="{ minRows: 12, maxRows: 12 }" />
-          <div class="scriptLen">{{ scriptData.length }}/{{ otherSetting.scriptEpisodeLength }}</div>
+          <div class="scriptLen">{{ scriptData.length }} 字</div>
         </div>
 
         <div class="section assets-section">
@@ -61,7 +61,7 @@
       <template #footer>
         <div class="dialog-footer">
           <t-button theme="default" @click="handleCancel">{{ $t("workbench.script.add.cancel") }}</t-button>
-          <t-button theme="primary" :loading="keepLoading" :disabled="scriptData.length > otherSetting.scriptEpisodeLength" @click="handleConfirm">
+          <t-button theme="primary" :loading="keepLoading" @click="handleConfirm">
             {{ $t("workbench.script.add.confirm") }}
           </t-button>
         </div>
@@ -77,8 +77,6 @@ import type { UploadFile } from "tdesign-vue-next";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import openAssetsSelector from "@/utils/assetsCheck";
-import settingStore from "@/stores/setting";
-const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
 
 const addScriptShow = defineModel<boolean>({
@@ -99,7 +97,7 @@ function triggerUpload(): void {
 // 读取文件内容
 async function readFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
-  if (file.type === "text/plain" || file.type === "text/markdown" || file.name.toLowerCase().endsWith(".md")) {
+  if (file.type === "text/plain" || file.type === "text/markdown" || /\.(md|markdown)$/i.test(file.name)) {
     return new TextDecoder().decode(buffer);
   }
   const result = await mammoth.extractRawText({ arrayBuffer: buffer });
@@ -115,7 +113,7 @@ async function handleBeforeUpload(file: UploadFile): Promise<boolean> {
 
   const fileName = rawFile.name.toLowerCase();
   const allowTypes = ["text/plain", "text/markdown", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
-  const allowExtensions = [".txt", ".md", ".docx"];
+  const allowExtensions = [".txt", ".md", ".markdown", ".docx"];
 
   if (rawFile.type === "application/msword") {
     window.$message.warning($t("workbench.script.add.msg.docNotSupported"));
@@ -127,7 +125,7 @@ async function handleBeforeUpload(file: UploadFile): Promise<boolean> {
     fileList.value = [];
     return false;
   }
-  if (rawFile.size > 10 * 1024 * 1024) {
+  if (rawFile.size > 100 * 1024 * 1024) {
     window.$message.error($t("workbench.script.add.msg.fileTooLarge"));
     fileList.value = [];
     return false;

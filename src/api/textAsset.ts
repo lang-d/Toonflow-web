@@ -29,3 +29,16 @@ export interface TextAssetContentResult {
 export function getTextAssetContent(params: TextAssetContentParams) {
   return axios.post("/textAsset/getContent", params).then((response) => unwrapData<TextAssetContentResult>(response));
 }
+
+export async function getFullTextAssetContent(params: Pick<TextAssetContentParams, "projectId" | "id">, limit = 131072) {
+  let content = "";
+  let offset = 0;
+  while (true) {
+    const page = await getTextAssetContent({ ...params, offset, limit });
+    const chunk = String(page?.content ?? "");
+    content += chunk;
+    offset += chunk.length;
+    if (page?.eof) return content;
+    if (!chunk) throw new Error("文本资产读取中断，请重试");
+  }
+}

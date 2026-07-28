@@ -18,6 +18,7 @@ export type MusicEditionType = "master" | "narrative_variant" | "arrangement" | 
 export type MusicUsageMode = "reuse" | "new" | "silence";
 export type MusicReviewStatus = "unreviewed" | "passed" | "warning" | "blocked" | string;
 export type MusicPromptMode = "generic" | "modelSpecific";
+export type MusicDownloadTargetType = "libraryVersion" | "cueAsset";
 export type MusicTaskTargetType = "musicBible" | "musicPlan" | "musicPrompt" | "musicLyrics" | "musicCueAsset" | "musicLibraryVersion";
 export type MusicTaskEnvelope = AsyncTaskEnvelope & { targetType: "musicBible" | "musicPlan" | "musicPrompt" | "musicLyrics" | "musicCueAsset" | "musicLibraryVersion" | string };
 
@@ -50,6 +51,55 @@ export const normalizeMusicPlan = (value: any): MusicPlan => ({ ...(value ?? {})
 export const normalizeMusicBible = (value: any): MusicBible => ({ ...(value ?? {}), styleProfile: parseObject(value?.styleProfile ?? value?.styleProfileJson) });
 
 const task = (path: string, params: unknown) => axios.post(path, params).then((response) => unwrap<MusicTaskEnvelope>(response));
+const extensionForAudioContentType = (contentType: string | null) => {
+  switch ((contentType || "").split(";", 1)[0].trim().toLowerCase()) {
+    case "audio/mpeg": return "mp3";
+    case "audio/wav":
+    case "audio/x-wav":
+    case "audio/wave": return "wav";
+    case "audio/mp4":
+    case "audio/x-m4a": return "m4a";
+    case "audio/aac": return "aac";
+    case "audio/ogg": return "ogg";
+    case "audio/flac":
+    case "audio/x-flac": return "flac";
+    case "audio/webm": return "webm";
+    default: return "audio";
+  }
+};
+const decodeDownloadFilename = (value: string) => {
+  const normalized = value.trim().replace(/^"(.*)"$/, "$1");
+  try { return decodeURIComponent(normalized); } catch { return normalized; }
+};
+const safeDownloadFilename = (value: string) => value.split(/[\\/]/).pop()?.replace(/[\u0000-\u001f<>:"/\\|?*]+/g, "_").replace(/^\.+|\.+$/g, "").trim().slice(0, 180) || "audio";
+const filenameFromContentDisposition = (contentDisposition: string | null) => {
+  if (!contentDisposition) return "";
+  const encoded = contentDisposition.match(/(?:^|;)\s*filename\*\s*=\s*(?:[\w-]+'[^']*')?([^;]+)/i)?.[1];
+  if (encoded) return safeDownloadFilename(decodeDownloadFilename(encoded));
+  const plain = contentDisposition.match(/(?:^|;)\s*filename\s*=\s*("(?:[^"\\]|\\.)*"|[^;]*)/i)?.[1];
+  return plain ? safeDownloadFilename(decodeDownloadFilename(plain)) : "";
+};
+const downloadErrorMessage = async (response: Response) => {
+  try {
+    const payload = await response.json() as { message?: unknown };
+    if (typeof payload?.message === "string" && payload.message.trim()) return payload.message;
+  } catch { /* The endpoint may return a non-JSON error body. */ }
+  return `下载失败（HTTP ${response.status}）`;
+};
+export const downloadMusicCandidate = async (params: { projectId: number; targetType: MusicDownloadTargetType; targetId: number; baseUrl: string; fallbackBaseName: string }) => {
+  const token = localStorage.getItem("token");
+  const response = await fetch(`${params.baseUrl.replace(/\/+$/, "")}/production/music/download`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: token } : {}) },
+    body: JSON.stringify({ projectId: params.projectId, targetType: params.targetType, targetId: params.targetId }),
+  });
+  if (!response.ok) throw new Error(await downloadErrorMessage(response));
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("下载失败：服务端未返回音频文件");
+  const contentType = response.headers.get("content-type") || blob.type;
+  const filename = filenameFromContentDisposition(response.headers.get("content-disposition")) || `${safeDownloadFilename(params.fallbackBaseName)}.${extensionForAudioContentType(contentType)}`;
+  return { blob, filename };
+};
 export const getMusicAgentRunStatus = (params: { projectId: number; scriptId: number }) => axios.post("/agent/run/status", { agentKey: "musicProductionAgent", ...params }).then((response) => unwrap<MusicRunStatus>(response));
 export const getMusicAgentRunDetail = (params: { runId: string }) => axios.post("/agent/run/detail", params).then((response) => unwrap<MusicRunDetail>(response));
 export const getMusicTaskSnapshot = (params: { projectId: number; scriptId?: number; taskIds?: string[]; targetTypes?: MusicTaskTargetType[]; includeTerminal?: boolean; limit?: number }) => axios.post("/task/status/snapshot", params).then((response) => unwrap<MusicTaskSnapshot>(response));

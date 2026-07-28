@@ -10,9 +10,9 @@
             <t-button v-else size="small" theme="primary" :disabled="runRunning" @click="openCreateScript"><template #icon><i-add /></template>新建剧本</t-button>
           </t-space>
         </template>
-        <t-tab-panel value="storySkeleton" label="故事骨架"><div class="reading"><MdPreview v-if="workspace.storySkeleton" :model-value="workspace.storySkeleton" :theme="mdTheme" /><t-empty v-else title="暂无故事骨架" /></div></t-tab-panel>
-        <t-tab-panel value="adaptationStrategy" label="改编策略"><div class="reading"><MdPreview v-if="workspace.adaptationStrategy" :model-value="workspace.adaptationStrategy" :theme="mdTheme" /><t-empty v-else title="暂无改编策略" /></div></t-tab-panel>
-        <t-tab-panel value="scripts" label="剧本"><div class="scriptList"><t-empty v-if="!workspace.scripts.length" title="暂无剧本" /><article v-for="script in workspace.scripts" :key="script.id" class="scriptCard"><header><strong>{{ script.name }}</strong><div><t-tooltip content="全屏查看"><t-button size="small" variant="text" @click="openScriptFullscreen(script)"><template #icon><i-full-screen-one /></template></t-button></t-tooltip><t-button size="small" variant="text" :disabled="runRunning" @click="openScriptEditor(script)"><template #icon><i-edit /></template></t-button><t-button size="small" variant="text" theme="danger" :disabled="runRunning" @click="removeScript(script.id)"><template #icon><i-delete /></template></t-button></div></header><MdPreview class="scriptMarkdown" :model-value="script.content" :theme="mdTheme" preview-only /></article></div></t-tab-panel>
+        <t-tab-panel value="storySkeleton" label="故事骨架"><div class="reading" v-loading="stageLoading"><t-alert v-if="stageLoadError && activeTab === 'storySkeleton'" theme="error" :message="stageLoadError" close @close="loadActiveStage" /><MdPreview v-else-if="activeTab === 'storySkeleton' && stageContent" :model-value="stageContent" :theme="mdTheme" /><t-empty v-else-if="!workspace.storySkeletonAsset" title="暂无故事骨架" /><p v-else>正在读取故事骨架…</p></div></t-tab-panel>
+        <t-tab-panel value="adaptationStrategy" label="改编策略"><div class="reading" v-loading="stageLoading"><t-alert v-if="stageLoadError && activeTab === 'adaptationStrategy'" theme="error" :message="stageLoadError" close @close="loadActiveStage" /><MdPreview v-else-if="activeTab === 'adaptationStrategy' && stageContent" :model-value="stageContent" :theme="mdTheme" /><t-empty v-else-if="!workspace.adaptationStrategyAsset" title="暂无改编策略" /><p v-else>正在读取改编策略…</p></div></t-tab-panel>
+        <t-tab-panel value="scripts" label="剧本"><div class="scriptList"><t-empty v-if="!workspace.scripts.length" title="暂无剧本" /><article v-for="script in workspace.scripts" :key="script.id" :ref="(element) => registerScriptCard(script, element as HTMLElement | null)" class="scriptCard"><header><strong>{{ script.name }}</strong><div><t-tooltip content="全屏查看"><t-button size="small" variant="text" :loading="scriptContentLoadingId === script.id" @click="openScriptFullscreen(script)"><template #icon><i-full-screen-one /></template></t-button></t-tooltip><t-button size="small" variant="text" :disabled="runRunning" :loading="scriptContentLoadingId === script.id" @click="openScriptEditor(script)"><template #icon><i-edit /></template></t-button><t-button size="small" variant="text" theme="danger" :disabled="runRunning" @click="removeScript(script.id)"><template #icon><i-delete /></template></t-button></div></header><div class="scriptCardContent" v-loading="scriptCardLoading[script.id]"><MdPreview v-if="scriptCardLoaded[script.id] && scriptCardContent[script.id]" class="scriptMarkdown" :model-value="scriptCardContent[script.id]" :theme="mdTheme" preview-only /><p v-else-if="scriptCardLoaded[script.id]" class="scriptMeta">剧本正文为空</p><div v-else-if="scriptCardError[script.id]" class="scriptCardError"><span>{{ scriptCardError[script.id] }}</span><t-button size="small" variant="outline" @click="loadScriptCard(script)">重试</t-button></div><p v-else class="scriptMeta">{{ script.contentAsset ? `正文 ${formatTextSize(script.contentAsset.size)}` : "暂无正文" }}</p></div></article></div></t-tab-panel>
       </t-tabs>
     </section>
     <aside v-if="agentVisible" class="agentSlot">
@@ -42,13 +42,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { MdEditor, MdPreview, type ToolbarNames } from "md-editor-v3";
 import axios from "@/utils/axios";
-import { getTextAssetContent } from "@/api/textAsset";
+import { getFullTextAssetContent, getTextAssetContent } from "@/api/textAsset";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
-import scriptAgentStore, { type ScriptAgentArchivedOutput, type ScriptAgentTimelineItem } from "@/stores/scriptAgent";
+import scriptAgentStore, { type ScriptAgentArchivedOutput, type ScriptAgentTextAsset, type ScriptAgentTimelineItem } from "@/stores/scriptAgent";
 import AgentChatPanel, { type AgentPanelMessage } from "@/components/AgentChatPanel.vue";
 
 const store = scriptAgentStore();
@@ -72,6 +72,18 @@ const editor = ref<{ kind: "stage" | "script"; stage?: "storySkeleton" | "adapta
 const editorTitle = computed(() => editor.value.kind === "script" ? (editor.value.id ? "编辑剧本" : "新建剧本") : editor.value.stage === "storySkeleton" ? "编辑故事骨架" : "编辑改编策略");
 const scriptFullscreenVisible = ref(false);
 const fullscreenScript = ref<{ id: number; name: string; content: string } | null>(null);
+const textAssetCache = new Map<number, string>();
+const stageContent = ref("");
+const stageLoading = ref(false);
+const stageLoadError = ref("");
+const scriptContentLoadingId = ref<number>();
+const scriptCardContent = reactive<Record<number, string>>({});
+const scriptCardLoading = reactive<Record<number, boolean>>({});
+const scriptCardLoaded = reactive<Record<number, boolean>>({});
+const scriptCardError = reactive<Record<number, string>>({});
+const scriptCardElements = new Map<number, HTMLElement>();
+let scriptCardObserver: IntersectionObserver | null = null;
+let stageRequestId = 0;
 
 const fullTextVisible = ref(false);
 const fullTextAsset = ref<ScriptAgentArchivedOutput | null>(null);
@@ -92,6 +104,14 @@ const awaitingDecisionMessage = computed(() => {
 });
 
 onMounted(() => { void store.recover(); });
+watch([activeTab, () => workspace.value.workspaceId, () => workspace.value.storySkeletonAsset?.id, () => workspace.value.adaptationStrategyAsset?.id], () => { void loadActiveStage(); }, { immediate: true });
+watch(() => workspace.value.scripts.map((script) => `${script.id}:${script.contentAsset?.id || 0}`).join("|"), () => {
+  scriptCardObserver?.disconnect();
+  scriptCardElements.clear();
+  textAssetCache.clear();
+  [scriptCardContent, scriptCardLoading, scriptCardLoaded, scriptCardError].forEach((state) => Object.keys(state).forEach((key) => delete state[Number(key)]));
+});
+onBeforeUnmount(() => scriptCardObserver?.disconnect());
 watch(() => project.value?.id, (id, previous) => {
   if (!id || id === previous) return;
   store.activate(Number(id));
@@ -104,8 +124,65 @@ async function handleSend(text: string) {
 
 function handleStop() { void store.stop(); }
 
-function openStageEditor(stage: "storySkeleton" | "adaptationStrategy") {
-  editor.value = { kind: "stage", stage, name: "", content: workspace.value[stage] };
+function activeStageAsset() { return activeTab.value === "storySkeleton" ? workspace.value.storySkeletonAsset : workspace.value.adaptationStrategyAsset; }
+function formatTextSize(size?: number) { if (!size) return "0 B"; return size < 1024 * 1024 ? `${Math.ceil(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`; }
+async function readTextAsset(asset: ScriptAgentTextAsset | null) {
+  if (!asset || !project.value?.id) return "";
+  const cached = textAssetCache.get(asset.id);
+  if (cached != null) return cached;
+  const content = await getFullTextAssetContent({ projectId: Number(project.value.id), id: asset.id });
+  textAssetCache.set(asset.id, content);
+  return content;
+}
+function ensureScriptCardObserver() {
+  if (scriptCardObserver || typeof IntersectionObserver === "undefined") return;
+  scriptCardObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      const script = workspace.value.scripts.find((item) => item.id === Number((entry.target as HTMLElement).dataset.scriptId));
+      if (script) void loadScriptCard(script);
+      scriptCardObserver?.unobserve(entry.target);
+    });
+  }, { rootMargin: "160px 0px" });
+}
+function registerScriptCard(script: { id: number; name: string; contentAsset: ScriptAgentTextAsset | null }, element: HTMLElement | null) {
+  if (!element) return;
+  scriptCardElements.set(script.id, element);
+  element.dataset.scriptId = String(script.id);
+  ensureScriptCardObserver();
+  if (scriptCardObserver) scriptCardObserver.observe(element);
+  else void loadScriptCard(script);
+}
+async function loadScriptCard(script: { id: number; name: string; contentAsset: ScriptAgentTextAsset | null }) {
+  if (scriptCardLoaded[script.id] || scriptCardLoading[script.id]) return;
+  scriptCardLoading[script.id] = true;
+  scriptCardError[script.id] = "";
+  try {
+    scriptCardContent[script.id] = await readTextAsset(script.contentAsset);
+    scriptCardLoaded[script.id] = true;
+  } catch (error: any) {
+    scriptCardError[script.id] = error?.message || "剧本正文读取失败";
+  } finally {
+    scriptCardLoading[script.id] = false;
+  }
+}
+async function loadActiveStage() {
+  if (activeTab.value === "scripts") return;
+  const requestId = ++stageRequestId;
+  const asset = activeStageAsset();
+  stageContent.value = "";
+  stageLoadError.value = "";
+  if (!asset) return;
+  stageLoading.value = true;
+  try { const content = await readTextAsset(asset); if (requestId === stageRequestId) stageContent.value = content; }
+  catch (error: any) { if (requestId === stageRequestId) stageLoadError.value = error?.message || "正文读取失败，请重试"; }
+  finally { if (requestId === stageRequestId) stageLoading.value = false; }
+}
+async function openStageEditor(stage: "storySkeleton" | "adaptationStrategy") {
+  if (activeTab.value !== stage) activeTab.value = stage;
+  await loadActiveStage();
+  if (stageLoadError.value) return;
+  editor.value = { kind: "stage", stage, name: "", content: stageContent.value };
   editorVisible.value = true;
 }
 
@@ -114,14 +191,18 @@ function openCreateScript() {
   editorVisible.value = true;
 }
 
-function openScriptEditor(script: { id: number; name: string; content: string }) {
-  editor.value = { kind: "script", id: script.id, name: script.name, content: script.content };
-  editorVisible.value = true;
+async function openScriptEditor(script: { id: number; name: string; contentAsset: ScriptAgentTextAsset | null }) {
+  scriptContentLoadingId.value = script.id;
+  try { editor.value = { kind: "script", id: script.id, name: script.name, content: await readTextAsset(script.contentAsset) }; editorVisible.value = true; }
+  catch (error: any) { window.$message.error(error?.message || "剧本正文读取失败，请重试"); }
+  finally { scriptContentLoadingId.value = undefined; }
 }
 
-function openScriptFullscreen(script: { id: number; name: string; content: string }) {
-  fullscreenScript.value = script;
-  scriptFullscreenVisible.value = true;
+async function openScriptFullscreen(script: { id: number; name: string; contentAsset: ScriptAgentTextAsset | null }) {
+  scriptContentLoadingId.value = script.id;
+  try { fullscreenScript.value = { id: script.id, name: script.name, content: await readTextAsset(script.contentAsset) }; scriptFullscreenVisible.value = true; }
+  catch (error: any) { window.$message.error(error?.message || "剧本正文读取失败，请重试"); }
+  finally { scriptContentLoadingId.value = undefined; }
 }
 
 async function saveEditor() {
@@ -136,6 +217,8 @@ async function saveEditor() {
       await store.upsertScript({ id: editor.value.id, name, content: editor.value.content });
     }
     editorVisible.value = false;
+    textAssetCache.clear();
+    void loadActiveStage();
     window.$message.success("已保存到剧本工作区");
   } catch (error: any) {
     if (Number(error?.response?.status ?? error?.status) === 409) window.$message.error("Agent 正在保存工作区，已刷新后端内容；请在完成后再提交当前草稿。");
@@ -245,7 +328,7 @@ async function loadMoreText() {
 .scriptCard { display: flex; flex-direction: column; height: 480px; min-height: 0; overflow: hidden; border: 1px solid var(--td-border-level-2-color); background: var(--td-bg-color-container); }
 .scriptCard header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; background: var(--td-bg-color-secondarycontainer); border-bottom: 1px solid var(--td-border-level-2-color); }
 .scriptCard header > div { display: flex; align-items: center; }
-.scriptMarkdown { min-height: 0; padding: 14px 16px 18px; overflow: auto; overscroll-behavior: contain; background: transparent; }
+.scriptCardContent { display: flex; flex: 1 1 0; min-height: 0; }.scriptCardContent > .scriptMeta,.scriptCardError { display: grid; place-content: center; flex: 1 1 auto; padding: 16px; color: var(--td-text-color-secondary); }.scriptCardError { gap: 10px; text-align: center; }.scriptMarkdown { flex: 1 1 auto; min-height: 0; padding: 14px 16px 18px; overflow: auto; overscroll-behavior: contain; background: transparent; }
 .scriptMarkdown :deep(.md-editor-preview-wrapper), .scriptMarkdown :deep(.md-editor-preview) { padding: 0; background: transparent; color: var(--td-text-color-primary); font-size: 13px; line-height: 1.72; word-break: break-word; }
 .scriptMarkdown :deep(.md-editor-preview > :first-child) { margin-top: 0; }
 .scriptMarkdown :deep(.md-editor-preview > :last-child) { margin-bottom: 0; }
