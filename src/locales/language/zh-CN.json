@@ -1322,6 +1322,10 @@
       "cancel": "取消",
       "chatBox": {
         "inputPlaceholder": "输入消息...",
+        "awaitingDecisionPlaceholder": "请输入决定或下一步指令...",
+        "runningInputPlaceholder": "Agent 正在运行，可点击“中断 Agent”停止本轮。",
+        "abortAgent": "中断 Agent",
+        "abortingAgent": "正在请求中断，等待后端确认…",
         "generateDerivedAssets": "生成衍生资产",
         "welcomeMessage": "你好！我是你的 AI 助手，有什么可以帮你的吗？",
         "adjustModel": "调整模型",

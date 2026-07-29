@@ -86,7 +86,16 @@ interface ProductionAgentRunUpdatePayload {
   rejected?: boolean;
   activeRun?: unknown;
   reason?: string | null;
+  stopping?: boolean;
   terminalPersistenceFailed?: boolean;
+}
+
+interface ProductionAgentAbortResult {
+  accepted?: boolean;
+  code?: string;
+  runId?: string;
+  message?: string;
+  stopping?: boolean;
 }
 
 interface EpisodeSession {
@@ -106,6 +115,8 @@ interface EpisodeSession {
   runDetailLoading: Ref<boolean>;
   runDetailError: Ref<string>;
   submitting: Ref<boolean>;
+  abortSubmitting: Ref<boolean>;
+  abortRunId: Ref<string | null>;
   chatApi: ProductionChat;
   stopSocketWatch: WatchStopHandle;
   assetTaskBindings: Map<number, () => void>;
@@ -181,6 +192,7 @@ const PRODUCTION_ASSET_TASK_TTL_MS = 24 * 60 * 60 * 1000;
 const PRODUCTION_AGENT_KEY = "productionAgent";
 const RUN_STATUS_SYNC_DELAY_MS = 3_000;
 const RUN_STATUS_POLL_INTERVAL_MS = 5_000;
+const ABORT_ACK_TIMEOUT_MS = 10_000;
 const SOCKET_READY_TIMEOUT_MS = 10_000;
 const CONTEXT_ACK_TIMEOUT_MS = 5_000;
 const RUN_STATUSES = new Set<ProductionAgentRunStatus>(["running", "awaiting_user", "completed", "failed", "cancelled", "interrupted"]);
@@ -809,6 +821,8 @@ function makeProductionAgentStore(projectId: string) {
     function finalizeNonRunningRun(session: EpisodeSession, completeLiveMessages = true) {
       session.activeRun.value = null;
       session.submitting.value = false;
+      session.abortSubmitting.value = false;
+      session.abortRunId.value = null;
       clearSubmissionSyncTimer(session);
       stopRunStatusPoll(session);
       if (completeLiveMessages && completeLiveGenerationMessages(session.chatApi.messages.value)) {
@@ -818,6 +832,10 @@ function makeProductionAgentStore(projectId: string) {
 
     function releaseLocalRunBlock(session: EpisodeSession) {
       session.submitting.value = false;
+      if (session.activeRun.value?.status !== "running") {
+        session.abortSubmitting.value = false;
+        session.abortRunId.value = null;
+      }
       clearSubmissionSyncTimer(session);
       stopRunStatusPoll(session);
       if (completeLiveGenerationMessages(session.chatApi.messages.value)) {
@@ -852,6 +870,10 @@ function makeProductionAgentStore(projectId: string) {
       if (runningRun) {
         session.runtimeNotice.value = "";
         session.submitting.value = false;
+        if (session.abortRunId.value && session.abortRunId.value !== runningRun.runId) {
+          session.abortSubmitting.value = false;
+          session.abortRunId.value = null;
+        }
         clearSubmissionSyncTimer(session);
         startRunStatusPoll(session, runningRun.runId);
         return { transitionedToNonRunning: false, latestRun: session.latestRun.value };
@@ -967,6 +989,24 @@ function makeProductionAgentStore(projectId: string) {
     async function ensureProductionAgentSocketReady(session: EpisodeSession) {
       await waitForProductionAgentSocketConnected(session);
       await confirmProductionAgentContext(session);
+    }
+
+    function requestProductionAgentAbort(session: EpisodeSession, runId: string) {
+      const socket = session.chatApi.socket.value;
+      if (!socket?.connected) return Promise.reject(new Error("Production Agent socket 未连接"));
+
+      return new Promise<ProductionAgentAbortResult>((resolve, reject) => {
+        let settled = false;
+        const finish = (result?: ProductionAgentAbortResult, error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (error) reject(error);
+          else resolve(result || {});
+        };
+        const timer = setTimeout(() => finish(undefined, new Error("中断请求超时，请刷新运行状态。")), ABORT_ACK_TIMEOUT_MS);
+        socket.emit("abort", { runId }, (result: ProductionAgentAbortResult) => finish(result));
+      });
     }
 
     async function loadRunDetail(session: EpisodeSession, runId: string, recoveryId?: number) {
@@ -1356,6 +1396,8 @@ function makeProductionAgentStore(projectId: string) {
       const runDetailLoading = ref(false);
       const runDetailError = ref("");
       const submitting = ref(false);
+      const abortSubmitting = ref(false);
+      const abortRunId = ref<string | null>(null);
       const chatApi = useChat({
         url: `${settingStore().baseUrl}/socket/productionAgent`,
         auth: () => getContext(scriptId),
@@ -1388,6 +1430,8 @@ function makeProductionAgentStore(projectId: string) {
         runDetailLoading,
         runDetailError,
         submitting,
+        abortSubmitting,
+        abortRunId,
         chatApi,
         stopSocketWatch: () => {},
         assetTaskBindings: new Map(),
@@ -1466,6 +1510,7 @@ function makeProductionAgentStore(projectId: string) {
     const runDetailLoading = computed(() => getActiveSession()?.runDetailLoading.value ?? false);
     const runDetailError = computed(() => getActiveSession()?.runDetailError.value ?? "");
     const submitting = computed(() => getActiveSession()?.submitting.value ?? false);
+    const abortSubmitting = computed(() => getActiveSession()?.abortSubmitting.value ?? false);
     const flowData = computed({
       get: () => getActiveSession()?.flowData.value ?? fallbackFlowData.value,
       set: (value: FlowData) => {
@@ -1954,6 +1999,11 @@ function makeProductionAgentStore(projectId: string) {
       if (!session) return false;
       if (session.activeRun.value?.status === "running" || session.submitting.value) {
         await syncRunStatus(session.episodeId);
+        if (session.runStatusError.value) {
+          releaseLocalRunBlock(session);
+          window.$message?.error?.(session.runStatusError.value);
+          return false;
+        }
         if (session.activeRun.value?.status !== "running") {
           releaseLocalRunBlock(session);
         }
@@ -1996,10 +2046,45 @@ function makeProductionAgentStore(projectId: string) {
       return true;
     }
 
-    function stopGenerate() {
+    async function abortCurrentRun() {
       const session = getActiveSession();
-      if (!session || session.activeRun.value?.status !== "running") return false;
-      return session.chatApi.stopGenerate(undefined, getContext(session.episodeId));
+      if (!session || session.abortSubmitting.value) return false;
+
+      await syncRunStatus(session.episodeId);
+      if (session.runStatusError.value) {
+        window.$message?.error?.(session.runStatusError.value);
+        return false;
+      }
+
+      const activeRun = session.activeRun.value;
+      if (!activeRun || activeRun.status !== "running") {
+        window.$message?.warning?.("当前没有可中断的 Production Agent 运行。");
+        return false;
+      }
+
+      session.abortSubmitting.value = true;
+      session.abortRunId.value = activeRun.runId;
+      try {
+        await ensureProductionAgentSocketReady(session);
+        const result = await requestProductionAgentAbort(session, activeRun.runId);
+        if (!result.accepted) {
+          session.abortSubmitting.value = false;
+          session.abortRunId.value = null;
+          window.$message?.error?.(result.message || "中断请求未被后端接受，请刷新状态后重试。");
+          return false;
+        }
+        void syncRunStatus(session.episodeId);
+        return true;
+      } catch (error: any) {
+        session.abortSubmitting.value = false;
+        session.abortRunId.value = null;
+        window.$message?.error?.(error?.message || "中断 Production Agent 失败，请重试。");
+        return false;
+      }
+    }
+
+    function stopGenerate() {
+      return abortCurrentRun();
     }
 
     function reconnect() {
@@ -2040,6 +2125,7 @@ function makeProductionAgentStore(projectId: string) {
       messages,
       chat,
       stopGenerate,
+      abortCurrentRun,
       socket,
       messageStatus,
       currentRun,
@@ -2057,6 +2143,7 @@ function makeProductionAgentStore(projectId: string) {
       runDetailLoading,
       runDetailError,
       submitting,
+      abortSubmitting,
       syncRunStatus,
       recoverPanel,
       flowData,
@@ -2117,6 +2204,7 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
   const runDetailLoading = ref(false);
   const runDetailError = ref("");
   const submitting = ref(false);
+  const abortSubmitting = ref(false);
   const flowData = ref<FlowData>(createEmptyFlowData());
   const episodesId = ref<number>();
   const loadingHistory = ref(false);
@@ -2130,6 +2218,7 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
     messages,
     chat: noopAsync,
     stopGenerate: noop,
+    abortCurrentRun: noopAsync,
     socket,
     messageStatus,
     currentRun,
@@ -2147,6 +2236,7 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
     runDetailLoading,
     runDetailError,
     submitting,
+    abortSubmitting,
     syncRunStatus: noopAsync,
     recoverPanel: noopAsync,
     flowData,

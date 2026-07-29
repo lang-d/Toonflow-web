@@ -22,6 +22,12 @@
         </div>
         <div v-if="runStatusMessage" class="runStatusMessage">{{ runStatusMessage }}</div>
       </div>
+      <div v-if="runRunning" class="abortControl">
+        <span>{{ abortSubmitting ? $t("workbench.production.chatBox.abortingAgent") : $t("workbench.production.chatBox.runningInputPlaceholder") }}</span>
+        <t-button theme="danger" variant="outline" size="small" :loading="abortSubmitting" :disabled="!connected || abortSubmitting" @click="handleAbort">
+          {{ $t("workbench.production.chatBox.abortAgent") }}
+        </t-button>
+      </div>
       <div v-if="archivedOutputs.length" class="archivedReports">
         <article v-for="asset in archivedOutputs" :key="asset.id" class="archivedReport">
           <div>
@@ -83,9 +89,8 @@
         :disabled="senderDisabled"
         v-model="inputValue"
         :loading="senderLoading"
-        :placeholder="$t('workbench.production.chatBox.inputPlaceholder')"
-        @send="handleSend"
-        @stop="handleStop">
+        :placeholder="inputPlaceholder"
+        @send="handleSend">
         <template #footer-prefix>
           <div class="ac" style="gap: 5px">
             <t-popup trigger="click" placement="top-left">
@@ -164,7 +169,7 @@ import { MdPreview } from "md-editor-v3";
 import type { AgentRunTimelineItem, FullTextAssetMeta } from "@/stores/productionAgent";
 const { project } = storeToRefs(projectStore());
 const { themeSetting } = storeToRefs(settingStore());
-const { connected, messages, episodesId, loadingHistory, thinkLevel, runStatus, runReason, runCurrentStage, runCurrentSubAgent, runRunning, runStatusLoading, runStatusError, runTimeline, businessProgress, archivedOutputs, runDetailLoading, runDetailError, submitting } =
+const { connected, messages, episodesId, loadingHistory, thinkLevel, runStatus, runReason, runCurrentStage, runCurrentSubAgent, runRunning, runStatusLoading, runStatusError, runTimeline, businessProgress, archivedOutputs, runDetailLoading, runDetailError, submitting, abortSubmitting } =
   storeToRefs(productionAgentStore());
 const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
 const thinkLevelOptions = [
@@ -181,10 +186,15 @@ const emit = defineEmits(["close"]);
 
 const inputValue = ref("");
 const senderDisabled = computed(() => !connected.value || runRunning.value || submitting.value);
-const senderLoading = computed(() => runRunning.value || submitting.value);
+const senderLoading = computed(() => submitting.value);
+const inputPlaceholder = computed(() => {
+  if (runRunning.value) return $t("workbench.production.chatBox.runningInputPlaceholder");
+  if (runStatus.value === "awaiting_user") return $t("workbench.production.chatBox.awaitingDecisionPlaceholder");
+  return $t("workbench.production.chatBox.inputPlaceholder");
+});
 const showRunStatus = computed(() => Boolean(runStatus.value || runStatusLoading.value || runStatusError.value || businessProgress.value));
 const runStatusLabel = computed(() => {
-  if (runStatus.value === "awaiting_user" && runCurrentStage.value === "supervisionStoryboardTable") {
+  if (runStatus.value === "awaiting_user" && ["supervisionStoryboardTable", "supervisionStoryboardPanel"].includes(runCurrentStage.value || "")) {
     return $t("workbench.production.chatBox.awaitingStoryboardDecision");
   }
   if (runStatus.value === "awaiting_user") return $t(`workbench.production.chatBox.runStatuses.${runStatus.value}`);
@@ -357,8 +367,8 @@ async function loadFullTextAsset() {
 async function handleSend(text: string) {
   if (await productionAgentStore().chat(text)) inputValue.value = "";
 }
-function handleStop() {
-  productionAgentStore().stopGenerate();
+async function handleAbort() {
+  await productionAgentStore().abortCurrentRun();
 }
 function handleReconnect() {
   const dialog = DialogPlugin.confirm({
@@ -387,13 +397,13 @@ function scheduleRunGuardSync() {
   if (runGuardSyncTimer) clearTimeout(runGuardSyncTimer);
   runGuardSyncTimer = setTimeout(() => {
     runGuardSyncTimer = null;
-    if (runRunning.value || submitting.value) void productionAgentStore().syncRunStatus();
+    if (runRunning.value || submitting.value || abortSubmitting.value) void productionAgentStore().syncRunStatus();
   }, 300);
 }
 watch(
-  [runRunning, submitting],
-  ([isRunning, isSubmitting]) => {
-    if (isRunning || isSubmitting) scheduleRunGuardSync();
+  [runRunning, submitting, abortSubmitting],
+  ([isRunning, isSubmitting, isAborting]) => {
+    if (isRunning || isSubmitting || isAborting) scheduleRunGuardSync();
   },
   { immediate: true },
 );
@@ -538,6 +548,20 @@ onMounted(async () => {
       color: var(--td-text-color-secondary);
       line-height: 1.45;
       overflow-wrap: anywhere;
+    }
+    .abortControl {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 8px 6px 0;
+      padding: 7px 10px;
+      border: 1px solid var(--td-warning-color-5);
+      border-radius: var(--td-radius-small);
+      background: var(--td-warning-color-1);
+      color: var(--td-text-color-secondary);
+      font-size: 12px;
     }
     .inputBox {
       flex: 0 0 auto;

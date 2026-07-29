@@ -1227,6 +1227,10 @@
       "cancel": "Cancel",
       "chatBox": {
         "inputPlaceholder": "Type a message...",
+        "awaitingDecisionPlaceholder": "Enter your decision or next instruction...",
+        "runningInputPlaceholder": "The Agent is running. Use Abort Agent to stop this run.",
+        "abortAgent": "Abort Agent",
+        "abortingAgent": "Abort requested; waiting for server confirmation…",
         "generateDerivedAssets": "Generate Derived Assets",
         "welcomeMessage": "Hello! I am your AI Assistant. How can I help you?",
         "adjustModel": "Adjust Model",
