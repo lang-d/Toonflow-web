@@ -10,7 +10,7 @@
     mode="full-screen"
     dialogClassName="noFooter"
     class="fullscreenDialog">
-    <div class="closure">
+    <div v-if="!trackContextDrawerVisible" class="closure">
       <i-close-small theme="outline" size="24" fill="#4a4a4a" @click="visible = false" />
     </div>
     <div class="topMenu f ac">
@@ -32,7 +32,11 @@
     </div>
     <div class="content">
       <preview v-if="activeMenu === 'preview'" />
-      <generate v-if="activeMenu === 'generate'" @importVideo="handleBatchDownload" v-model="extractLines" />
+      <generate
+        v-if="activeMenu === 'generate'"
+        v-model="extractLines"
+        @importVideo="handleBatchDownload"
+        @track-context-visible-change="trackContextDrawerVisible = $event" />
       <editVideo
         v-if="activeMenu === 'editVideo'"
         :initial-tracks="mockTracks"
@@ -53,7 +57,7 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from "vue";
+import { watch, type Ref } from "vue";
 import axios from "@/utils/axios";
 import preview from "./preview.vue";
 import generate from "./generate/index.vue";
@@ -68,6 +72,11 @@ const visible = defineModel("visible", {
   default: false,
 });
 const activeMenu = ref("preview");
+const trackContextDrawerVisible = ref(false);
+
+watch(visible, (isVisible) => {
+  if (!isVisible) trackContextDrawerVisible.value = false;
+});
 
 // 画布尺寸配置
 const canvasWidth = ref(1920);
@@ -125,6 +134,7 @@ function getMediaType(src?: string): MediaType {
 }
 //切换菜单
 function changeMenu(type: string) {
+  if (type !== "generate") trackContextDrawerVisible.value = false;
   activeMenu.value = type;
   if (type == "editVideo") editFootage();
 }

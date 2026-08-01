@@ -8,9 +8,6 @@
         </div>
         <div class="right f ac">
           <t-button size="small" variant="outline" @click="batchDownloadVideo">{{ $t("workbench.generate.batchDownloadVideo") }}</t-button>
-          <t-button size="small" variant="outline" :loading="reviewLoading" :disabled="!checkedTrackIds.length" @click="emit('reviewTracks', checkedTrackIds)">
-            {{ $t("workbench.productionReview.action.review") }}
-          </t-button>
           <t-button size="small" variant="outline" @click="batchGenText" :loading="generateTextLoad">
             {{ $t("workbench.generate.batchGenerateText") }}
           </t-button>
@@ -38,9 +35,6 @@
             @click.stop
             @change="(val: boolean) => toggleCheck(track.id, val)" />
           <t-tag class="indexTag" size="small">#{{ index + 1 }}</t-tag>
-          <t-tag v-if="track.reviewState" class="reviewTag" :theme="getReviewStateTheme(track.reviewState)" size="small">
-            {{ $t(getReviewStateI18nKey(track.reviewState)) }}
-          </t-tag>
           <t-tag v-if="track.groupName" class="groupTag" size="small" variant="light">{{ track.groupName }}</t-tag>
           <t-tag class="selectTag" theme="success" size="small" v-if="track.selectVideoId">已选择</t-tag>
           <!-- 优先展示选中视频的首帧 -->
@@ -92,7 +86,7 @@ import imageListCacheStore from "@/stores/imageListCache";
 import JSZip from "jszip";
 import settingStore from "@/stores/setting";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus } from "@/stores/taskCenter";
-import { getReviewMessage, getReviewStateI18nKey, getReviewStateTheme } from "@/utils/productionReview";
+import { getReviewMessage } from "@/utils/productionReview";
 
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
@@ -105,7 +99,6 @@ const props = defineProps<{
   clampDuration: (trackDuration: number) => number;
   promptPrefix?: string;
   promptSuffix?: string;
-  reviewLoading?: boolean;
   addTrackLoading?: boolean;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
@@ -119,7 +112,6 @@ const emit = defineEmits<{
   getData: [];
   change: [prevIndex: number];
   saveImageList: [trackId: number];
-  reviewTracks: [trackIds: number[]];
   addTrack: [];
 }>();
 const itemBoxRef = ref<HTMLElement>();
@@ -546,12 +538,6 @@ watch(
         bottom: 4px;
         right: 4px;
         z-index: 1;
-      }
-      .reviewTag {
-        position: absolute;
-        top: 4px;
-        left: 34px;
-        z-index: 2;
       }
       .groupTag {
         position: absolute;

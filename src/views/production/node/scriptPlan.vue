@@ -9,7 +9,7 @@
     <t-alert v-if="generationMessage" class="generationAlert" :theme="generationTheme" :message="generationMessage" />
     <div class="content">
       <t-empty v-if="!scriptPlan" style="margin-top: 16px"></t-empty>
-      <MdPreview v-else v-model="scriptPlan" :theme="mdTheme" />
+      <DirectorPlanPreview v-else :content="scriptPlan" :theme="mdTheme" />
     </div>
   </t-card>
 
@@ -40,8 +40,9 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { Handle, Position } from "@vue-flow/core";
-import { MdEditor, MdPreview } from "md-editor-v3";
+import { MdEditor } from "md-editor-v3";
 import type { ToolbarNames } from "md-editor-v3";
+import DirectorPlanPreview from "../components/DirectorPlanPreview.vue";
 import productionAgentStore from "@/stores/productionAgent";
 import settingStore from "@/stores/setting";
 import type { DirectorPlanGenerationState } from "../utils/flowBuilder";

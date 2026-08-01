@@ -32,12 +32,12 @@
       <t-input v-model="promptPrefix" size="small" placeholder="前置提示词" clearable />
       <t-input v-model="promptSuffix" size="small" placeholder="后置提示词" clearable />
     </div>
-    <div v-if="currentTrack" class="trackReviewSummary">
+    <div v-if="currentTrack" class="trackContextSummary">
       <div class="trackGroupInfo">
         <strong>{{ currentTrack.groupName || `Track ${activeTrackIndex + 1}` }}</strong>
         <span v-if="currentTrack.groupIntent">{{ currentTrack.groupIntent }}</span>
       </div>
-      <div class="trackReviewTags">
+      <div class="trackContextTags">
         <t-tag size="small" theme="primary" variant="light">
           分镜 {{ currentTrackStoryboardCount }}
         </t-tag>
@@ -47,18 +47,10 @@
         <t-tag size="small" variant="light">
           引用 {{ currentReferenceCount }}
         </t-tag>
-        <t-tag v-if="currentTrack.reviewState" size="small" :theme="getReviewStateTheme(currentTrack.reviewState)" variant="light">
-          {{ $t(getReviewStateI18nKey(currentTrack.reviewState)) }}
-        </t-tag>
-        <t-tag v-if="currentReviewCounts.total" size="small" theme="warning" variant="light">
-          {{ $t("workbench.productionReview.summary.open") }} {{ currentReviewCounts.total }}
-        </t-tag>
-        <t-tag v-if="currentTrack.musicPlan" size="small" theme="primary" variant="light">
-          BGM {{ currentTrack.musicPlan.mood || "ready" }}
-        </t-tag>
         <t-tag v-if="hasUnreadyStoryboardForCurrentTrack" size="small" theme="warning" variant="light">
           分镜事实待补齐
         </t-tag>
+        <t-button size="small" variant="outline" @click="trackContextVisible = true">分镜与剧本</t-button>
       </div>
     </div>
     <t-alert
@@ -70,9 +62,6 @@
       <div class="prompt" v-if="currentTrack">
         <t-card :title="'#' + (activeTrackIndex + 1) + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
           <template #actions>
-            <t-button size="small" variant="outline" :loading="reviewLoading" @click="reviewCurrentTrack">
-              {{ $t("workbench.productionReview.action.review") }}
-            </t-button>
             <t-button size="small" class="genTextbtn" :loading="currentTrack.state == '生成中'" :disabled="hasUnreadyStoryboardForCurrentTrack" @click="genText">
               {{ $t("workbench.generate.generateText") }}
             </t-button>
@@ -92,18 +81,14 @@
           @refresh="getGenerateData"
           @generate="generateVideo" />
       </div>
-      <div class="reviewAside" v-if="currentTrack">
-        <ProductionReviewPanel
-          :title="$t('workbench.productionReview.trackTitle')"
-          mode="videoPromptBatch"
-          :reviews="currentTrack.reviewIssues || []"
-          :music-plan="currentTrack.musicPlan"
-          :loading="reviewLoading"
-          :applying="reviewLoading"
-          @refresh="reviewCurrentTrack"
-          @resolve-batch="resolveCurrentTrackReviews" />
-      </div>
     </div>
+    <TrackContextDrawer
+      v-model:visible="trackContextVisible"
+      @visible-change="emit('track-context-visible-change', $event)"
+      :project-id="Number(project?.id) || undefined"
+      :script-id="episodesId"
+      :track="currentTrack"
+      :storyboards="currentTrackStoryboards" />
     <div class="track">
       <newTrack
         v-model:activeTrackIndex="activeTrackIndex"
@@ -114,9 +99,7 @@
         :clampDuration="clampDuration"
         :prompt-prefix="promptPrefix"
         :prompt-suffix="promptSuffix"
-        :review-loading="reviewLoading"
         :add-track-loading="addTrackLoading"
-        @reviewTracks="reviewTracks"
         @addTrack="addManualTrack"
         @getData="getGenerateData" />
     </div>
@@ -129,7 +112,7 @@ import newTrack from "./components/track.vue";
 import imageSelect from "./components/imageSelect.vue";
 import modeMenu from "./components/modeMenu.vue";
 import videoCard from "./components/video.vue";
-import ProductionReviewPanel from "../../review/ProductionReviewPanel.vue";
+import TrackContextDrawer from "./components/TrackContextDrawer.vue";
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
@@ -139,14 +122,13 @@ import imageListCacheStore from "@/stores/imageListCache";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import { deriveReferenceTokens, getDerivedReferenceToken } from "./referenceTokens";
-import {
-  resolveProductionReviewBatch,
-  reviewVideoTracks,
-} from "@/api/productionReview";
-import type { ProductionReviewSuggestion } from "@/types/productionReview";
-import { countOpenReviews, getReviewMessage, getReviewStateI18nKey, getReviewStateTheme } from "@/utils/productionReview";
+import { getReviewMessage } from "@/utils/productionReview";
+import type { TaskStatus } from "@/types/api";
 
 const { project } = storeToRefs(projectStore());
+const emit = defineEmits<{
+  "track-context-visible-change": [visible: boolean];
+}>();
 const episodesId = inject<Ref<number>>("episodesId")!;
 const activeTrackIndex = ref(0);
 const cacheStore = imageListCacheStore();
@@ -155,10 +137,10 @@ const { getCache, setCache, initCacheFromTrackList, forceInitCacheFromTrackList,
 const { urlMap } = storeToRefs(cacheStore);
 const cacheRefreshing = ref(false);
 const mergeLoading = ref<"" | "storyboard" | "assets">("");
-const reviewLoading = ref(false);
 const addTrackLoading = ref(false);
 const referenceAudioPreviewVisible = ref(false);
 const activeReferenceAudio = ref<UploadItem | null>(null);
+const trackContextVisible = ref(false);
 const promptPrefix = ref("");
 const promptSuffix = ref("");
 const restoredLastTrack = ref(false);
@@ -166,9 +148,12 @@ const videoTaskBindings = new Map<number, () => void>();
 const promptTaskBindings = new Map<number, () => void>();
 const promptResultRefreshing = new Set<number>();
 const videoResultRefreshing = new Set<number>();
+const videoTerminalReconcileTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const reportedFailures = new Set<string>();
 const cacheWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let promptAffixWriteTimer: ReturnType<typeof setTimeout> | null = null;
+let videoStatusPollTimer: ReturnType<typeof setTimeout> | null = null;
+let videoStatusPollInFlight = false;
 
 const modeOptions = ref<VideoModel>({
   name: "",
@@ -310,7 +295,6 @@ const currentTrack = computed({
     trackList.value[activeTrackIndex.value] = val;
   },
 });
-const currentReviewCounts = computed(() => countOpenReviews(currentTrack.value?.reviewIssues ?? []));
 const currentTrackStoryboardCount = computed(() => {
   const trackId = currentTrack.value?.id;
   if (trackId == null) return 0;
@@ -343,89 +327,6 @@ function ensureCurrentTrackStoryboardReady() {
   if (!hasUnreadyStoryboardForCurrentTrack.value) return true;
   window.$message.warning(STRUCTURED_FACT_REQUIRED_MESSAGE);
   return false;
-}
-
-function mergeTrackReviews(trackIds: number[], reviews: ProductionReviewSuggestion[]) {
-  const byTrackId = new Map<string, ProductionReviewSuggestion[]>();
-  reviews.forEach((review) => {
-    const key = String(review.parentId ?? review.targetId);
-    const list = byTrackId.get(key) ?? [];
-    list.push(review);
-    byTrackId.set(key, list);
-  });
-  trackList.value.forEach((track) => {
-    if (!trackIds.includes(track.id)) return;
-    const matched = byTrackId.get(String(track.id)) ?? reviews.filter((review) => String(review.targetId) === String(track.id));
-    track.reviewIssues = matched;
-    const hasBlocking = matched.some((review) => review.status === "open" && review.severity === "blocking");
-    const hasOpen = matched.some((review) => review.status === "open");
-    track.reviewState = hasBlocking ? "blocked" : hasOpen ? "hasIssues" : "passed";
-  });
-}
-
-async function reviewTracks(trackIds: number[]) {
-  const ids = trackIds.filter((id) => id != null);
-  if (!project.value?.id || !ids.length) return;
-  reviewLoading.value = true;
-  try {
-    const result = await reviewVideoTracks({
-      projectId: Number(project.value.id),
-      scriptId: episodesId.value,
-      trackIds: ids,
-    });
-    mergeTrackReviews(ids, result?.suggestions ?? []);
-    window.$message.success("Review completed");
-  } catch (e) {
-    window.$message.error(getReviewMessage(e));
-  } finally {
-    reviewLoading.value = false;
-  }
-}
-
-function reviewCurrentTrack() {
-  if (!currentTrack.value?.id) return;
-  void reviewTracks([currentTrack.value.id]);
-}
-
-async function refreshAfterReviewAction() {
-  await getGenerateData();
-}
-
-async function resolveCurrentTrackReviews(payload: {
-  actions: Array<{ suggestionId: number; action: "accept" | "revise" | "ignore"; instruction?: string }>;
-  userInstruction?: string;
-}) {
-  const track = currentTrack.value;
-  const projectId = Number(project.value?.id);
-  const scriptId = Number(episodesId.value);
-  const actions = payload.actions.filter(
-    (item) => item.suggestionId && ["accept", "revise", "ignore"].includes(item.action),
-  );
-  if (!track?.id || !projectId || !actions.length) return;
-  reviewLoading.value = true;
-  try {
-    const request = {
-      projectId,
-      scriptId: Number.isFinite(scriptId) ? scriptId : undefined,
-      targetType: "videoPrompt" as const,
-      targetId: track.id,
-      actions,
-      userInstruction: payload.userInstruction?.trim() || undefined,
-    };
-    const result = await resolveProductionReviewBatch({
-      ...request,
-    });
-    const prompt = result?.revision?.prompt;
-    if (typeof prompt === "string") track.prompt = prompt;
-    await refreshAfterReviewAction();
-    const refreshed = trackList.value.find((item) => item.id === track.id);
-    if (typeof prompt === "string" && refreshed) refreshed.prompt = prompt;
-    window.$message.success(actions.some((item) => item.action !== "ignore") ? "已提交 AI 统一修订" : "已忽略选中建议");
-  } catch (e) {
-    window.$message.error(getReviewMessage(e));
-  } finally {
-    reviewLoading.value = false;
-  }
 }
 
 /** 将时长限制在模型支持的范围内 */
@@ -613,7 +514,7 @@ async function addManualTrack() {
     const nextIndex = upsertTrackItem(normalizedTrack);
     if (!selectTrackById(normalizedTrack.id)) activeTrackIndex.value = nextIndex;
     window.$message.success("已新增空视频组");
-    syncWorkbenchTasks();
+    syncPromptTasks();
     void getGenerateData({ selectTrackId: normalizedTrack.id });
   } catch (error: any) {
     window.$message.error(error?.message || "新增视频组失败");
@@ -828,7 +729,7 @@ async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: 
       if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(trackList.value.length - 1, 0);
       restoreLastTrack();
     }
-    syncWorkbenchTasks();
+    syncPromptTasks();
   }
 
   const selectedDuration = trackList.value?.[activeTrackIndex.value]?.duration;
@@ -1151,22 +1052,25 @@ async function generateVideo() {
           trackId: snapshot.trackId,
         });
         window.$message.success($t("workbench.generate.generateStarted"));
-        const videoId = typeof data === "object" ? data.videoId : data;
-        const taskId = typeof data === "object" ? data.taskId : undefined;
+        const videoId = Number(typeof data === "object" ? data.videoId : data);
+        if (!Number.isFinite(videoId)) throw new Error("视频任务已提交，但后端未返回有效的视频 ID");
+        const taskId = typeof data === "object" && typeof data.taskId === "string" && data.taskId.trim() ? data.taskId : undefined;
+        const initialStatus = normalizeTaskStatus(typeof data === "object" ? data.status : undefined, "queued");
         const targetTrack = trackList.value.find((track) => track.id === snapshot.trackId);
         if (!targetTrack) {
+          registerSubmittedVideoTask(videoId, taskId, initialStatus);
           await getGenerateData();
           return;
         }
         targetTrack.videoList.push({
           id: videoId,
           state: "生成中",
-          status: normalizeTaskStatus(typeof data === "object" ? data.status : undefined, "queued"),
+          status: initialStatus,
           src: "",
           taskId,
           queueTaskId: typeof data === "object" ? data.queueTaskId : undefined,
         });
-        syncVideoTasks();
+        registerSubmittedVideoTask(videoId, taskId, initialStatus);
       } catch (e) {
         window.$message.error(getReviewMessage(e) || "视频发起生成请求失败");
       } finally {
@@ -1190,11 +1094,44 @@ const hasGeneratePromptIds = computed(() => {
 function releaseVideoTask(id: number) {
   videoTaskBindings.get(id)?.();
   videoTaskBindings.delete(id);
+  const reconcileTimer = videoTerminalReconcileTimers.get(id);
+  if (reconcileTimer) clearTimeout(reconcileTimer);
+  videoTerminalReconcileTimers.delete(id);
 }
 
 function releasePromptTask(id: number) {
   promptTaskBindings.get(id)?.();
   promptTaskBindings.delete(id);
+}
+
+function findVideoById(videoId: number) {
+  for (const track of trackList.value) {
+    const video = track.videoList.find((candidate) => Number(candidate.id) === videoId);
+    if (video) return video;
+  }
+  return undefined;
+}
+
+function registerSubmittedVideoTask(videoId: number, taskId: string | undefined, status: TaskStatus) {
+  if (!taskId) return;
+  const projectId = Number(project.value?.id);
+  if (!projectId) return;
+
+  releaseVideoTask(videoId);
+  const release = taskCenter.registerTask(
+    {
+      key: createTaskKey("video", projectId, videoId, undefined, taskId),
+      domain: "video",
+      unifiedTaskId: taskId,
+      targetId: videoId,
+      targetType: "video",
+      projectId,
+      scriptId: episodesId.value,
+      status,
+    },
+    (task) => applyVideoTask(videoId, task),
+  );
+  videoTaskBindings.set(videoId, release);
 }
 
 async function refreshCompletedPrompt(track: TrackItem) {
@@ -1221,23 +1158,42 @@ async function refreshCompletedPrompt(track: TrackItem) {
   }
 }
 
+const terminalVideoStatuses = new Set<TaskStatus>(["completed", "failed", "cancelled"]);
+
+function isTerminalVideoStatus(status: TaskStatus) {
+  return terminalVideoStatuses.has(status);
+}
+
+function updateVideoState(video: VideoItem, nextStatusValue: unknown) {
+  const currentStatus = getRuntimeStatus(video, "processing");
+  const nextStatus = normalizeTaskStatus(nextStatusValue, currentStatus);
+
+  // Back-end terminal status is monotonic for a generated candidate. A delayed
+  // processing event must never turn an already confirmed result back into a spinner.
+  if (isTerminalVideoStatus(currentStatus) && !isTerminalVideoStatus(nextStatus)) return false;
+
+  video.status = nextStatus;
+  video.state = nextStatus === "completed" ? "已完成" : nextStatus === "failed" || nextStatus === "cancelled" ? "生成失败" : "生成中";
+  return true;
+}
+
 function applyVideoResult(video: VideoItem, record: Record<string, any>) {
-  const status = normalizeTaskStatus(record.status ?? record.state, video.status ?? "processing");
-  video.status = status;
-  video.state = status === "completed" ? "已完成" : status === "failed" || status === "cancelled" ? "生成失败" : "生成中";
+  if (!updateVideoState(video, record.status ?? record.state)) return false;
   const media = normalizeMediaRef(record.media ?? record, "video");
   if (media) {
     video.media = media;
     video.src = getMediaOriginalUrl(media);
   }
   video.errorReason = record.reason ?? record.errorReason ?? video.errorReason ?? "";
+  return isTerminalVideoStatus(getRuntimeStatus(video, "processing"));
 }
 
 async function refreshVideoResults(videos: VideoItem[]) {
+  const confirmedVideoIds = new Set<number>();
   const projectId = Number(project.value?.id);
   const scriptId = Number(episodesId.value);
   const pending = videos.filter((video) => video.id && !videoResultRefreshing.has(video.id));
-  if (!projectId || !scriptId || !pending.length) return;
+  if (!projectId || !scriptId || !pending.length) return confirmedVideoIds;
   pending.forEach((video) => videoResultRefreshing.add(video.id));
   try {
     const { data } = await axios.post("/production/workbench/checkVideoStateList", {
@@ -1249,24 +1205,47 @@ async function refreshVideoResults(videos: VideoItem[]) {
     const recordMap = new Map(records.map((record) => [Number(record.id ?? record.videoId), record]));
     pending.forEach((video) => {
       const record = recordMap.get(Number(video.id));
-      if (record) applyVideoResult(video, record);
+      if (record && applyVideoResult(video, record)) confirmedVideoIds.add(video.id);
     });
   } catch (error) {
     console.warn("[workbench-video] failed to refresh completed video", error);
   } finally {
     pending.forEach((video) => videoResultRefreshing.delete(video.id));
   }
+  return confirmedVideoIds;
 }
 
-function applyVideoTask(video: VideoItem, task: RuntimeTask) {
+function scheduleVideoTerminalReconcile(videoId: number, attempt = 1) {
+  const video = findVideoById(videoId);
+  if (!video || videoTerminalReconcileTimers.has(videoId) || !isTerminalVideoStatus(getRuntimeStatus(video, "processing"))) return;
+  const delay = attempt === 1 ? 1_200 : 3_000;
+  const timer = setTimeout(async () => {
+    videoTerminalReconcileTimers.delete(videoId);
+    const currentVideo = findVideoById(videoId);
+    if (!currentVideo) {
+      releaseVideoTask(videoId);
+      return;
+    }
+    const confirmedVideoIds = await refreshVideoResults([currentVideo]);
+    if (confirmedVideoIds.has(videoId)) {
+      releaseVideoTask(videoId);
+      return;
+    }
+    if (attempt < 2 && isTerminalVideoStatus(getRuntimeStatus(currentVideo, "processing"))) {
+      scheduleVideoTerminalReconcile(videoId, attempt + 1);
+    }
+  }, delay);
+  videoTerminalReconcileTimers.set(videoId, timer);
+}
+
+function applyVideoTask(videoId: number, task: RuntimeTask) {
+  const video = findVideoById(videoId);
+  if (!video) {
+    if (isTerminalVideoStatus(task.status)) queueMicrotask(() => releaseVideoTask(videoId));
+    return;
+  }
   const record = (task.result ?? {}) as any;
-  video.status = task.status;
-  video.state =
-    task.status === "completed"
-      ? "已完成"
-      : task.status === "failed" || task.status === "cancelled"
-        ? "生成失败"
-        : "生成中";
+  if (!updateVideoState(video, task.status)) return;
   const media = normalizeMediaRef(record.media ?? record, "video");
   if (media) {
     video.media = media;
@@ -1277,10 +1256,11 @@ function applyVideoTask(video: VideoItem, task: RuntimeTask) {
     reportedFailures.add(task.key);
     window.$message.error(task.reason || "视频生成失败");
   }
-  if (task.status === "completed") {
-    void refreshVideoResults([video]).finally(() => releaseVideoTask(video.id));
-  } else if (task.status === "failed" || task.status === "cancelled") {
-    queueMicrotask(() => releaseVideoTask(video.id));
+  if (isTerminalVideoStatus(task.status)) {
+    void refreshVideoResults([video]).then((confirmedVideoIds) => {
+      if (confirmedVideoIds.has(videoId)) releaseVideoTask(videoId);
+      else scheduleVideoTerminalReconcile(videoId);
+    });
   }
 }
 
@@ -1306,36 +1286,31 @@ function applyPromptTask(track: TrackItem, task: RuntimeTask) {
   }
 }
 
-function syncVideoTasks() {
-  const projectId = Number(project.value?.id);
-  if (!projectId) return;
-  const activeIds = new Set<number>();
-  trackList.value.forEach((track) => {
-    track.videoList.forEach((video) => {
-      if (!isActiveRuntimeStatus(video)) return;
-      activeIds.add(video.id);
-      const existingTask = taskCenter.getTask(createTaskKey("video", projectId, video.id, undefined, video.taskId));
-      if (videoTaskBindings.has(video.id) && (!video.taskId || existingTask?.unifiedTaskId === video.taskId)) return;
-      if (videoTaskBindings.has(video.id)) releaseVideoTask(video.id);
-      const release = taskCenter.registerTask(
-        {
-          key: createTaskKey("video", projectId, video.id, undefined, video.taskId),
-          domain: "video",
-          unifiedTaskId: video.taskId,
-          targetId: video.id,
-          targetType: "video",
-          projectId,
-          scriptId: episodesId.value,
-          status: getRuntimeStatus(video, "processing"),
-        },
-        (task) => applyVideoTask(video, task),
-      );
-      videoTaskBindings.set(video.id, release);
-    });
-  });
-  Array.from(videoTaskBindings.keys()).forEach((id) => {
-    if (!activeIds.has(id)) releaseVideoTask(id);
-  });
+function stopVideoStatusPolling() {
+  if (videoStatusPollTimer) clearTimeout(videoStatusPollTimer);
+  videoStatusPollTimer = null;
+}
+
+function scheduleVideoStatusPolling(delay = 0) {
+  if (!hasGenerateVideoIds.value.length) {
+    stopVideoStatusPolling();
+    return;
+  }
+  if (videoStatusPollTimer || videoStatusPollInFlight) return;
+  videoStatusPollTimer = setTimeout(() => void pollActiveVideoResults(), delay);
+}
+
+async function pollActiveVideoResults() {
+  videoStatusPollTimer = null;
+  if (videoStatusPollInFlight || !hasGenerateVideoIds.value.length) return;
+  videoStatusPollInFlight = true;
+  try {
+    const activeVideos = trackList.value.flatMap((track) => track.videoList.filter((video) => isActiveRuntimeStatus(video)));
+    await refreshVideoResults(activeVideos);
+  } finally {
+    videoStatusPollInFlight = false;
+    if (hasGenerateVideoIds.value.length) scheduleVideoStatusPolling(3_000);
+  }
 }
 
 function syncPromptTasks() {
@@ -1368,24 +1343,23 @@ function syncPromptTasks() {
   });
 }
 
-function syncWorkbenchTasks() {
-  syncVideoTasks();
-  syncPromptTasks();
-}
-
 watch(
-  () => hasGenerateVideoIds.value,
-  syncVideoTasks,
+  () => hasGenerateVideoIds.value.join(","),
+  () => scheduleVideoStatusPolling(),
 );
 watch(
   () => hasGeneratePromptIds.value,
   syncPromptTasks,
 );
 onUnmounted(() => {
+  emit("track-context-visible-change", false);
   videoTaskBindings.forEach((release) => release());
   promptTaskBindings.forEach((release) => release());
   videoTaskBindings.clear();
   promptTaskBindings.clear();
+  videoTerminalReconcileTimers.forEach((timer) => clearTimeout(timer));
+  videoTerminalReconcileTimers.clear();
+  stopVideoStatusPolling();
   cacheWriteTimers.forEach((timer) => clearTimeout(timer));
   cacheWriteTimers.clear();
   if (promptAffixWriteTimer) clearTimeout(promptAffixWriteTimer);
@@ -1416,7 +1390,7 @@ onUnmounted(() => {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 8px;
   }
-  .trackReviewSummary {
+  .trackContextSummary {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1440,7 +1414,7 @@ onUnmounted(() => {
         font-size: 12px;
       }
     }
-    .trackReviewTags {
+    .trackContextTags {
       display: flex;
       align-items: center;
       gap: 6px;
@@ -1453,7 +1427,7 @@ onUnmounted(() => {
     width: 100%;
     gap: 5px;
     .prompt {
-      width: 38%;
+      width: 50%;
       height: 100%;
       min-height: 0;
       .videoPrompt {
@@ -1484,16 +1458,9 @@ onUnmounted(() => {
       }
     }
     .video {
-      width: 34%;
+      width: 50%;
       height: 100%;
       min-height: 0;
-    }
-    .reviewAside {
-      width: 28%;
-      min-width: 280px;
-      height: 100%;
-      min-height: 0;
-      overflow: hidden;
     }
   }
   .track {

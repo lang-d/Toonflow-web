@@ -16,6 +16,7 @@
         </nav>
 
         <t-loading :loading="loading" show-overlay>
+          <p v-if="promptReviewPendingCount && (activeStep === 'episode' || projectTab === 'works')" class="taskProgressText">当前 Prompt 正在检查，请等待本次检查完成后再提交；未审核版本需等待结果后才能生成。</p>
           <section v-if="activeStep === 'project'" class="workspaceBody">
             <nav class="subTabs" aria-label="项目配乐内容">
               <button type="button" :class="{ active: projectTab === 'direction' }" @click="projectTab = 'direction'">配乐方向</button>
@@ -104,6 +105,7 @@ import type { ProductionReviewSuggestion } from "@/types/productionReview";
 type StepKey = "project" | "episode";
 type ProjectTab = "direction" | "works";
 type BibleCatalogItem = { id: string; text: string; level: number };
+type MusicTaskScope = "bible" | "bibleReview" | "plan" | "planReview" | "episodePlan" | "lyrics" | "compile" | "promptReview" | "audio" | "trim";
 const { project } = storeToRefs(projectStore());
 const { baseUrl, themeSetting } = storeToRefs(settingStore());
 const mdTheme = computed(() =>
@@ -125,7 +127,22 @@ const scriptOptions = ref<Array<{ label: string; value: number }>>([]); const se
 const libraryItems = ref<MusicLibraryItem[]>([]); const selectedLibraryItemId = ref<number>(); const selectedLibraryItem = ref<MusicLibraryItem | null>(null); const selectedEditionId = ref<number>();
 const musicModel = ref(""); const modelCapabilities = ref<MusicModelCapabilities>({}); const productionTarget = ref<"edition" | "cue">("edition"); const promptMode = ref<MusicPromptMode>("modelSpecific"); const promptVersions = ref<MusicPromptVersion[]>([]); const selectedPromptId = ref<number>(); const selectedPrompt = ref<MusicPromptVersion | null>(null); const promptDraft = ref(""); const promptDuration = ref<number>(); const effectiveDuration = ref<number>(); const promptBaseGenerationConfig = ref<Record<string, unknown>>({}); const promptBaseModel = ref<string | null>(null); const promptProfileSource = ref<string | null>(null); const promptBaseDuration = ref<number>(); const promptBaseEffectiveDuration = ref<number>(); const lyricsVersions = ref<MusicLyricsVersion[]>([]); const selectedLyricsId = ref<number>(); const selectedLyrics = ref<MusicLyricsVersion | null>(null); const lyricsDraft = ref(""); const promptReviews = ref<ProductionReviewSuggestion[]>([]); const acknowledgeWarnings = ref(false);
 const cueBindingDraft = ref<Record<number, { editionId?: number; libraryVersionId?: number; duration?: number }>>({});
-const busy = ref<Record<string, boolean>>({}); const releases = new Map<string, () => void>();
+const directBusy = ref<Record<string, boolean>>({});
+const taskOperations = ref<Record<string, string[]>>({});
+const promptReviewSubmittingOwners = ref<string[]>([]);
+const busy = computed<Record<string, boolean>>(() => ({
+  ...directBusy.value,
+  bible: isTaskBusy("bible", taskOwner("project", projectId.value)),
+  bibleReview: isTaskBusy("bibleReview", taskOwner("bible", selectedBible.value?.id)),
+  plan: isTaskBusy("plan", taskOwner("project", projectId.value)),
+  planReview: isTaskBusy("planReview", taskOwner("plan", selectedPlan.value?.id)),
+  episodePlan: isTaskBusy("episodePlan", taskOwner("script", selectedScriptId.value)),
+  lyrics: isTaskBusy("lyrics", taskOwner("edition", selectedEdition.value?.id)),
+  compile: isTaskBusy("compile", productionContextTaskOwner.value),
+  promptReview: promptReviewPendingCount.value > 0,
+  generate: isTaskBusy("audio", promptTaskOwner.value),
+}));
+const releases = new Map<string, () => void>();
 const libraryDialogVisible = ref(false); const editionDialogVisible = ref(false); const libraryForm = ref({ title: "", workKey: "", workType: "score_theme" as any, narrativeRole: "" }); const editionForm = ref<any>({});
 const trimTarget = ref<MusicLibraryVersion | null>(null); const trimDialogVisible = ref(false); const trimForm = ref({ title: "", fadeInMs: 300, fadeOutMs: 800, bindCueId: undefined as number | undefined, select: false });
 const previewTarget = ref<MusicLibraryVersion | MusicCueAsset | null>(null); const previewDialogVisible = ref(false);
@@ -142,6 +159,11 @@ const editionOptions = computed(() => libraryItems.value.flatMap((item) => item.
 const cueOptions = computed(() => cues.value.map((cue) => ({ label: cue.title || cue.cueKey || `段落 ${cue.id}`, value: cue.id })));
 const productionContext = computed(() => productionTarget.value === "edition" ? selectedEdition.value : selectedCue.value && selectedCue.value.usageMode !== "silence" ? selectedCue.value : null);
 const productionTargetLabel = computed(() => productionTarget.value === "edition" ? selectedEdition.value ? `${selectedLibraryItem.value?.title || "作品"} / ${selectedEdition.value.title || selectedEdition.value.editionKey}` : "未选择编曲版本" : selectedCue.value ? selectedCue.value.title || selectedCue.value.cueKey || "用乐段落" : "未选择用乐段落");
+const productionContextTaskOwner = computed(() => productionTarget.value === "edition" ? taskOwner("edition", selectedEdition.value?.id) : taskOwner("cue", selectedCue.value?.id));
+const promptTaskOwner = computed(() => taskOwner("prompt", selectedPrompt.value?.id));
+const promptReviewTaskCount = computed(() => taskOperationCount("promptReview", promptTaskOwner.value));
+const promptReviewSubmittingCount = computed(() => promptTaskOwner.value ? promptReviewSubmittingOwners.value.filter((ownerKey) => ownerKey === promptTaskOwner.value).length : 0);
+const promptReviewPendingCount = computed(() => promptReviewTaskCount.value + promptReviewSubmittingCount.value);
 const productionVersions = computed<Array<MusicLibraryVersion | MusicCueAsset>>(() => productionTarget.value === "edition" ? selectedEdition.value?.versions || [] : selectedCue.value?.assets || []);
 const productionVoiceMode = computed<"instrumental" | "vocal">(() => {
   if (productionTarget.value !== "edition") return "instrumental";
@@ -253,7 +275,7 @@ async function loadBibleDetail() { bibleCatalog.value = []; activeBibleCatalogId
 async function loadPlans() { plans.value = await listMusicPlans({ projectId: projectId.value, state: "complete" }); if (!projectPlanOptions.value.some((item) => item.value === selectedPlanId.value)) selectedPlanId.value = projectPlanOptions.value[0]?.value; await loadPlanDetail(); }
 async function loadPlanDetail() { if (!selectedPlanId.value) { selectedPlan.value = null; planReviews.value = []; return; } selectedPlan.value = await getMusicPlanDetail({ projectId: projectId.value, planId: selectedPlanId.value }); planReviews.value = await listProductionReviews({ projectId: projectId.value, targetType: "musicPlan", targetId: selectedPlanId.value }); }
 async function loadEpisodeData() { if (!selectedScriptId.value) return; const episodePlans = await listMusicPlans({ projectId: projectId.value, scriptId: selectedScriptId.value, mode: "episode", state: "complete" }); plans.value = [...plans.value.filter((item) => item.mode !== "episode" || Number(item.scriptId) !== selectedScriptId.value), ...episodePlans]; if (!episodePlans.some((item) => item.id === selectedEpisodePlanId.value)) selectedEpisodePlanId.value = episodePlans[0]?.id; await loadCues(); }
-async function loadCues() { if (!selectedEpisodePlanId.value) { cues.value = []; return; } busy.value.cues = true; try { cues.value = await listMusicCues({ projectId: projectId.value, scriptId: selectedScriptId.value, planId: selectedEpisodePlanId.value }); if (!cues.value.some((item) => item.id === selectedCueId.value)) selectedCueId.value = cues.value[0]?.id; cues.value.forEach(seedCueBinding); } finally { busy.value.cues = false; } }
+async function loadCues() { if (!selectedEpisodePlanId.value) { cues.value = []; return; } directBusy.value.cues = true; try { cues.value = await listMusicCues({ projectId: projectId.value, scriptId: selectedScriptId.value, planId: selectedEpisodePlanId.value }); if (!cues.value.some((item) => item.id === selectedCueId.value)) selectedCueId.value = cues.value[0]?.id; cues.value.forEach(seedCueBinding); } finally { directBusy.value.cues = false; } }
 async function loadLibrary() { libraryItems.value = await listMusicLibrary({ projectId: projectId.value }); if (!libraryItems.value.some((item) => item.id === selectedLibraryItemId.value)) selectedLibraryItemId.value = libraryItems.value[0]?.id; await loadSelectedLibraryItem(); }
 async function loadSelectedLibraryItem() { if (!selectedLibraryItemId.value) { selectedLibraryItem.value = null; selectedEditionId.value = undefined; return; } selectedLibraryItem.value = await getMusicLibraryDetail({ projectId: projectId.value, libraryItemId: selectedLibraryItemId.value }); if (!selectedLibraryItem.value.editions.some((item) => item.id === selectedEditionId.value)) selectedEditionId.value = selectedLibraryItem.value.editions[0]?.id; }
 async function loadProductionData() { if (!projectId.value || !productionContext.value) { promptVersions.value = []; lyricsVersions.value = []; selectedPrompt.value = null; return; } if (productionTarget.value === "edition" && selectedEdition.value) { lyricsVersions.value = await listMusicLyrics({ projectId: projectId.value, editionId: selectedEdition.value.id }); if (!lyricsVersions.value.some((item) => item.id === selectedLyricsId.value)) selectedLyricsId.value = lyricsVersions.value[0]?.id; await loadSelectedLyrics(); promptVersions.value = await listMusicLibraryPrompts({ projectId: projectId.value, editionId: selectedEdition.value.id }); } else if (selectedCue.value) { promptVersions.value = await listMusicCuePrompts({ projectId: projectId.value, cueId: selectedCue.value.id }); } if (!promptVersions.value.some((item) => item.id === selectedPromptId.value)) selectedPromptId.value = promptVersions.value[0]?.id; await loadSelectedPrompt(); }
@@ -276,18 +298,72 @@ async function loadSelectedPrompt() {
 }
 async function loadSelectedLyrics() { selectedLyrics.value = lyricsVersions.value.find((item) => item.id === selectedLyricsId.value) || null; lyricsDraft.value = selectedLyrics.value?.content || ""; }
 
-function registerTask(envelope: MusicTaskEnvelope, scope: string) { if (!envelope.taskId || !projectId.value) return; const key = createTaskKey("media", projectId.value, envelope.targetId ?? scope, undefined, envelope.taskId); releases.get(key)?.(); busy.value[scope] = true; const release = taskCenter.registerTask({ key, domain: "media", taskId: envelope.taskId, unifiedTaskId: envelope.taskId, legacyTaskId: envelope.legacyTaskId ?? undefined, targetType: envelope.targetType, targetId: envelope.targetId ?? scope, projectId: projectId.value, ...(musicAgentMode.value === "episode" && selectedScriptId.value ? { scriptId: selectedScriptId.value } : {}), status: normalizeTaskStatus(envelope.status, "queued") }, (runtimeTask) => handleTask(runtimeTask, scope)); releases.set(key, release); }
-function handleTask(runtimeTask: RuntimeTask, scope: string) { if (!["completed", "failed", "cancelled"].includes(runtimeTask.status)) return; busy.value[scope] = false; if (runtimeTask.status === "failed") window.$message.error(runtimeTask.reason || "配乐任务失败"); void refreshAfterTask(scope).then(() => { if (runtimeTask.status === "completed" && scope === "audio") recordCandidateOutcome(runtimeTask); }); }
+function taskOwner(type: string, id?: number) { return id == null ? "" : `${type}:${id}`; }
+function taskOperationKey(scope: MusicTaskScope, ownerKey: string) { return `${scope}:${ownerKey}`; }
+function taskOperationCount(scope: MusicTaskScope, ownerKey: string) { return ownerKey ? taskOperations.value[taskOperationKey(scope, ownerKey)]?.length || 0 : 0; }
+function isTaskBusy(scope: MusicTaskScope, ownerKey: string) { return taskOperationCount(scope, ownerKey) > 0; }
+function beginPromptReviewSubmission(ownerKey: string) {
+  if (!ownerKey || taskOperationCount("promptReview", ownerKey) || promptReviewSubmittingOwners.value.includes(ownerKey)) return false;
+  promptReviewSubmittingOwners.value = [...promptReviewSubmittingOwners.value, ownerKey];
+  return true;
+}
+function endPromptReviewSubmission(ownerKey: string) { promptReviewSubmittingOwners.value = promptReviewSubmittingOwners.value.filter((item) => item !== ownerKey); }
+function addTaskOperation(scope: MusicTaskScope, ownerKey: string, taskId: string) {
+  if (!ownerKey) return;
+  const key = taskOperationKey(scope, ownerKey);
+  const current = taskOperations.value[key] || [];
+  if (!current.includes(taskId)) taskOperations.value[key] = [...current, taskId];
+}
+function removeTaskOperation(scope: MusicTaskScope, ownerKey: string, taskId: string) {
+  if (!ownerKey) return;
+  const key = taskOperationKey(scope, ownerKey);
+  const remaining = (taskOperations.value[key] || []).filter((item) => item !== taskId);
+  if (remaining.length) taskOperations.value[key] = remaining;
+  else delete taskOperations.value[key];
+}
+function registerTask(envelope: MusicTaskEnvelope, scope: MusicTaskScope, ownerKey: string) {
+  if (!envelope.taskId || !projectId.value) return;
+  const key = createTaskKey("media", projectId.value, envelope.targetId ?? scope, undefined, envelope.taskId);
+  const taskId = String(envelope.taskId);
+  releases.get(key)?.();
+  addTaskOperation(scope, ownerKey, taskId);
+  const release = taskCenter.registerTask({ key, domain: "media", taskId: envelope.taskId, unifiedTaskId: envelope.taskId, legacyTaskId: envelope.legacyTaskId ?? undefined, targetType: envelope.targetType, targetId: envelope.targetId ?? scope, projectId: projectId.value, ...(musicAgentMode.value === "episode" && selectedScriptId.value ? { scriptId: selectedScriptId.value } : {}), status: normalizeTaskStatus(envelope.status, "queued") }, (runtimeTask) => handleTask(runtimeTask, scope, ownerKey, taskId, key));
+  releases.set(key, release);
+}
+function handleTask(runtimeTask: RuntimeTask, scope: MusicTaskScope, ownerKey: string, taskId: string, taskKey: string) {
+  if (!["completed", "failed", "cancelled"].includes(runtimeTask.status)) return;
+  removeTaskOperation(scope, ownerKey, taskId);
+  releases.get(taskKey)?.();
+  releases.delete(taskKey);
+  if (runtimeTask.status === "failed") window.$message.error(runtimeTask.reason || "配乐任务失败");
+  void refreshAfterTask(scope).then(() => { if (runtimeTask.status === "completed" && scope === "audio") recordCandidateOutcome(runtimeTask); });
+}
 async function refreshAfterTask(scope: string) { await Promise.all([loadBibles(), loadPlans(), loadLibrary()]); if (scope.includes("episode")) await loadEpisodeData(); else if (scope.includes("cue") || scope.includes("audio") || scope.includes("trim")) await loadCues(); await loadProductionData(); }
-async function submitBible() { const instruction = await askInstruction("本次配乐方向要求（可选）"); if (instruction === null) return; await runTask("bible", () => generateMusicBible({ projectId: projectId.value, instruction: instruction || undefined })); }
-async function submitBibleReview() { if (!selectedBible.value) return; await runTask("bibleReview", () => reviewMusicBible({ projectId: projectId.value, bibleId: selectedBible.value!.id })); }
-async function submitProjectPlan() { if (!selectedBible.value) return; const instruction = await askInstruction("项目规划要求（可选）"); if (instruction === null) return; await runTask("plan", () => generateMusicPlan({ projectId: projectId.value, mode: projectPlanMode.value, bibleId: selectedBible.value!.id, instruction: instruction || undefined })); }
-async function submitPlanReview() { if (!selectedPlan.value) return; await runTask("planReview", () => reviewMusicPlan({ projectId: projectId.value, planId: selectedPlan.value!.id })); }
-async function submitEpisodePlan() { if (!selectedBible.value || !selectedScriptId.value) return; const instruction = await askInstruction("本集用乐要求（可选）"); if (instruction === null) return; await runTask("episodePlan", () => generateMusicPlan({ projectId: projectId.value, mode: "episode", scriptId: selectedScriptId.value, bibleId: selectedBible.value!.id, instruction: instruction || undefined })); }
-async function submitLyricsGenerate() { if (!selectedEdition.value) return; await runTask("lyrics", () => generateMusicLyrics({ projectId: projectId.value, editionId: selectedEdition.value!.id, basedOnId: selectedLyrics.value?.id })); }
-async function submitCompilePrompt() { if (promptMode.value !== "modelSpecific") return window.$message.warning("通用 Prompt 请交给配乐导演 Agent 编译"); if (!canCompilePrompt.value) return window.$message.warning(showLyricsEditor.value ? "请先确认一版歌词" : "请先选择音乐模型"); const instruction = await askInstruction("本次 Prompt 编译要求（可选）"); if (instruction === null) return; if (productionTarget.value === "edition" && selectedEdition.value) await runTask("compile", () => compileMusicLibraryPrompt({ projectId: projectId.value, editionId: selectedEdition.value!.id, model: musicModel.value, instruction: instruction || undefined, requestedDurationSec: promptDuration.value, effectiveMusicDurationSec: effectiveDuration.value, lyricsVersionId: activeConfirmedLyricsId.value })); else if (selectedCue.value) await runTask("compile", () => compileMusicCuePrompt({ projectId: projectId.value, cueId: selectedCue.value!.id, model: musicModel.value, instruction: instruction || undefined })); }
-async function submitPromptReview() { if (!selectedPrompt.value) return; if (productionTarget.value === "edition" && selectedEdition.value) await runTask("promptReview", () => reviewMusicLibraryPrompt({ projectId: projectId.value, editionId: selectedEdition.value!.id, promptVersionId: selectedPrompt.value!.id })); else if (selectedCue.value) await runTask("promptReview", () => reviewMusicCuePrompt({ projectId: projectId.value, cueId: selectedCue.value!.id, promptVersionId: selectedPrompt.value!.id })); }
-async function submitGenerate() { if (!selectedPrompt.value || !canGenerate.value) return; candidateOutcome.value = null; const warningsAcknowledged = selectedPrompt.value.reviewStatus === "warning" ? acknowledgeWarnings.value : undefined; if (productionTarget.value === "edition" && selectedEdition.value) await runTask("audio", () => generateMusicLibraryAudio({ projectId: projectId.value, editionId: selectedEdition.value!.id, promptVersionId: selectedPrompt.value!.id, lyricsVersionId: selectedPrompt.value!.lyricsVersionId ?? null, acknowledgeWarnings: warningsAcknowledged })); else if (selectedCue.value) await runTask("audio", () => generateMusicCueAudio({ projectId: projectId.value, cueId: selectedCue.value!.id, promptVersionId: selectedPrompt.value!.id, acknowledgeWarnings: warningsAcknowledged, select: false })); }
+async function submitBible() { const instruction = await askInstruction("本次配乐方向要求（可选）"); if (instruction === null) return; await runTask("bible", taskOwner("project", projectId.value), () => generateMusicBible({ projectId: projectId.value, instruction: instruction || undefined })); }
+async function submitBibleReview() { if (!selectedBible.value) return; const bibleId = selectedBible.value.id; await runTask("bibleReview", taskOwner("bible", bibleId), () => reviewMusicBible({ projectId: projectId.value, bibleId })); }
+async function submitProjectPlan() { if (!selectedBible.value) return; const bibleId = selectedBible.value.id; const instruction = await askInstruction("项目规划要求（可选）"); if (instruction === null) return; await runTask("plan", taskOwner("project", projectId.value), () => generateMusicPlan({ projectId: projectId.value, mode: projectPlanMode.value, bibleId, instruction: instruction || undefined })); }
+async function submitPlanReview() { if (!selectedPlan.value) return; const planId = selectedPlan.value.id; await runTask("planReview", taskOwner("plan", planId), () => reviewMusicPlan({ projectId: projectId.value, planId })); }
+async function submitEpisodePlan() { if (!selectedBible.value || !selectedScriptId.value) return; const bibleId = selectedBible.value.id; const scriptId = selectedScriptId.value; const instruction = await askInstruction("本集用乐要求（可选）"); if (instruction === null) return; await runTask("episodePlan", taskOwner("script", scriptId), () => generateMusicPlan({ projectId: projectId.value, mode: "episode", scriptId, bibleId, instruction: instruction || undefined })); }
+async function submitLyricsGenerate() { if (!selectedEdition.value) return; const editionId = selectedEdition.value.id; await runTask("lyrics", taskOwner("edition", editionId), () => generateMusicLyrics({ projectId: projectId.value, editionId, basedOnId: selectedLyrics.value?.id })); }
+async function submitCompilePrompt() { if (promptMode.value !== "modelSpecific") return window.$message.warning("通用 Prompt 请交给配乐导演 Agent 编译"); if (!canCompilePrompt.value) return window.$message.warning(showLyricsEditor.value ? "请先确认一版歌词" : "请先选择音乐模型"); const instruction = await askInstruction("本次 Prompt 编译要求（可选）"); if (instruction === null) return; if (productionTarget.value === "edition" && selectedEdition.value) { const editionId = selectedEdition.value.id; await runTask("compile", taskOwner("edition", editionId), () => compileMusicLibraryPrompt({ projectId: projectId.value, editionId, model: musicModel.value, instruction: instruction || undefined, requestedDurationSec: promptDuration.value, effectiveMusicDurationSec: effectiveDuration.value, lyricsVersionId: activeConfirmedLyricsId.value })); } else if (selectedCue.value) { const cueId = selectedCue.value.id; await runTask("compile", taskOwner("cue", cueId), () => compileMusicCuePrompt({ projectId: projectId.value, cueId, model: musicModel.value, instruction: instruction || undefined })); } }
+async function submitPromptReview() {
+  if (!selectedPrompt.value) return;
+  const promptVersionId = selectedPrompt.value.id;
+  const ownerKey = taskOwner("prompt", promptVersionId);
+  if (!beginPromptReviewSubmission(ownerKey)) return;
+  try {
+    if (productionTarget.value === "edition" && selectedEdition.value) {
+      const editionId = selectedEdition.value.id;
+      await runTask("promptReview", ownerKey, () => reviewMusicLibraryPrompt({ projectId: projectId.value, editionId, promptVersionId }));
+    } else if (selectedCue.value) {
+      const cueId = selectedCue.value.id;
+      await runTask("promptReview", ownerKey, () => reviewMusicCuePrompt({ projectId: projectId.value, cueId, promptVersionId }));
+    }
+  } finally {
+    endPromptReviewSubmission(ownerKey);
+  }
+}
+async function submitGenerate() { if (!selectedPrompt.value || !canGenerate.value) return; const prompt = selectedPrompt.value; const ownerKey = taskOwner("prompt", prompt.id); candidateOutcome.value = null; const warningsAcknowledged = prompt.reviewStatus === "warning" ? acknowledgeWarnings.value : undefined; if (productionTarget.value === "edition" && selectedEdition.value) { const editionId = selectedEdition.value.id; await runTask("audio", ownerKey, () => generateMusicLibraryAudio({ projectId: projectId.value, editionId, promptVersionId: prompt.id, lyricsVersionId: prompt.lyricsVersionId ?? null, acknowledgeWarnings: warningsAcknowledged })); } else if (selectedCue.value) { const cueId = selectedCue.value.id; await runTask("audio", ownerKey, () => generateMusicCueAudio({ projectId: projectId.value, cueId, promptVersionId: prompt.id, acknowledgeWarnings: warningsAcknowledged, select: false })); } }
 async function saveLyricsDraft() { if (!selectedEdition.value || !lyricsDraft.value.trim()) return; const saved = await saveMusicLyrics({ projectId: projectId.value, editionId: selectedEdition.value.id, content: lyricsDraft.value, basedOnId: selectedLyrics.value?.id }); await loadProductionData(); selectedLyricsId.value = saved.id; await loadSelectedLyrics(); window.$message.success("已保存为新的歌词版本"); }
 async function confirmSelectedLyrics() { if (!selectedEdition.value || !selectedLyrics.value) return; await confirmMusicLyrics({ projectId: projectId.value, editionId: selectedEdition.value.id, lyricsVersionId: selectedLyrics.value.id }); await loadProductionData(); window.$message.success("歌词已确认"); }
 async function savePromptDraft() {
@@ -316,14 +392,14 @@ async function savePromptDraft() {
     window.$message.error(error instanceof Error ? error.message : "保存 Prompt 失败");
   }
 }
-async function runTask(scope: string, action: () => Promise<MusicTaskEnvelope>) { try { const envelope = await action(); registerTask(envelope, scope); window.$message.success("任务已提交"); } catch (error: any) { window.$message.error(error?.message || "任务提交失败"); } }
+async function runTask(scope: MusicTaskScope, ownerKey: string, action: () => Promise<MusicTaskEnvelope>) { try { const envelope = await action(); registerTask(envelope, scope, ownerKey); window.$message.success("任务已提交"); } catch (error: any) { window.$message.error(error?.message || "任务提交失败"); } }
 
 function selectCue(id: number) { selectedCueId.value = id; seedCueBinding(selectedCue.value!); activeStep.value = "episode"; productionTarget.value = "cue"; void loadProductionData(); }
 function seedCueBinding(cue: MusicCue) { if (!cue) return; cueBindingDraft.value[cue.id] ||= { editionId: cue.binding?.editionId ?? cue.edition?.id ?? undefined, libraryVersionId: cue.binding?.libraryVersionId ?? cue.libraryVersion?.id ?? undefined, duration: cue.binding?.suggestedUseDurationSec ?? cue.estimatedDurationSec ?? undefined }; }
 function updateCueUsage(cue: MusicCue, mode: MusicUsageMode) { cue.usageMode = mode; seedCueBinding(cue); if (mode === "silence") { cueBindingDraft.value[cue.id].editionId = undefined; cueBindingDraft.value[cue.id].libraryVersionId = undefined; } }
 function handleCueUsageChange(cue: MusicCue, value: unknown) { updateCueUsage(cue, String(value) as MusicUsageMode); productionTarget.value = "cue"; void loadProductionData(); }
 function resetCueVersion(cueId: number) { cueBindingDraft.value[cueId].libraryVersionId = undefined; }
-async function saveCueBinding(cue: MusicCue) { const draft = cueBindingDraft.value[cue.id]; if (cue.usageMode !== "silence" && !draft.editionId) return window.$message.warning("复用或新做都需要选择编曲版本"); busy.value[`bind-${cue.id}`] = true; try { await bindMusicCue({ projectId: projectId.value, cueId: cue.id, usageMode: cue.usageMode || "new", editionId: cue.usageMode === "silence" ? null : draft.editionId, libraryVersionId: cue.usageMode === "silence" ? null : draft.libraryVersionId || null, suggestedUseDurationSec: draft.duration || null }); await loadCues(); window.$message.success("用乐安排已保存"); } finally { busy.value[`bind-${cue.id}`] = false; } }
+async function saveCueBinding(cue: MusicCue) { const draft = cueBindingDraft.value[cue.id]; if (cue.usageMode !== "silence" && !draft.editionId) return window.$message.warning("复用或新做都需要选择编曲版本"); directBusy.value[`bind-${cue.id}`] = true; try { await bindMusicCue({ projectId: projectId.value, cueId: cue.id, usageMode: cue.usageMode || "new", editionId: cue.usageMode === "silence" ? null : draft.editionId, libraryVersionId: cue.usageMode === "silence" ? null : draft.libraryVersionId || null, suggestedUseDurationSec: draft.duration || null }); await loadCues(); window.$message.success("用乐安排已保存"); } finally { directBusy.value[`bind-${cue.id}`] = false; } }
 function libraryVersionOptions(editionId?: number) { const edition = libraryItems.value.flatMap((item) => item.editions).find((item) => item.id === editionId); return (edition?.versions || []).filter((item) => item.state === "complete").map((item) => ({ label: `v${item.version || item.id}`, value: item.id })); }
 async function selectLibraryItem(id: number) { selectedLibraryItemId.value = id; await loadSelectedLibraryItem(); productionTarget.value = "edition"; activeStep.value = "project"; projectTab.value = "works"; await loadProductionData(); }
 async function selectEdition(id: number) { selectedEditionId.value = id; productionTarget.value = "edition"; activeStep.value = "project"; projectTab.value = "works"; await loadProductionData(); }
@@ -339,8 +415,8 @@ function candidateDownloadBaseName(targetType: MusicDownloadTargetType, version:
 async function downloadProductionVersion(targetType: MusicDownloadTargetType, version: MusicLibraryVersion | MusicCueAsset) {
   if (!projectId.value || version.state !== "complete" || !hasPlayableAudio(version)) return;
   const key = downloadBusyKey(targetType, version.id);
-  if (busy.value[key]) return;
-  busy.value[key] = true;
+  if (directBusy.value[key]) return;
+  directBusy.value[key] = true;
   try {
     const { blob, filename } = await downloadMusicCandidate({ projectId: projectId.value, targetType, targetId: version.id, baseUrl: baseUrl.value, fallbackBaseName: candidateDownloadBaseName(targetType, version) });
     const objectUrl = URL.createObjectURL(blob);
@@ -356,12 +432,12 @@ async function downloadProductionVersion(targetType: MusicDownloadTargetType, ve
   } catch (error) {
     window.$message.error(error instanceof Error ? error.message : "下载音频失败");
   } finally {
-    busy.value[key] = false;
+    directBusy.value[key] = false;
   }
 }
 function openPreview(version: MusicLibraryVersion | MusicCueAsset) { if (!hasPlayableAudio(version)) return window.$message.warning("当前版本暂无可试听音频"); previewTarget.value = version; previewDialogVisible.value = true; }
 function openTrim(version: MusicLibraryVersion) { trimTarget.value = version; trimForm.value = { title: `${selectedEdition.value?.title || "音乐"}-${Math.round((version.effectiveMusicDurationSec || version.generationDurationSec || 0))}秒`, fadeInMs: 300, fadeOutMs: 800, bindCueId: selectedCue.value?.id, select: false }; trimDialogVisible.value = true; }
-async function submitTrim(payload: { start: number; end: number }, controls: { done: (error?: unknown) => void }) { if (!trimTarget.value) return controls.done(); try { const envelope = await trimMusicLibraryVersion({ projectId: projectId.value, sourceLibraryVersionId: trimTarget.value.id, startMs: Math.round(payload.start * 1000), endMs: Math.round(payload.end * 1000), fadeInMs: trimForm.value.fadeInMs, fadeOutMs: trimForm.value.fadeOutMs, title: trimForm.value.title || trimTargetLabel.value, bindCueId: trimForm.value.bindCueId ?? null, select: trimForm.value.select }); registerTask(envelope, "trim"); trimDialogVisible.value = false; trimTarget.value = null; controls.done(); window.$message.success("截取任务已提交"); } catch (error) { controls.done(error); window.$message.error(error instanceof Error ? error.message : "截取任务提交失败"); } }
+async function submitTrim(payload: { start: number; end: number }, controls: { done: (error?: unknown) => void }) { if (!trimTarget.value) return controls.done(); const sourceLibraryVersionId = trimTarget.value.id; try { const envelope = await trimMusicLibraryVersion({ projectId: projectId.value, sourceLibraryVersionId, startMs: Math.round(payload.start * 1000), endMs: Math.round(payload.end * 1000), fadeInMs: trimForm.value.fadeInMs, fadeOutMs: trimForm.value.fadeOutMs, title: trimForm.value.title || trimTargetLabel.value, bindCueId: trimForm.value.bindCueId ?? null, select: trimForm.value.select }); registerTask(envelope, "trim", taskOwner("libraryVersion", sourceLibraryVersionId)); trimDialogVisible.value = false; trimTarget.value = null; controls.done(); window.$message.success("截取任务已提交"); } catch (error) { controls.done(error); window.$message.error(error instanceof Error ? error.message : "截取任务提交失败"); } }
 function recordCandidateOutcome(task: RuntimeTask) {
   const taskId = String(task.unifiedTaskId || task.taskId || task.key);
   if (handledCandidateTaskIds.has(taskId)) return;
@@ -501,6 +577,7 @@ const workTypeOptions = [{ label: "主题曲", value: "theme_song" }, { label: "
 .agentRunStatus,.agentTaskFailures,.agentTimeline { margin:0 8px 8px 0; padding:9px 10px; border-left:3px solid var(--td-border-level-1-color); background:var(--td-bg-color-secondarycontainer); display:grid; gap:3px; font-size:12px; }.agentRunStatus.running { border-color:var(--td-brand-color); }.agentRunStatus small,.agentTimeline span { color:var(--td-text-color-secondary); line-height:1.45; }.agentTaskFailures { border-color:var(--td-error-color); }.agentTaskFailures p { margin:0; color:var(--td-error-color); line-height:1.45; }.agentTimeline { display:block; }.agentTimeline summary { cursor:pointer; font-weight:600; }.timelineItem { display:grid; gap:2px; padding:7px 0; border-top:1px solid var(--td-border-level-1-color); }.timelineItem:first-of-type { margin-top:7px; }
 .musicMarkdown { margin-top:10px; background:transparent; }.musicMarkdown :deep(.md-editor-preview-wrapper) { padding:0; background:transparent; }.musicMarkdown :deep(.md-editor-preview) { padding:0; color:var(--td-text-color-primary); font-size:14px; line-height:1.75; word-break:break-word; }.musicMarkdown :deep(h1),.musicMarkdown :deep(h2),.musicMarkdown :deep(h3),.musicMarkdown :deep(h4) { margin:18px 0 8px; color:var(--td-text-color-primary); line-height:1.35; }.musicMarkdown :deep(h1) { font-size:20px; }.musicMarkdown :deep(h2) { font-size:17px; }.musicMarkdown :deep(h3) { font-size:15px; }.musicMarkdown :deep(p) { margin:8px 0; }.musicMarkdown :deep(ul),.musicMarkdown :deep(ol) { margin:8px 0; padding-left:22px; }.musicMarkdown :deep(li + li) { margin-top:4px; }.musicMarkdown :deep(blockquote) { margin:10px 0; padding:7px 11px; border-left:3px solid var(--td-brand-color); background:var(--td-bg-color-secondarycontainer); color:var(--td-text-color-secondary); }.musicMarkdown :deep(code) { padding:1px 4px; border-radius:3px; background:var(--td-bg-color-secondarycontainer); }.musicMarkdown :deep(pre) { padding:10px; background:var(--td-bg-color-secondarycontainer); overflow:auto; }.episodePlanPreview { border:1px solid var(--td-border-level-1-color); background:var(--td-bg-color-container); padding:10px 12px; }.episodePlanPreview summary { cursor:pointer; color:var(--td-text-color-secondary); font-size:13px; }.episodePlanPreview[open] summary { margin-bottom:6px; color:var(--td-text-color-primary); }
 .musicAgentMenu { display:grid; min-width:180px; padding:4px; gap:2px; }.musicAgentMenu button { display:flex; align-items:center; gap:7px; width:100%; border:0; padding:7px 8px; background:transparent; color:var(--td-text-color-primary); cursor:pointer; text-align:left; }.musicAgentMenu button:hover { background:var(--td-bg-color-container-hover); }.musicAgentMenu button.danger { color:var(--td-error-color); }
+.taskProgressText { margin:0; padding:8px 10px; color:var(--td-text-color-secondary); font-size:12px; line-height:1.5; border-left:3px solid var(--td-brand-color); background:var(--td-bg-color-secondarycontainer); }
 @media (max-width:1300px) { .directorLayout { display:block; }.directorLayout:not(.agentHidden) .workspace { padding-right:0; }.agentSlot { position:fixed; z-index:30; top:70px; bottom:16px; right:8px; width:400px; height:auto; min-height:0; max-height:none; }.twoColumn,.productionGrid { grid-template-columns:1fr; }.cueBinding { grid-template-columns:1fr 1fr; } }
 @media (max-width:760px) { .productionMusicV2 { padding:10px; }.pageHeader { align-items:flex-start; flex-direction:column; }.productionSteps { grid-template-columns:1fr; }.agentSlot { left:8px; width:auto; }.cueBinding { grid-template-columns:1fr; }.audioVersion { align-items:flex-start; flex-direction:column; }.directorLayout:not(.agentHidden) .workspace { padding-bottom:0; } }
 </style>

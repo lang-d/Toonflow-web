@@ -15,25 +15,23 @@
         <div class="sectionTitle">{{ currentMenuItem ? $t(currentMenuItem.label) : "" }}</div>
         <div class="settingContent">
           <t-alert v-if="panelError" class="panelError" theme="error" :message="panelError" close @close="panelError = ''" />
-          <template v-else>
-            <uiConfig v-if="activeMenu === 'ui'" />
-            <languageConfig v-if="activeMenu === 'language'" />
-            <vendorConfig v-if="activeMenu === 'vendorConfig'" />
-            <requestConfig v-if="activeMenu === 'requestConfig'" />
-            <loginConfig v-if="activeMenu === 'loginConfig'" />
-            <agentConfog v-if="activeMenu === 'agentConfog'" />
-            <promptManage v-if="activeMenu === 'promptManage'" />
-            <otherConfig v-if="activeMenu === 'otherConfig'" />
-            <dbConfig v-if="activeMenu === 'dbConfig'" />
-            <about v-if="activeMenu === 'about'" />
-            <logoutConfig v-if="activeMenu === 'logoutConfig'" />
-            <memoryConfig v-if="activeMenu === 'memoryConfig'" />
-            <fileManagement v-if="activeMenu === 'fileManagement'" />
-            <workspaceConfig v-if="activeMenu === 'workspace'" />
-            <skillManagement v-if="activeMenu === 'skillManagement'" />
-            <devConfig v-if="activeMenu === 'devConfig'" />
-            <modelMap v-if="activeMenu === 'modelMap'" />
-          </template>
+          <uiConfig v-if="activeMenu === 'ui'" />
+          <languageConfig v-if="activeMenu === 'language'" />
+          <vendorConfig v-if="activeMenu === 'vendorConfig'" />
+          <requestConfig v-if="activeMenu === 'requestConfig'" />
+          <loginConfig v-if="activeMenu === 'loginConfig'" />
+          <agentConfog v-if="activeMenu === 'agentConfog'" />
+          <promptManage v-if="activeMenu === 'promptManage'" />
+          <otherConfig v-if="activeMenu === 'otherConfig'" />
+          <dbConfig v-if="activeMenu === 'dbConfig'" />
+          <about v-if="activeMenu === 'about'" />
+          <logoutConfig v-if="activeMenu === 'logoutConfig'" />
+          <memoryConfig v-if="activeMenu === 'memoryConfig'" />
+          <fileManagement v-if="activeMenu === 'fileManagement'" />
+          <workspaceConfig v-if="activeMenu === 'workspace'" />
+          <skillManagement v-if="activeMenu === 'skillManagement'" />
+          <devConfig v-if="activeMenu === 'devConfig'" />
+          <modelMap v-if="activeMenu === 'modelMap'" />
         </div>
       </div>
     </div>

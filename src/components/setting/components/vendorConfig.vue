@@ -30,6 +30,10 @@
     <!-- 右侧配置面板 -->
     <div v-if="currentVendor" class="modelParameter">
       <div class="configuration">
+        <div v-if="textTestError" class="testPanelError">
+          <t-alert theme="error" :message="textTestError" close @close="textTestError = ''" />
+          <t-button v-if="textTestTarget" variant="text" theme="primary" size="small" @click="retryTextTest">重试</t-button>
+        </div>
         <t-form :data="currentVendor" labelAlign="top">
           <div class="infoBox ac jb">
             <span class="idBox">#{{ currentVendor.id }}</span>
@@ -243,10 +247,10 @@
 
     <!-- 文本模型测试弹窗 -->
     <TextModelTest
-      v-if="testingModel?.type === 'text' && textTestVisible"
-      v-model:modelVisible="textTestVisible"
-      :vendorId="currentVendor!.id"
-      :modelName="testingModel.modelName" />
+      v-if="textTestTarget && textTestVisible"
+      v-model:visible="textTestVisible"
+      :vendorId="textTestTarget.vendorId"
+      :modelName="textTestTarget.modelName" />
 
     <!-- 图像模型测试弹窗 -->
     <ImageModelTest
@@ -351,6 +355,7 @@ import VENDOR_CODE_TEMPLATE from "@/lib/vendorTemplate.ts?raw";
 import { providersLogo, modelProviderRules } from "@/utils/providersLogo";
 import type { UploadFile } from "tdesign-vue-next";
 import { LoadingPlugin } from "tdesign-vue-next";
+import { onErrorCaptured } from "vue";
 import settingStore from "@/stores/setting";
 import TextModelTest from "./vendorTest/TextModelTest.vue";
 import ImageModelTest from "./vendorTest/ImageModelTest.vue";
@@ -393,6 +398,12 @@ interface VideoModel {
 }
 
 type VendorModel = TextModel | ImageModel | VideoModel;
+
+interface TextTestTarget {
+  type: "text";
+  vendorId: string;
+  modelName: string;
+}
 
 interface VendorInput {
   key: string;
@@ -550,9 +561,28 @@ let pendingAutoSave = false;
 
 // ── 测试弹窗状态 ──
 const testingModel = ref<VendorModel | null>(null);
+const textTestTarget = shallowRef<Readonly<TextTestTarget> | null>(null);
 const textTestVisible = ref(false);
 const imageTestVisible = ref(false);
 const videoTestVisible = ref(false);
+const textTestError = ref("");
+
+function retryTextTest() {
+  if (!textTestTarget.value) return;
+  textTestError.value = "";
+  textTestVisible.value = true;
+}
+
+onErrorCaptured((error, _instance, info) => {
+  if (textTestVisible.value) {
+    console.error("[vendorConfig] text model test panel error", { error, info, target: textTestTarget.value });
+    textTestVisible.value = false;
+    textTestError.value = "测试面板打开失败，请重试。";
+    return false;
+  }
+
+  return undefined;
+});
 
 function getInputIcon(type: VendorInput["type"]) {
   if (type === "password") return "secured";
@@ -994,10 +1024,22 @@ function handleEditModel(model: VendorModel) {
 }
 
 function handleTestModel(item: (typeof vendorModels.value)[number]) {
-  testingModel.value = item;
   if (item.type === "text") {
+    const vendorId = currentVendor.value?.id?.trim();
+    const modelName = item.modelName?.trim();
+    if (!vendorId || !modelName) {
+      window.$message.error("模型测试缺少供应商或模型标识");
+      return;
+    }
+
+    textTestTarget.value = Object.freeze({ type: "text", vendorId, modelName });
+    textTestError.value = "";
     textTestVisible.value = true;
-  } else if (item.type === "image") {
+    return;
+  }
+
+  testingModel.value = item;
+  if (item.type === "image") {
     imageTestVisible.value = true;
   } else if (item.type === "video") {
     videoTestVisible.value = true;
@@ -1263,6 +1305,13 @@ function handleFileChange(e: Event) {
 
 <style lang="scss" scoped>
 .modelServe {
+  .testPanelError {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0;
+  }
+
   width: 100%;
   height: 100%;
   display: flex;

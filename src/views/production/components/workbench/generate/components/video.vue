@@ -67,7 +67,53 @@
     destroy-on-close
     @close="handlePlayerClose">
     <div class="videoPlayerBox">
-      <video v-if="playingVideoSrc" :src="playingVideoSrc" controls autoplay class="videoPlayer" />
+      <video
+        v-if="playingVideoSrc"
+        ref="videoPlayerRef"
+        :src="playingVideoSrc"
+        playsinline
+        preload="metadata"
+        class="videoPlayer"
+        @loadedmetadata="handlePlayerLoadedMetadata"
+        @timeupdate="handlePlayerTimeUpdate"
+        @play="handlePlayerPlay"
+        @pause="handlePlayerPause"
+        @ended="handlePlayerEnded"
+        @waiting="playerLoading = true"
+        @playing="handlePlayerPlaying"
+        @error="handlePlayerError" />
+
+      <div class="videoPlayerControls">
+        <t-button
+          class="playerControlButton"
+          theme="default"
+          variant="text"
+          shape="circle"
+          :disabled="Boolean(playerError) || !playingVideoSrc"
+          :aria-label="playerPlaying ? '暂停视频' : '播放视频'"
+          @click="toggleVideoPlayer">
+          <i-pause v-if="playerPlaying" size="18" />
+          <i-play v-else size="18" />
+        </t-button>
+
+        <input
+          class="playerProgress"
+          type="range"
+          min="0"
+          :max="playerDuration || 0"
+          :value="playerCurrentTime"
+          step="0.01"
+          :disabled="Boolean(playerError) || playerDuration <= 0"
+          aria-label="视频播放进度"
+          @input="seekVideoPlayer" />
+
+        <span class="playerTime">{{ formatPlayerTime(playerCurrentTime) }} / {{ formatPlayerTime(playerDuration) }}</span>
+      </div>
+
+      <div v-if="playerStatusText" class="videoPlayerFeedback" :class="{ error: playerError }">
+        <t-loading v-if="playerLoading" size="16px" />
+        <span>{{ playerStatusText }}</span>
+      </div>
     </div>
   </t-dialog>
 </template>
@@ -100,7 +146,21 @@ const selectVideoId = ref<number>();
 const videoCoverMap = ref<Record<string, string>>({});
 const videoPlayerVisible = ref(false);
 const playingVideoSrc = ref<string>();
+const videoPlayerRef = ref<HTMLVideoElement>();
+const playerDuration = ref(0);
+const playerCurrentTime = ref(0);
+const playerPlaying = ref(false);
+const playerLoading = ref(false);
+const playerError = ref("");
+const playerAutoplayBlocked = ref(false);
 const downloadingSet = new Set<string>();
+
+const playerStatusText = computed(() => {
+  if (playerError.value) return playerError.value;
+  if (playerLoading.value) return "正在加载视频…";
+  if (playerAutoplayBlocked.value) return "自动播放受限，请点击播放";
+  return "";
+});
 
 function getVideoStatus(video: VideoItem) {
   return normalizeTaskStatus(video.status ?? video.state, "pending");
@@ -232,13 +292,115 @@ function handlePreviewSeeked(event: Event, src: string) {
   el.style.display = "none";
 }
 
-function openVideoPlayer(video: VideoItem) {
+function formatPlayerTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "00:00";
+  const totalSeconds = Math.floor(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainderSeconds = totalSeconds % 60;
+  const minutePart = String(minutes).padStart(2, "0");
+  const secondPart = String(remainderSeconds).padStart(2, "0");
+  return hours > 0 ? `${String(hours).padStart(2, "0")}:${minutePart}:${secondPart}` : `${minutePart}:${secondPart}`;
+}
+
+function resetVideoPlayer() {
+  videoPlayerRef.value?.pause();
+  playerDuration.value = 0;
+  playerCurrentTime.value = 0;
+  playerPlaying.value = false;
+  playerLoading.value = false;
+  playerError.value = "";
+  playerAutoplayBlocked.value = false;
+}
+
+async function startVideoPlayer(isAutoplay = false) {
+  const player = videoPlayerRef.value;
+  if (!player || playerError.value) return;
+  playerAutoplayBlocked.value = false;
+  try {
+    if (player.ended) player.currentTime = 0;
+    await player.play();
+  } catch (error) {
+    console.warn("Video preview playback was blocked", error);
+    playerPlaying.value = false;
+    playerLoading.value = false;
+    if (isAutoplay) {
+      playerAutoplayBlocked.value = true;
+    } else {
+      playerError.value = "无法开始播放，请检查视频地址或格式";
+    }
+  }
+}
+
+function toggleVideoPlayer() {
+  const player = videoPlayerRef.value;
+  if (!player || playerError.value) return;
+  if (player.paused) {
+    void startVideoPlayer();
+  } else {
+    player.pause();
+  }
+}
+
+function seekVideoPlayer(event: Event) {
+  const nextTime = Number((event.target as HTMLInputElement).value);
+  const player = videoPlayerRef.value;
+  if (!player || !Number.isFinite(nextTime)) return;
+  player.currentTime = nextTime;
+  playerCurrentTime.value = nextTime;
+}
+
+function handlePlayerLoadedMetadata(event: Event) {
+  const player = event.target as HTMLVideoElement;
+  playerDuration.value = Number.isFinite(player.duration) ? player.duration : 0;
+  playerCurrentTime.value = Number.isFinite(player.currentTime) ? player.currentTime : 0;
+  playerLoading.value = false;
+}
+
+function handlePlayerTimeUpdate(event: Event) {
+  const player = event.target as HTMLVideoElement;
+  playerCurrentTime.value = Number.isFinite(player.currentTime) ? player.currentTime : 0;
+}
+
+function handlePlayerPlay() {
+  playerPlaying.value = true;
+  playerLoading.value = false;
+  playerAutoplayBlocked.value = false;
+}
+
+function handlePlayerPause() {
+  playerPlaying.value = false;
+}
+
+function handlePlayerEnded() {
+  playerPlaying.value = false;
+  playerCurrentTime.value = playerDuration.value;
+}
+
+function handlePlayerPlaying() {
+  playerPlaying.value = true;
+  playerLoading.value = false;
+  playerAutoplayBlocked.value = false;
+}
+
+function handlePlayerError() {
+  playerLoading.value = false;
+  playerPlaying.value = false;
+  playerError.value = "视频加载失败，请检查视频地址或格式";
+}
+
+async function openVideoPlayer(video: VideoItem) {
   if (!video.src) return;
+  resetVideoPlayer();
   playingVideoSrc.value = video.src;
   videoPlayerVisible.value = true;
+  playerLoading.value = true;
+  await nextTick();
+  void startVideoPlayer(true);
 }
 
 function handlePlayerClose() {
+  resetVideoPlayer();
   playingVideoSrc.value = undefined;
 }
 
@@ -356,15 +518,71 @@ watch(
 
 .videoPlayerBox {
   display: flex;
+  flex-direction: column;
   justify-content: center;
   align-items: center;
   background: #000;
   border-radius: 4px;
   overflow: hidden;
+  width: 100%;
   .videoPlayer {
+    display: block;
     width: 100%;
     max-height: 450px;
     outline: none;
+  }
+  .videoPlayerControls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 48px;
+    padding: 8px 12px;
+    box-sizing: border-box;
+    color: #fff;
+    background: #161b22;
+  }
+  .playerControlButton {
+    flex: 0 0 auto;
+    color: #fff;
+    &:not(:disabled):hover {
+      color: var(--td-brand-color);
+      background: rgba(255, 255, 255, 0.12);
+    }
+  }
+  .playerProgress {
+    flex: 1;
+    min-width: 0;
+    height: 4px;
+    margin: 0;
+    accent-color: var(--td-brand-color);
+    cursor: pointer;
+    &:disabled {
+      cursor: not-allowed;
+    }
+  }
+  .playerTime {
+    flex: 0 0 auto;
+    min-width: 86px;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.82);
+    text-align: right;
+    white-space: nowrap;
+  }
+  .videoPlayerFeedback {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 6px 12px 8px;
+    box-sizing: border-box;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.78);
+    background: #161b22;
+    &.error {
+      color: var(--td-error-color);
+    }
   }
 }
 
