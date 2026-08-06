@@ -12,6 +12,9 @@
               <t-tag v-if="item.factStatus && item.factStatus !== 'ready'" class="frameFactTag" size="small" :theme="getFactStatusTheme(item.factStatus)" variant="light">
                 {{ getFactStatusLabel(item.factStatus) }}
               </t-tag>
+              <t-tag v-if="item.imageStale" class="frameFactTag" size="small" theme="warning" variant="light">
+                {{ $t("workbench.production.node.storyboard.imageStale") }}
+              </t-tag>
             </div>
             <div
               v-if="getStoryboardImageUrl(item, 'display') && isStoryboardCompleted(item)"
@@ -38,6 +41,16 @@
               <t-button size="small" shape="circle" @click="emit('editStoryboardImage', item, [getStoryboardImageUrl(item, 'preview') || ''])">
                 <template #icon><i-edit /></template>
               </t-button>
+              <t-tooltip content="编辑分镜图 Prompt">
+                <t-button size="small" shape="circle" @click="emit('openPromptEditor', item)">
+                  <template #icon><i-edit-one /></template>
+                </t-button>
+              </t-tooltip>
+              <t-tooltip content="编辑正式分镜事实">
+                <t-button size="small" shape="circle" @click="emit('openFactEditor', item)">
+                  <template #icon><i-notes /></template>
+                </t-button>
+              </t-tooltip>
               <t-button size="small" shape="circle" theme="danger" @click="emit('remove', item.id!)">
                 <template #icon><i-delete /></template>
               </t-button>
@@ -67,6 +80,8 @@ defineProps<{
 const emit = defineEmits<{
   "update:selectedIds": [ids: number[]];
   editStoryboardImage: [row: any, images: string[]];
+  openPromptEditor: [row: any];
+  openFactEditor: [row: any];
   regenerateSingleImage: [row: any];
   remove: [id: number];
   imageLoad: [src: string, event: Event];

@@ -149,6 +149,14 @@ function syncSelectedModelValue() {
   const flatOptions = optionsData.value.flatMap((item) => item.children);
   if (flatOptions.some((item) => `${item.id}:${item.value}` === current)) return;
 
+  // Music generation identifies a provider and its model as one execution key.
+  // Never migrate a removed provider to another provider's identically named model.
+  if (props.type === "music") {
+    selectValue.value = "";
+    window.dispatchEvent(new CustomEvent("toonflow:music-model-unavailable", { detail: { model: current } }));
+    return;
+  }
+
   const legacyModelName = getLegacyModelName(current);
   if (!legacyModelName) return;
 
@@ -159,6 +167,12 @@ function syncSelectedModelValue() {
     return;
   }
   selectValue.value = "";
+}
+
+onMounted(() => window.addEventListener("toonflow:music-model-catalog-refresh", handleCatalogRefresh));
+onBeforeUnmount(() => window.removeEventListener("toonflow:music-model-catalog-refresh", handleCatalogRefresh));
+function handleCatalogRefresh() {
+  if (props.type === "music") handleModelChange();
 }
 
 function getLegacyModelName(value: string) {

@@ -80,10 +80,12 @@ interface StoryboardItem {
   location?: string | null;
   timeOfDay?: string | null;
   sceneContinuityId?: string | null;
+  shotDescription?: string | null;
   picture?: string | null;
   action?: string | null;
   shotSize?: string | null;
   cameraMove?: string | null;
+  cameraAngle?: string | null;
   dialogue?: string | null;
   sound?: string | null;
   visibleEmotion?: string | null;
@@ -99,6 +101,9 @@ interface StoryboardItem {
   factStatus?: StoryboardFactStatus;
   factVersion?: number | null;
   factSource?: "storyboardTable" | "minimalFallback";
+  promptStale?: boolean;
+  imageStale?: boolean;
+  sourceTracked?: boolean;
   videoDesc?: string | null;
 }
 
@@ -109,6 +114,8 @@ interface TrackItem {
   groupName?: string | null;
   groupIntent?: string | null;
   beatId?: string | null;
+  videoPromptStale?: boolean;
+  sourceTracked?: boolean;
   musicPlan?: import("@/types/productionReview").TrackBgmSuggestion | null;
   reviewState?: import("@/types/productionReview").ProductionReviewState;
   reviewIssues?: import("@/types/productionReview").ProductionReviewSuggestion[];

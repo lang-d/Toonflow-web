@@ -1,12 +1,14 @@
 <template>
-  <div class="productionMusicV2">
+  <div class="productionMusicV2" :class="{ targetDurationOnly: modelCapabilities.durationControl === 'targetOnly' }">
     <header class="pageHeader">
       <div><h2>配乐导演</h2><p>项目音乐方向、可复用作品与本集用乐安排。</p></div>
       <t-space>
         <t-button variant="outline" :loading="loading" @click="loadAll"><template #icon><i-refresh /></template>刷新</t-button>
+        <t-button v-if="persistedMusicModel" variant="outline" :loading="modelDefaultSaving" @click="clearMusicDefault">清除默认音乐模型</t-button>
         <t-button variant="outline" @click="toggleAgent"><template #icon><i-message /></template>{{ agentVisible ? "收起 Agent" : "打开 Agent" }}</t-button>
       </t-space>
     </header>
+    <p v-if="durationHint && (activeStep === 'episode' || projectTab === 'works')" class="musicModelHint">{{ durationHint }}</p>
 
     <main class="directorLayout" :class="{ agentHidden: !agentVisible }">
       <section class="workspace">
@@ -42,16 +44,16 @@
               </aside>
 
               <section class="contextComposer">
-                <header class="composerHeader"><div><h3>{{ selectedLibraryItem?.title || "选择音乐作品" }}<template v-if="selectedEdition"> / {{ selectedEdition.title || selectedEdition.editionKey }}</template></h3><p v-if="selectedEdition">{{ selectedEdition.narrativePhase || "为当前叙事阶段制作可试听版本" }}</p><p v-else>从左侧选择一个编曲版本，再编辑 Prompt 并生成候选音频。</p></div><t-space v-if="selectedEdition"><t-tag variant="light" :theme="productionVoiceMode === 'vocal' ? 'warning' : 'primary'">{{ vocalModeLabel(productionVoiceMode) }}</t-tag><modelSelect v-if="promptMode === 'modelSpecific'" v-model="musicModel" class="modelSelect" type="music" change-config @change="handleModelChange" /><t-button size="small" variant="outline" @click="loadProductionData">刷新</t-button></t-space></header>
+                <header class="composerHeader"><div><h3>{{ selectedLibraryItem?.title || "选择音乐作品" }}<template v-if="selectedEdition"> / {{ selectedEdition.title || selectedEdition.editionKey }}</template></h3><p v-if="selectedEdition">{{ selectedEdition.narrativePhase || "为当前叙事阶段制作可试听版本" }}</p><p v-else>从左侧选择一个编曲版本，再编辑 Prompt 并生成候选音频。</p></div><t-space v-if="selectedEdition"><t-tag variant="light" :theme="productionVoiceMode === 'vocal' ? 'warning' : 'primary'">{{ vocalModeLabel(productionVoiceMode) }}</t-tag><modelSelect v-model="musicModel" class="modelSelect" type="music" change-config @change="handleModelChange" /><t-button size="small" variant="outline" @click="loadProductionData">刷新</t-button></t-space></header>
                 <EmptyState v-if="!selectedEdition" text="选择一个编曲版本后，可在这里完成 Prompt、生成、试听与选版。" />
                 <template v-else>
                   <div v-if="selectedEdition.vocalMode === 'optional'" class="modeChooser"><span>本次制作</span><t-radio-group v-model="optionalVocalMode" variant="default-filled"><t-radio-button value="instrumental">纯音乐</t-radio-button><t-radio-button value="vocal">人声</t-radio-button></t-radio-group></div>
                   <section class="composerFlow" :class="{ candidateRail: !agentVisible }">
                     <div class="editorStack">
                       <article v-if="showLyricsEditor" class="panel lyricsPanel"><header class="panelHeader"><div><h4>歌词版本</h4><p>当前为人声制作。确认歌词后，重新编译 Prompt 才会写入精确关联。</p></div><t-button size="small" variant="outline" :loading="busy.lyrics" @click="submitLyricsGenerate">生成草稿</t-button></header><t-select v-model="selectedLyricsId" :options="lyricsOptions" clearable placeholder="选择已保存歌词" @change="loadSelectedLyrics" /><t-textarea v-model="lyricsDraft" :autosize="{ minRows: 6, maxRows: 12 }" placeholder="输入或编辑歌词正文" /><div class="inlineActions"><t-button size="small" :disabled="!lyricsDraft.trim()" @click="saveLyricsDraft">保存为新版本</t-button><t-button size="small" variant="outline" :disabled="!selectedLyrics || selectedLyrics.state === 'confirmed' || selectedLyrics.reviewStatus === 'blocked'" @click="confirmSelectedLyrics">确认歌词</t-button><StatusTag v-if="selectedLyrics" :status="selectedLyrics.reviewStatus" /></div></article>
-                      <article class="panel promptPanel"><header class="panelHeader"><div><h4>模型专用 Prompt</h4><p>{{ promptContextDescription }}</p></div><t-space><t-button size="small" :disabled="!canCompilePrompt" :loading="busy.compile" @click="submitCompilePrompt">编译 Prompt</t-button><t-button size="small" variant="outline" :disabled="!selectedPrompt" :loading="busy.promptReview" @click="submitPromptReview">重新检查</t-button></t-space></header><t-radio-group v-model="promptMode" variant="default-filled"><t-radio-button value="generic">通用 Prompt</t-radio-button><t-radio-button value="modelSpecific">模型专用</t-radio-button></t-radio-group><p v-if="promptMode === 'generic'" class="promptHint">通用 Prompt 可保存和审核；模型专用编译交给配乐导演 Agent。</p><p v-else-if="promptRequiresRecompile" class="promptHint errorText">模型或 Profile 与当前版本不一致，请重新编译后使用新版本。</p><p v-else-if="selectedPrompt && !promptVocalCompatible" class="promptHint errorText">该历史 Prompt 与当前{{ vocalModeLabel(productionVoiceMode) }}制作不兼容，请重新编译，不会改写历史版本。</p><t-select v-model="selectedPromptId" :options="promptOptions" placeholder="选择 Prompt 版本" @change="loadSelectedPrompt" /><t-textarea v-model="promptDraft" :autosize="{ minRows: 8, maxRows: 16 }" placeholder="保存的 Prompt 正文" /><div class="promptSettings"><t-input-number v-model="promptDuration" :min="modelDurationMin" :max="modelDurationMax" :step="1" suffix="秒" /><t-input-number v-if="productionTarget === 'edition'" v-model="effectiveDuration" :min="1" :step="1" suffix="建议用乐秒数" /><span v-if="promptMode === 'modelSpecific' && modelCapabilities.durationRange">模型范围 {{ modelDurationMin }} - {{ modelDurationMax }} 秒</span></div><div class="inlineActions"><t-button size="small" :disabled="!canSavePrompt" @click="savePromptDraft">保存为新版本</t-button><StatusTag v-if="selectedPrompt" :status="selectedPrompt.reviewStatus" /><span v-if="selectedPrompt?.reviewStatus === 'warning'" class="warningText">生成前需明确确认警告</span></div></article>
+                      <article class="panel promptPanel"><header class="panelHeader"><div><h4>创作 Prompt</h4><p>{{ promptContextDescription }}</p></div><t-space><t-button size="small" :disabled="!canCompilePrompt" :loading="busy.compile" @click="submitCompilePrompt">编译 Prompt</t-button><t-button size="small" variant="outline" :disabled="!selectedPrompt" :loading="busy.promptReview" @click="submitPromptReview">重新检查</t-button></t-space></header><p v-if="recommendedModelLabel" class="promptHint">建议模型：{{ recommendedModelLabel }}。可直接切换其他模型生成。</p><p v-if="selectedPrompt && !promptVocalCompatible" class="promptHint errorText">该 Prompt 与当前{{ vocalModeLabel(productionVoiceMode) }}制作不兼容，请选择对应制作方式或 Prompt 版本。</p><t-select v-model="selectedPromptId" :options="promptOptions" placeholder="选择 Prompt 版本" @change="loadSelectedPrompt" /><t-textarea v-model="promptDraft" :autosize="{ minRows: 8, maxRows: 16 }" placeholder="保存的 Prompt 正文" /><div class="promptSettings"><t-input-number v-model="promptDuration" :min="modelDurationMin" :max="modelDurationMax" :step="1" suffix="秒" /><t-input-number v-if="productionTarget === 'edition'" v-model="effectiveDuration" :min="1" :step="1" suffix="建议用乐秒数" /><span v-if="modelCapabilities.durationRange">当前模型范围 {{ modelDurationMin }} - {{ modelDurationMax }} 秒</span></div><div class="inlineActions"><t-button size="small" :disabled="!canSavePrompt" @click="savePromptDraft">保存为新版本</t-button><StatusTag v-if="selectedPrompt" :status="selectedPrompt.reviewStatus" /><span v-if="selectedPrompt?.reviewStatus === 'warning'" class="warningText">生成前需明确确认警告</span></div></article>
                     </div>
-                    <article class="panel candidatePanel"><header class="panelHeader"><div><h4>候选音频</h4><p>{{ generationDescription }}</p></div><t-space><t-checkbox v-if="selectedPrompt?.reviewStatus === 'warning'" v-model="acknowledgeWarnings">已了解审阅警告</t-checkbox><t-button theme="primary" :disabled="!canGenerate" :loading="busy.generate" @click="submitGenerate">生成候选音频</t-button></t-space></header><ReviewList :reviews="promptReviews" compact /><div v-if="candidateOutcome" class="candidateOutcome"><strong>本次生成</strong><span>已保存 {{ candidateOutcome.candidateCount }} 个候选版本，请试听后手动选版。</span><small v-if="candidateOutcome.failedCount">另有 {{ candidateOutcome.failedCount }} 个候选未保存：{{ candidateOutcome.failedSummary }}</small></div><div v-if="productionVersions.length" class="versionList"><article v-for="version in productionVersions" :key="versionKey(version)" class="audioVersion"><div><strong>v{{ version.version || version.id }}</strong><StatusTag :status="version.state" /><span class="sourceTag">{{ version.lyricsVersionId ? `歌词 v${version.lyricsVersionId}` : "纯音乐" }}</span><p v-if="version.errorReason" class="errorText">{{ version.errorReason }}</p><small>Prompt {{ version.promptVersionId || "-" }} · {{ version.generationDurationSec || version.effectiveMusicDurationSec || "-" }} 秒</small></div><div class="audioActions"><t-button v-if="hasPlayableAudio(version)" size="small" variant="outline" @click="openPreview(version)">试听</t-button><t-button v-if="version.state === 'complete' && hasPlayableAudio(version)" size="small" variant="outline" :loading="busy[downloadBusyKey('libraryVersion', version.id)]" @click="downloadProductionVersion('libraryVersion', version)">下载</t-button><t-button v-else-if="version.state === 'complete'" size="small" variant="outline" disabled>暂无音频</t-button><t-button size="small" :disabled="version.state !== 'complete' || isSelectedVersion(version)" @click="selectProductionVersion(version)">选为当前版本</t-button><t-button v-if="version.state === 'complete' && hasPlayableAudio(version)" size="small" variant="outline" @click="openTrim(version as MusicLibraryVersion)">截取</t-button></div></article></div><EmptyState v-else text="审核通过后生成多个候选音频，系统不会自动替你选版。" compact /></article>
+                    <article class="panel candidatePanel"><header class="panelHeader"><div><h4>候选音频</h4><p>{{ generationDescription }}</p><small v-if="musicModel">本次生成模型：{{ modelNameOf(musicModel) }}</small></div><t-space><t-checkbox v-if="selectedPrompt?.reviewStatus === 'warning'" v-model="acknowledgeWarnings">已了解审阅警告</t-checkbox><t-button theme="primary" :disabled="!canGenerate" :loading="busy.generate" @click="submitGenerate">生成候选音频</t-button></t-space></header><ReviewList :reviews="promptReviews" compact /><div v-if="candidateOutcome" class="candidateOutcome"><strong>本次生成</strong><span>已保存 {{ candidateOutcome.candidateCount }} 个候选版本，请试听后手动选版。</span><small v-if="candidateOutcome.failedCount">另有 {{ candidateOutcome.failedCount }} 个候选未保存：{{ candidateOutcome.failedSummary }}</small></div><div v-if="productionVersions.length" class="versionList"><article v-for="version in productionVersions" :key="versionKey(version)" class="audioVersion"><div><strong>v{{ version.version || version.id }}</strong><StatusTag :status="version.state" /><span class="sourceTag">{{ version.lyricsVersionId ? `歌词 v${version.lyricsVersionId}` : "纯音乐" }}</span><span v-if="version.model" class="sourceTag">模型 {{ modelNameOf(String(version.model)) }}</span><p v-if="version.errorReason" class="errorText">{{ version.errorReason }}</p><small>Prompt {{ version.promptVersionId || "-" }} · {{ version.generationDurationSec || version.effectiveMusicDurationSec || "-" }} 秒</small></div><div class="audioActions"><t-button v-if="hasPlayableAudio(version)" size="small" variant="outline" @click="openPreview(version)">试听</t-button><t-button v-if="version.state === 'complete' && hasPlayableAudio(version)" size="small" variant="outline" :loading="busy[downloadBusyKey('libraryVersion', version.id)]" @click="downloadProductionVersion('libraryVersion', version)">下载</t-button><t-button v-else-if="version.state === 'complete'" size="small" variant="outline" disabled>暂无音频</t-button><t-button size="small" :disabled="version.state !== 'complete' || isSelectedVersion(version)" @click="selectProductionVersion(version)">选为当前版本</t-button><t-button v-if="version.state === 'complete' && hasPlayableAudio(version)" size="small" variant="outline" @click="openTrim(version as MusicLibraryVersion)">截取</t-button></div></article></div><EmptyState v-else text="审核通过后生成多个候选音频，系统不会自动替你选版。" compact /></article>
                   </section>
                 </template>
               </section>
@@ -67,6 +69,7 @@
               <aside class="contextRail cueRail"><header><div><h3>本集用乐段落</h3><small>{{ cues.length }} 个 Cue</small></div></header><button v-for="cue in cues" :key="cue.id" type="button" class="cueSelect" :class="{ selected: selectedCueId === cue.id }" @click="openCueWorkspace(cue.id)"><span>{{ cue.cueKey || `Cue ${cue.id}` }}</span><strong>{{ cue.title || "未命名用乐段落" }}</strong><small>{{ cue.binding?.suggestedUseDurationSec || cue.estimatedDurationSec || "-" }} 秒</small><t-tag size="small" :theme="usageTheme(cue.usageMode)" variant="light">{{ usageLabel(cue.usageMode) }}</t-tag></button></aside>
               <section class="contextComposer"><EmptyState v-if="!selectedCue" text="从左侧选择一个用乐段落。" /><template v-else><header class="composerHeader"><div><h3>{{ selectedCue.cueKey || `Cue ${selectedCue.id}` }} · {{ selectedCue.title || "未命名用乐段落" }}</h3><p>{{ refText(selectedCue.startRef) }} → {{ refText(selectedCue.endRef) }} · 建议 {{ selectedCue.binding?.suggestedUseDurationSec || selectedCue.estimatedDurationSec || "-" }} 秒</p></div><t-button size="small" variant="text" @click="loadCues">刷新段落</t-button></header><t-radio-group :model-value="selectedCue.usageMode || 'new'" class="cueModeChooser" variant="default-filled" @change="handleCueUsageChange(selectedCue, $event)"><t-radio-button value="reuse">复用项目版本</t-radio-button><t-radio-button value="new">新做音频</t-radio-button><t-radio-button value="silence">静音</t-radio-button></t-radio-group><section v-if="selectedCue.usageMode === 'reuse'" class="bindingSurface"><h4>复用项目版本</h4><p>选择已完成的项目编曲版本，并显式绑定到本段。</p><t-select v-model="cueBindingDraft[selectedCue.id].editionId" :options="editionOptions" placeholder="选择编曲版本" @change="() => resetCueVersion(selectedCue!.id)" /><t-select v-if="cueBindingDraft[selectedCue.id].editionId" v-model="cueBindingDraft[selectedCue.id].libraryVersionId" :options="libraryVersionOptions(cueBindingDraft[selectedCue.id].editionId)" placeholder="选择可复用成品" /><t-input-number v-model="cueBindingDraft[selectedCue.id].duration" :min="1" :step="1" suffix="秒" /><t-button theme="primary" :loading="busy[`bind-${selectedCue.id}`]" @click="saveCueBinding(selectedCue)">保存复用安排</t-button></section><EmptyState v-else-if="selectedCue.usageMode === 'silence'" text="静音段落不需要 Prompt 或音频生成。" /><template v-else><section class="bindingSurface"><h4>本段新做设置</h4><p>可关联一个项目编曲版本作为方向参考；保存后不会自动选择候选成品。</p><t-select v-model="cueBindingDraft[selectedCue.id].editionId" :options="editionOptions" placeholder="选择参考编曲版本" @change="() => resetCueVersion(selectedCue!.id)" /><t-input-number v-model="cueBindingDraft[selectedCue.id].duration" :min="1" :step="1" suffix="秒" /><t-button size="small" variant="outline" :loading="busy[`bind-${selectedCue.id}`]" @click="saveCueBinding(selectedCue)">保存本段安排</t-button></section><section class="composerFlow" :class="{ candidateRail: !agentVisible }"><div class="editorStack"><article class="panel promptPanel"><header class="panelHeader"><div><h4>本段模型专用 Prompt</h4><p>本段生成只使用当前 Cue 的精确 Prompt，不与项目作品候选混用。</p></div><t-space><modelSelect v-if="promptMode === 'modelSpecific'" v-model="musicModel" class="modelSelect" type="music" change-config @change="handleModelChange" /><t-button size="small" :disabled="!canCompilePrompt" :loading="busy.compile" @click="submitCompilePrompt">编译 Prompt</t-button></t-space></header><t-radio-group v-model="promptMode" variant="default-filled"><t-radio-button value="generic">通用 Prompt</t-radio-button><t-radio-button value="modelSpecific">模型专用</t-radio-button></t-radio-group><p v-if="promptMode === 'generic'" class="promptHint">通用 Prompt 可保存和审核；模型专用编译交给配乐导演 Agent。</p><p v-else-if="promptRequiresRecompile" class="promptHint errorText">模型或 Profile 与当前版本不一致，请重新编译后使用新版本。</p><t-select v-model="selectedPromptId" :options="promptOptions" placeholder="选择 Prompt 版本" @change="loadSelectedPrompt" /><t-textarea v-model="promptDraft" :autosize="{ minRows: 8, maxRows: 16 }" placeholder="保存的 Prompt 正文" /><div class="promptSettings"><t-input-number v-model="promptDuration" :min="modelDurationMin" :max="modelDurationMax" :step="1" suffix="秒" /></div><div class="inlineActions"><t-button size="small" :disabled="!canSavePrompt" @click="savePromptDraft">保存为新版本</t-button><t-button size="small" variant="outline" :disabled="!selectedPrompt" :loading="busy.promptReview" @click="submitPromptReview">重新检查</t-button><StatusTag v-if="selectedPrompt" :status="selectedPrompt.reviewStatus" /></div></article></div><article class="panel candidatePanel"><header class="panelHeader"><div><h4>本段候选音频</h4><p>{{ generationDescription }}</p></div><t-space><t-checkbox v-if="selectedPrompt?.reviewStatus === 'warning'" v-model="acknowledgeWarnings">已了解审阅警告</t-checkbox><t-button theme="primary" :disabled="!canGenerate" :loading="busy.generate" @click="submitGenerate">生成本段候选音频</t-button></t-space></header><ReviewList :reviews="promptReviews" compact /><div v-if="candidateOutcome" class="candidateOutcome"><strong>本次生成</strong><span>已保存 {{ candidateOutcome.candidateCount }} 个候选版本，请试听后手动选版。</span><small v-if="candidateOutcome.failedCount">另有 {{ candidateOutcome.failedCount }} 个候选未保存：{{ candidateOutcome.failedSummary }}</small></div><div v-if="productionVersions.length" class="versionList"><article v-for="version in productionVersions" :key="versionKey(version)" class="audioVersion"><div><strong>候选 {{ version.version || version.id }}</strong><StatusTag :status="version.state" /><p v-if="version.errorReason" class="errorText">{{ version.errorReason }}</p><small>Prompt {{ version.promptVersionId || "-" }} · {{ selectedCue.binding?.suggestedUseDurationSec || selectedCue.estimatedDurationSec || "-" }} 秒</small></div><div class="audioActions"><t-button v-if="hasPlayableAudio(version)" size="small" variant="outline" @click="openPreview(version)">试听</t-button><t-button v-if="version.state === 'complete' && hasPlayableAudio(version)" size="small" variant="outline" :loading="busy[downloadBusyKey('cueAsset', version.id)]" @click="downloadProductionVersion('cueAsset', version)">下载</t-button><t-button v-else-if="version.state === 'complete'" size="small" variant="outline" disabled>暂无音频</t-button><t-button size="small" :disabled="version.state !== 'complete' || isSelectedVersion(version)" @click="selectProductionVersion(version)">选为本段版本</t-button></div></article></div><EmptyState v-else text="审核通过后生成候选音频，再显式选为本段版本。" compact /></article></section></template></template></section>
             </section>
+            <p v-if="activeStep === 'episode' && cueCandidateModels.length" class="cueCandidateModels">本段候选实际模型：{{ cueCandidateModels.join('、') }}</p>
           </section>
         </t-loading>
       </section>
@@ -96,7 +99,7 @@ import { useMusicProductionAgentStore } from "@/stores/musicProductionAgent";
 import { getPlayableMediaUrl } from "@/utils/mediaRef";
 import axios from "@/utils/axios";
 import {
-  bindMusicCue, compileMusicCuePrompt, compileMusicLibraryPrompt, confirmMusicLyrics, createMusicLibraryItem, downloadMusicCandidate, generateMusicBible, generateMusicCueAudio, generateMusicLibraryAudio, generateMusicLyrics, generateMusicPlan, getMusicBibleDetail, getMusicLibraryDetail, getMusicPlanDetail, listMusicBibles, listMusicCuePrompts, listMusicCues, listMusicLibrary, listMusicLibraryPrompts, listMusicLyrics, listMusicPlans, reviewMusicBible, reviewMusicCuePrompt, reviewMusicLibraryPrompt, reviewMusicPlan, saveMusicCuePrompt, saveMusicLibraryEdition, saveMusicLibraryPrompt, saveMusicLyrics, selectMusicCueAsset, selectMusicLibraryVersion, trimMusicLibraryVersion,
+  bindMusicCue, compileMusicCuePrompt, compileMusicLibraryPrompt, confirmMusicLyrics, createMusicLibraryItem, downloadMusicCandidate, generateMusicBible, generateMusicCueAudio, generateMusicLibraryAudio, generateMusicLyrics, generateMusicPlan, getMusicBibleDetail, getMusicDefaultModel, getMusicLibraryDetail, getMusicPlanDetail, listMusicBibles, listMusicCuePrompts, listMusicCues, listMusicLibrary, listMusicLibraryPrompts, listMusicLyrics, listMusicPlans, reviewMusicBible, reviewMusicCuePrompt, reviewMusicLibraryPrompt, reviewMusicPlan, saveMusicCuePrompt, saveMusicLibraryEdition, saveMusicLibraryPrompt, saveMusicLyrics, selectMusicCueAsset, selectMusicLibraryVersion, setMusicDefaultModel, trimMusicLibraryVersion,
   type MusicBible, type MusicCue, type MusicCueAsset, type MusicDownloadTargetType, type MusicLibraryEdition, type MusicLibraryItem, type MusicLibraryVersion, type MusicLyricsVersion, type MusicModelCapabilities, type MusicPlan, type MusicPlanMode, type MusicPromptMode, type MusicPromptVersion, type MusicTaskEnvelope, type MusicUsageMode,
 } from "@/api/productionMusic";
 import { listProductionReviews } from "@/api/productionReview";
@@ -125,7 +128,7 @@ let bibleScrollContainer: HTMLElement | null = null;
 const projectPlanMode = ref<Extract<MusicPlanMode, "concept" | "project">>("project"); const plans = ref<MusicPlan[]>([]); const selectedPlanId = ref<number>(); const selectedPlan = ref<MusicPlan | null>(null); const planReviews = ref<ProductionReviewSuggestion[]>([]);
 const scriptOptions = ref<Array<{ label: string; value: number }>>([]); const selectedScriptId = ref<number>(); const selectedEpisodePlanId = ref<number>(); const cues = ref<MusicCue[]>([]); const selectedCueId = ref<number>();
 const libraryItems = ref<MusicLibraryItem[]>([]); const selectedLibraryItemId = ref<number>(); const selectedLibraryItem = ref<MusicLibraryItem | null>(null); const selectedEditionId = ref<number>();
-const musicModel = ref(""); const modelCapabilities = ref<MusicModelCapabilities>({}); const productionTarget = ref<"edition" | "cue">("edition"); const promptMode = ref<MusicPromptMode>("modelSpecific"); const promptVersions = ref<MusicPromptVersion[]>([]); const selectedPromptId = ref<number>(); const selectedPrompt = ref<MusicPromptVersion | null>(null); const promptDraft = ref(""); const promptDuration = ref<number>(); const effectiveDuration = ref<number>(); const promptBaseGenerationConfig = ref<Record<string, unknown>>({}); const promptBaseModel = ref<string | null>(null); const promptProfileSource = ref<string | null>(null); const promptBaseDuration = ref<number>(); const promptBaseEffectiveDuration = ref<number>(); const lyricsVersions = ref<MusicLyricsVersion[]>([]); const selectedLyricsId = ref<number>(); const selectedLyrics = ref<MusicLyricsVersion | null>(null); const lyricsDraft = ref(""); const promptReviews = ref<ProductionReviewSuggestion[]>([]); const acknowledgeWarnings = ref(false);
+const musicModel = ref(""); const persistedMusicModel = ref<string | null>(null); const modelDefaultSaving = ref(false); const modelCapabilities = ref<MusicModelCapabilities>({}); let musicModelRequestId = 0; const productionTarget = ref<"edition" | "cue">("edition"); const promptMode = ref<MusicPromptMode>("modelSpecific"); const promptVersions = ref<MusicPromptVersion[]>([]); const selectedPromptId = ref<number>(); const selectedPrompt = ref<MusicPromptVersion | null>(null); const promptDraft = ref(""); const promptDuration = ref<number>(); const effectiveDuration = ref<number>(); const promptBaseGenerationConfig = ref<Record<string, unknown>>({}); const promptBaseDuration = ref<number>(); const promptBaseEffectiveDuration = ref<number>(); const lyricsVersions = ref<MusicLyricsVersion[]>([]); const selectedLyricsId = ref<number>(); const selectedLyrics = ref<MusicLyricsVersion | null>(null); const lyricsDraft = ref(""); const promptReviews = ref<ProductionReviewSuggestion[]>([]); const acknowledgeWarnings = ref(false);
 const cueBindingDraft = ref<Record<number, { editionId?: number; libraryVersionId?: number; duration?: number }>>({});
 const directBusy = ref<Record<string, boolean>>({});
 const taskOperations = ref<Record<string, string[]>>({});
@@ -165,6 +168,7 @@ const promptReviewTaskCount = computed(() => taskOperationCount("promptReview", 
 const promptReviewSubmittingCount = computed(() => promptTaskOwner.value ? promptReviewSubmittingOwners.value.filter((ownerKey) => ownerKey === promptTaskOwner.value).length : 0);
 const promptReviewPendingCount = computed(() => promptReviewTaskCount.value + promptReviewSubmittingCount.value);
 const productionVersions = computed<Array<MusicLibraryVersion | MusicCueAsset>>(() => productionTarget.value === "edition" ? selectedEdition.value?.versions || [] : selectedCue.value?.assets || []);
+const cueCandidateModels = computed(() => Array.from(new Set((selectedCue.value?.assets || []).map((asset) => String(asset.model || "").trim()).filter(Boolean))).map(modelNameOf));
 const productionVoiceMode = computed<"instrumental" | "vocal">(() => {
   if (productionTarget.value !== "edition") return "instrumental";
   const mode = selectedEdition.value?.vocalMode;
@@ -183,20 +187,31 @@ const promptOptions = computed(() => promptVersions.value.map((item) => {
 }));
 const lyricsOptions = computed(() => lyricsVersions.value.map((item) => ({ label: `v${item.version || item.id} · ${item.state || "draft"}`, value: item.id })));
 const modelDurationMin = computed(() => Number(modelCapabilities.value.durationRange?.min || 1)); const modelDurationMax = computed(() => Number(modelCapabilities.value.durationRange?.max || 999));
-const promptRequiresRecompile = computed(() => Boolean(promptMode.value === "modelSpecific" && (!selectedPrompt.value || selectedPrompt.value.promptMode !== "modelSpecific" || !promptProfileSource.value || promptBaseModel.value !== musicModel.value || selectedPrompt.value.profileSource !== promptProfileSource.value)));
-const canCompilePrompt = computed(() => Boolean(promptMode.value === "modelSpecific" && musicModel.value && productionContext.value && (!showLyricsEditor.value || activeConfirmedLyricsId.value)));
-const canSavePrompt = computed(() => Boolean(promptDraft.value.trim() && (!showLyricsEditor.value || activeConfirmedLyricsId.value) && (promptMode.value !== "modelSpecific" || (musicModel.value && !promptRequiresRecompile.value))));
-const canGenerate = computed(() => Boolean(!promptRequiresRecompile.value && promptVocalCompatible.value && selectedPrompt.value?.promptMode === "modelSpecific" && selectedPrompt.value.model && selectedPrompt.value.profileSource && ["passed", "warning"].includes(String(selectedPrompt.value.reviewStatus)) && (selectedPrompt.value.reviewStatus !== "warning" || acknowledgeWarnings.value)));
+const recommendedModelLabel = computed(() => {
+  const recommended = selectedPrompt.value?.model;
+  if (!recommended) return "";
+  return modelNameOf(recommended);
+});
+// Kept only for the legacy Cue template until it is split into components. It is
+// never true, and no longer controls saving, review, or generation.
+const promptRequiresRecompile = computed(() => false);
+const canCompilePrompt = computed(() => Boolean(productionContext.value && (!showLyricsEditor.value || activeConfirmedLyricsId.value)));
+const canSavePrompt = computed(() => Boolean(promptDraft.value.trim() && (!showLyricsEditor.value || activeConfirmedLyricsId.value)));
+const canGenerate = computed(() => Boolean(promptVocalCompatible.value && selectedPrompt.value && ["passed", "warning"].includes(String(selectedPrompt.value.reviewStatus)) && (selectedPrompt.value.reviewStatus !== "warning" || acknowledgeWarnings.value)));
+const durationHint = computed(() => modelCapabilities.value.durationControl === "targetOnly" && promptDuration.value ? `目标约 ${promptDuration.value} 秒，实际时长由模型决定` : modelCapabilities.value.durationRange ? `当前模型范围 ${modelDurationMin.value} - ${modelDurationMax.value} 秒` : "");
 const promptContextDescription = computed(() => productionTarget.value === "edition" ? productionVoiceMode.value === "vocal" ? `人声制作 · ${activeConfirmedLyricsId.value ? `已选歌词 v${selectedLyrics.value?.version || activeConfirmedLyricsId.value}` : "请先确认歌词"}` : "纯音乐制作 · 不会关联歌词版本" : "本段生成只使用当前 Cue 的精确 Prompt，不与项目作品候选混用。");
 const generationDescription = computed(() => {
   const prompt = selectedPrompt.value ? `Prompt v${selectedPrompt.value.version || selectedPrompt.value.id}` : "未选择 Prompt";
   if (productionTarget.value === "cue") return `${prompt} · 建议使用 ${selectedCue.value?.binding?.suggestedUseDurationSec || selectedCue.value?.estimatedDurationSec || "-"} 秒`;
-  return `${prompt} · ${productionVoiceMode.value === "vocal" ? `歌词 v${selectedPrompt.value?.lyricsVersionId || "-"}` : "纯音乐"} · 生成 ${promptDuration.value || "-"} 秒`;
+  const duration = modelCapabilities.value.durationControl === "targetOnly" ? `目标约 ${promptDuration.value || "-"} 秒` : `生成 ${promptDuration.value || "-"} 秒`;
+  return `${prompt} · ${productionVoiceMode.value === "vocal" ? `歌词 v${selectedPrompt.value?.lyricsVersionId || "-"}` : "纯音乐"} · ${duration}`;
 });
 const trimTargetLabel = computed(() => `版本 ${trimTarget.value?.version || trimTarget.value?.id || ""} 截取`);
 const trimDefaultClipEnd = computed(() => {
   const versionDuration = Number(trimTarget.value?.effectiveMusicDurationSec || 0);
-  if (Number.isFinite(versionDuration) && versionDuration > 0) return versionDuration;
+  const versionConfig = trimTarget.value?.generationConfig && typeof trimTarget.value.generationConfig === "object" ? trimTarget.value.generationConfig as Record<string, unknown> : {};
+  const requestedDuration = configNumber(versionConfig.durationSec) ?? promptDuration.value;
+  if (Number.isFinite(versionDuration) && versionDuration > 0) return requestedDuration ? Math.min(versionDuration, requestedDuration) : versionDuration;
   const cueDuration = Number(selectedCue.value?.binding?.suggestedUseDurationSec || selectedCue.value?.estimatedDurationSec || 0);
   return Number.isFinite(cueDuration) && cueDuration > 0 ? cueDuration : undefined;
 });
@@ -250,8 +265,9 @@ const ReviewList = defineComponent({
   },
 });
 
-onMounted(async () => { await loadScripts(); await loadAll(); });
-onBeforeUnmount(() => { bibleScrollContainer?.removeEventListener("scroll", syncActiveBibleHeading); releases.forEach((release) => release()); });
+onMounted(async () => { window.addEventListener("toonflow:music-model-unavailable", handleMusicModelUnavailable); await loadScripts(); await loadAll(); });
+onBeforeUnmount(() => { window.removeEventListener("toonflow:music-model-unavailable", handleMusicModelUnavailable); bibleScrollContainer?.removeEventListener("scroll", syncActiveBibleHeading); releases.forEach((release) => release()); });
+watch(projectId, (nextId, previousId) => { if (nextId && nextId !== previousId) void loadProjectMusicModel(); });
 watch([projectId, selectedScriptId, activeStep], () => { if (projectId.value) void restoreMusicAgent({ refreshAssets: true, restoreHistory: true }); }, { immediate: true });
 watch(productionTarget, () => void loadProductionData());
 watch(() => musicAgentStore.refreshRevision, () => { if (projectId.value) void refreshRecoveredTargets(); });
@@ -260,7 +276,48 @@ watch(() => musicAgentStore.socketRecoveryRevision, () => {
   void refreshMusicAssets().then(() => musicAgentStore.getHistory(musicAgentMode.value, projectId.value, musicAgentScriptId.value));
 });
 
-async function loadAll() { if (!projectId.value) return; loading.value = true; try { await restoreMusicAgent({ refreshAssets: true, restoreHistory: true }); } finally { loading.value = false; } }
+async function loadAll() { if (!projectId.value) return; loading.value = true; try { await loadProjectMusicModel(); await restoreMusicAgent({ refreshAssets: true, restoreHistory: true }); } finally { loading.value = false; } }
+async function loadMusicModelCapabilities(model: string) {
+  if (!model) { modelCapabilities.value = {}; return; }
+  try {
+    const { data } = await axios.post("/modelSelect/getModelDetail", { modelId: model });
+    if (musicModel.value === model) modelCapabilities.value = data || {};
+  } catch {
+    // The selector will validate the exact key against the fresh directory.
+    if (musicModel.value === model) modelCapabilities.value = {};
+  }
+}
+async function loadProjectMusicModel() {
+  const requestId = ++musicModelRequestId;
+  const currentProjectId = projectId.value;
+  if (!currentProjectId) { musicModel.value = ""; persistedMusicModel.value = null; modelCapabilities.value = {}; return; }
+  try {
+    const savedModel = await getMusicDefaultModel({ projectId: currentProjectId });
+    if (requestId !== musicModelRequestId || currentProjectId !== projectId.value) return;
+    persistedMusicModel.value = savedModel;
+    musicModel.value = savedModel || "";
+    await loadMusicModelCapabilities(musicModel.value);
+  } catch (error) {
+    if (requestId !== musicModelRequestId || currentProjectId !== projectId.value) return;
+    musicModel.value = "";
+    persistedMusicModel.value = null;
+    modelCapabilities.value = {};
+    window.$message.warning(error instanceof Error ? error.message : "读取项目默认音乐模型失败");
+  }
+}
+async function clearMusicDefault() {
+  if (!projectId.value || modelDefaultSaving.value) return;
+  modelDefaultSaving.value = true;
+  try {
+    const savedModel = await setMusicDefaultModel({ projectId: projectId.value, model: null });
+    persistedMusicModel.value = savedModel;
+    musicModel.value = "";
+    modelCapabilities.value = {};
+    window.$message.success("已清除项目默认音乐模型");
+  } catch (error) {
+    window.$message.error(error instanceof Error ? error.message : "清除项目默认音乐模型失败");
+  } finally { modelDefaultSaving.value = false; }
+}
 function toggleAgent() { agentVisible.value = !agentVisible.value; if (agentVisible.value && projectId.value) void restoreMusicAgent({ refreshAssets: true, restoreHistory: true }); }
 function openProjectDirection() { activeStep.value = "project"; projectTab.value = "direction"; productionTarget.value = "edition"; }
 function openWorksWorkspace() { activeStep.value = "project"; projectTab.value = "works"; productionTarget.value = "edition"; if (selectedEdition.value) void loadProductionData(); }
@@ -282,13 +339,11 @@ async function loadProductionData() { if (!projectId.value || !productionContext
 async function loadSelectedPrompt() {
   selectedPrompt.value = promptVersions.value.find((item) => item.id === selectedPromptId.value) || null;
   promptDraft.value = selectedPrompt.value?.prompt || "";
-  promptMode.value = selectedPrompt.value?.promptMode || "modelSpecific";
-  if (promptMode.value === "modelSpecific" && selectedPrompt.value?.model) musicModel.value = selectedPrompt.value.model;
-  if (promptMode.value === "generic") musicModel.value = "";
+  // Prompt mode and its historical model are metadata only. Never replace the
+  // user's current generation-model selection while browsing Prompt versions.
+  promptMode.value = "modelSpecific";
   const config = { ...(selectedPrompt.value?.generationConfig || {}) };
   promptBaseGenerationConfig.value = config;
-  promptBaseModel.value = selectedPrompt.value?.model || null;
-  promptProfileSource.value = selectedPrompt.value?.profileSource || null;
   promptDuration.value = configNumber(config.durationSec);
   effectiveDuration.value = configNumber(config.effectiveMusicDurationSec) ?? selectedCue.value?.binding?.suggestedUseDurationSec ?? selectedCue.value?.estimatedDurationSec ?? undefined;
   promptBaseDuration.value = promptDuration.value;
@@ -345,7 +400,7 @@ async function submitProjectPlan() { if (!selectedBible.value) return; const bib
 async function submitPlanReview() { if (!selectedPlan.value) return; const planId = selectedPlan.value.id; await runTask("planReview", taskOwner("plan", planId), () => reviewMusicPlan({ projectId: projectId.value, planId })); }
 async function submitEpisodePlan() { if (!selectedBible.value || !selectedScriptId.value) return; const bibleId = selectedBible.value.id; const scriptId = selectedScriptId.value; const instruction = await askInstruction("本集用乐要求（可选）"); if (instruction === null) return; await runTask("episodePlan", taskOwner("script", scriptId), () => generateMusicPlan({ projectId: projectId.value, mode: "episode", scriptId, bibleId, instruction: instruction || undefined })); }
 async function submitLyricsGenerate() { if (!selectedEdition.value) return; const editionId = selectedEdition.value.id; await runTask("lyrics", taskOwner("edition", editionId), () => generateMusicLyrics({ projectId: projectId.value, editionId, basedOnId: selectedLyrics.value?.id })); }
-async function submitCompilePrompt() { if (promptMode.value !== "modelSpecific") return window.$message.warning("通用 Prompt 请交给配乐导演 Agent 编译"); if (!canCompilePrompt.value) return window.$message.warning(showLyricsEditor.value ? "请先确认一版歌词" : "请先选择音乐模型"); const instruction = await askInstruction("本次 Prompt 编译要求（可选）"); if (instruction === null) return; if (productionTarget.value === "edition" && selectedEdition.value) { const editionId = selectedEdition.value.id; await runTask("compile", taskOwner("edition", editionId), () => compileMusicLibraryPrompt({ projectId: projectId.value, editionId, model: musicModel.value, instruction: instruction || undefined, requestedDurationSec: promptDuration.value, effectiveMusicDurationSec: effectiveDuration.value, lyricsVersionId: activeConfirmedLyricsId.value })); } else if (selectedCue.value) { const cueId = selectedCue.value.id; await runTask("compile", taskOwner("cue", cueId), () => compileMusicCuePrompt({ projectId: projectId.value, cueId, model: musicModel.value, instruction: instruction || undefined })); } }
+async function submitCompilePrompt() { if (!canCompilePrompt.value) return window.$message.warning(showLyricsEditor.value ? "请先确认一版歌词" : "请先选择音乐模型"); const instruction = await askInstruction("本次 Prompt 编译要求（可选）"); if (instruction === null) return; if (productionTarget.value === "edition" && selectedEdition.value) { const editionId = selectedEdition.value.id; await runTask("compile", taskOwner("edition", editionId), () => compileMusicLibraryPrompt({ projectId: projectId.value, editionId, model: musicModel.value, instruction: instruction || undefined, requestedDurationSec: promptDuration.value, effectiveMusicDurationSec: effectiveDuration.value, lyricsVersionId: activeConfirmedLyricsId.value })); } else if (selectedCue.value) { const cueId = selectedCue.value.id; await runTask("compile", taskOwner("cue", cueId), () => compileMusicCuePrompt({ projectId: projectId.value, cueId, model: musicModel.value, instruction: instruction || undefined })); } }
 async function submitPromptReview() {
   if (!selectedPrompt.value) return;
   const promptVersionId = selectedPrompt.value.id;
@@ -363,20 +418,17 @@ async function submitPromptReview() {
     endPromptReviewSubmission(ownerKey);
   }
 }
-async function submitGenerate() { if (!selectedPrompt.value || !canGenerate.value) return; const prompt = selectedPrompt.value; const ownerKey = taskOwner("prompt", prompt.id); candidateOutcome.value = null; const warningsAcknowledged = prompt.reviewStatus === "warning" ? acknowledgeWarnings.value : undefined; if (productionTarget.value === "edition" && selectedEdition.value) { const editionId = selectedEdition.value.id; await runTask("audio", ownerKey, () => generateMusicLibraryAudio({ projectId: projectId.value, editionId, promptVersionId: prompt.id, lyricsVersionId: prompt.lyricsVersionId ?? null, acknowledgeWarnings: warningsAcknowledged })); } else if (selectedCue.value) { const cueId = selectedCue.value.id; await runTask("audio", ownerKey, () => generateMusicCueAudio({ projectId: projectId.value, cueId, promptVersionId: prompt.id, acknowledgeWarnings: warningsAcknowledged, select: false })); } }
+async function submitGenerate() { if (!selectedPrompt.value || !canGenerate.value) return; const prompt = selectedPrompt.value; const ownerKey = taskOwner("prompt", prompt.id); candidateOutcome.value = null; const warningsAcknowledged = prompt.reviewStatus === "warning" ? acknowledgeWarnings.value : undefined; if (productionTarget.value === "edition" && selectedEdition.value) { const editionId = selectedEdition.value.id; await runTask("audio", ownerKey, () => generateMusicLibraryAudio({ projectId: projectId.value, editionId, promptVersionId: prompt.id, model: musicModel.value, lyricsVersionId: prompt.lyricsVersionId ?? null, acknowledgeWarnings: warningsAcknowledged })); } else if (selectedCue.value) { const cueId = selectedCue.value.id; await runTask("audio", ownerKey, () => generateMusicCueAudio({ projectId: projectId.value, cueId, promptVersionId: prompt.id, model: musicModel.value, acknowledgeWarnings: warningsAcknowledged, select: false })); } }
 async function saveLyricsDraft() { if (!selectedEdition.value || !lyricsDraft.value.trim()) return; const saved = await saveMusicLyrics({ projectId: projectId.value, editionId: selectedEdition.value.id, content: lyricsDraft.value, basedOnId: selectedLyrics.value?.id }); await loadProductionData(); selectedLyricsId.value = saved.id; await loadSelectedLyrics(); window.$message.success("已保存为新的歌词版本"); }
 async function confirmSelectedLyrics() { if (!selectedEdition.value || !selectedLyrics.value) return; await confirmMusicLyrics({ projectId: projectId.value, editionId: selectedEdition.value.id, lyricsVersionId: selectedLyrics.value.id }); await loadProductionData(); window.$message.success("歌词已确认"); }
 async function savePromptDraft() {
   if (!productionContext.value || !promptDraft.value.trim()) return;
-  if (promptMode.value === "modelSpecific" && !musicModel.value) return window.$message.warning("请先选择精确音乐模型");
-  if (promptMode.value === "modelSpecific" && promptRequiresRecompile.value) return window.$message.warning("模型或 Profile 已变更，请重新编译 Prompt");
-  const model = promptMode.value === "modelSpecific" ? musicModel.value : null;
   const generationConfig = buildPromptGenerationConfig();
   try {
     const saved = productionTarget.value === "edition" && selectedEdition.value
-      ? await saveMusicLibraryPrompt({ projectId: projectId.value, editionId: selectedEdition.value.id, promptMode: promptMode.value, model, profileSource: promptMode.value === "modelSpecific" ? promptProfileSource.value : null, prompt: promptDraft.value, generationConfig, lyricsVersionId: activeConfirmedLyricsId.value, basedOnId: selectedPrompt.value?.id })
+      ? await saveMusicLibraryPrompt({ projectId: projectId.value, editionId: selectedEdition.value.id, promptMode: "generic", model: null, profileSource: null, prompt: promptDraft.value, generationConfig, lyricsVersionId: activeConfirmedLyricsId.value, basedOnId: selectedPrompt.value?.id })
       : selectedCue.value
-        ? await saveMusicCuePrompt({ projectId: projectId.value, scriptId: selectedCue.value.scriptId, cueId: selectedCue.value.id, promptMode: promptMode.value, model, profileSource: promptMode.value === "modelSpecific" ? promptProfileSource.value : null, prompt: promptDraft.value, generationConfig, basedOnId: selectedPrompt.value?.id })
+        ? await saveMusicCuePrompt({ projectId: projectId.value, scriptId: selectedCue.value.scriptId, cueId: selectedCue.value.id, promptMode: "generic", model: null, profileSource: null, prompt: promptDraft.value, generationConfig, basedOnId: selectedPrompt.value?.id })
         : null;
     if (!saved) return;
     await loadProductionData();
@@ -392,7 +444,7 @@ async function savePromptDraft() {
     window.$message.error(error instanceof Error ? error.message : "保存 Prompt 失败");
   }
 }
-async function runTask(scope: MusicTaskScope, ownerKey: string, action: () => Promise<MusicTaskEnvelope>) { try { const envelope = await action(); registerTask(envelope, scope, ownerKey); window.$message.success("任务已提交"); } catch (error: any) { window.$message.error(error?.message || "任务提交失败"); } }
+async function runTask(scope: MusicTaskScope, ownerKey: string, action: () => Promise<MusicTaskEnvelope>) { try { const envelope = await action(); registerTask(envelope, scope, ownerKey); window.$message.success("任务已提交"); } catch (error: unknown) { window.$message.error(handleMusicTaskError(error)); } }
 
 function selectCue(id: number) { selectedCueId.value = id; seedCueBinding(selectedCue.value!); activeStep.value = "episode"; productionTarget.value = "cue"; void loadProductionData(); }
 function seedCueBinding(cue: MusicCue) { if (!cue) return; cueBindingDraft.value[cue.id] ||= { editionId: cue.binding?.editionId ?? cue.edition?.id ?? undefined, libraryVersionId: cue.binding?.libraryVersionId ?? cue.libraryVersion?.id ?? undefined, duration: cue.binding?.suggestedUseDurationSec ?? cue.estimatedDurationSec ?? undefined }; }
@@ -466,11 +518,52 @@ function recordCandidateOutcome(task: RuntimeTask) {
 function isSelectedVersion(version: MusicLibraryVersion | MusicCueAsset) { return productionTarget.value === "edition" ? selectedEdition.value?.selectedVersionId === version.id : Boolean((version as MusicCueAsset).selected); }
 function audioUrl(version: any) { return getPlayableMediaUrl(version.audioAsset ?? version.media ?? version, "audio"); }
 function versionKey(version: any) { return `${productionTarget.value}-${version.id}`; }
-function handleModelChange(_value: string, data?: any) { modelCapabilities.value = data || {}; if (!selectedPrompt.value && !promptDuration.value && modelCapabilities.value.durationRange?.min) promptDuration.value = modelCapabilities.value.durationRange.min; }
+function modelNameOf(value: string) { const [, modelName] = String(value || "").split(/:(.+)/); return modelName || String(value || ""); }
+async function handleModelChange(value: string, data?: any) {
+  if (!projectId.value || !value || modelDefaultSaving.value) return;
+  const previousModel = persistedMusicModel.value;
+  modelCapabilities.value = data || {};
+  if (!selectedPrompt.value && !promptDuration.value && modelCapabilities.value.durationRange?.min) promptDuration.value = modelCapabilities.value.durationRange.min;
+  modelDefaultSaving.value = true;
+  try {
+    const savedModel = await setMusicDefaultModel({ projectId: projectId.value, model: value });
+    persistedMusicModel.value = savedModel;
+    musicModel.value = savedModel || "";
+    if (!data && savedModel) await loadMusicModelCapabilities(savedModel);
+  } catch (error) {
+    musicModel.value = previousModel || "";
+    await loadMusicModelCapabilities(musicModel.value);
+    window.$message.error(error instanceof Error ? error.message : "保存项目默认音乐模型失败");
+  } finally { modelDefaultSaving.value = false; }
+}
+function modelRequestError(error: unknown) {
+  const source = error as any;
+  const payload = source?.data ?? source?.response?.data ?? source;
+  const data = payload?.data ?? payload;
+  return { code: String(data?.code || payload?.code || ""), model: data?.model == null ? "" : String(data.model), message: String(payload?.message || source?.message || "任务提交失败") };
+}
+function handleMusicModelUnavailable(event: Event) {
+  const model = String((event as CustomEvent<{ model?: unknown }>).detail?.model || "");
+  if (!model || (model !== musicModel.value && model !== persistedMusicModel.value)) return;
+  musicModel.value = "";
+  modelCapabilities.value = {};
+  window.$message.warning(`默认音乐模型 ${modelNameOf(model)} 当前不可用，请重新选择；系统不会自动切换供应商。`);
+}
+function handleMusicTaskError(error: unknown) {
+  const detail = modelRequestError(error);
+  if (detail.code === "MUSIC_MODEL_UNAVAILABLE") {
+    musicModel.value = "";
+    modelCapabilities.value = {};
+    window.dispatchEvent(new Event("toonflow:music-model-catalog-refresh"));
+    return `所选音乐模型 ${modelNameOf(detail.model || persistedMusicModel.value || "")} 当前不可用，请刷新后重新选择。`;
+  }
+  if (detail.code === "MUSIC_MODEL_REQUIRED") return "请先选择项目默认音乐模型后再提交。";
+  return detail.message;
+}
 function configNumber(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
 function sameOptionalNumber(left?: number, right?: number) { return left === right || (left == null && right == null); }
 function applyConfigNumber(config: Record<string, unknown>, key: string, value: number | undefined, baseValue: number | undefined) { if (sameOptionalNumber(value, baseValue)) return; if (value == null) delete config[key]; else config[key] = value; }
-function buildPromptGenerationConfig() { const canReuseBaseConfig = selectedPrompt.value?.promptMode === promptMode.value; const config = canReuseBaseConfig ? { ...promptBaseGenerationConfig.value } : {}; applyConfigNumber(config, "durationSec", promptDuration.value, promptBaseDuration.value); applyConfigNumber(config, "effectiveMusicDurationSec", effectiveDuration.value, promptBaseEffectiveDuration.value); return config; }
+function buildPromptGenerationConfig() { const config = { ...promptBaseGenerationConfig.value }; applyConfigNumber(config, "durationSec", promptDuration.value, promptBaseDuration.value); applyConfigNumber(config, "effectiveMusicDurationSec", effectiveDuration.value, promptBaseEffectiveDuration.value); return config; }
 function getMissingPromptConfigKeys(error: unknown) { const source = error as any; const payload = source?.data ?? source?.response?.data ?? source; const data = payload?.data ?? payload; return data?.code === "MUSIC_PROMPT_CONFIG_INVALID" && Array.isArray(data.missingRequiredConfigKeys) ? data.missingRequiredConfigKeys.map((key: unknown) => String(key)).filter(Boolean) : []; }
 async function sendAgentMessage(text: string) { if (!projectId.value) return; const sent = await musicAgentStore.send(musicAgentMode.value, projectId.value, text, musicAgentScriptId.value); if (!sent) window.$message.warning(musicAgentStore.runRunning ? "当前配乐导演任务仍在后台处理中" : musicAgentStore.runReason || "配乐导演暂时不可发送消息"); }
 async function stopAgent() { if (projectId.value) await musicAgentStore.stop(musicAgentMode.value, projectId.value, musicAgentScriptId.value); }
@@ -567,6 +660,7 @@ const workTypeOptions = [{ label: "主题曲", value: "theme_song" }, { label: "
 
 <style lang="scss" scoped>
 .productionMusicV2 { min-height: 100%; color: var(--td-text-color-primary); padding: 16px; background: var(--td-bg-color-page); }
+.musicModelHint { margin: -6px 0 12px; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.5; }
 .pageHeader,.sectionHeader,.panelHeader,.cueCard header,.inspectorHeader,.libraryInspector .inspectorTitle { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }.pageHeader { margin-bottom:14px; }.pageHeader h2,.sectionHeader h3,.panel h4 { margin:0; }.pageHeader p,.sectionHeader p,.panelHeader p,.libraryCard small,.cueMeta,.cueNarrative,.planSummary p,.libraryInspector p { margin:5px 0 0; color:var(--td-text-color-secondary); font-size:13px; line-height:1.55; }
 .directorLayout { display:grid; grid-template-columns:minmax(0,1fr) 408px; align-items:start; gap:16px; min-height:calc(100vh - 160px); }.directorLayout.agentHidden { display:block; }.workspace { min-width:0; }.directorLayout:not(.agentHidden) .workspace { padding-right:0; }.agentSlot { position:sticky; top:12px; width:408px; height:calc(100vh - 224px); min-height:320px; max-height:calc(100vh - 224px); overflow:hidden; }.agentSlot :deep(.rightChatBox) { position:relative; top:auto; right:auto; bottom:auto; width:100% !important; min-width:0; height:100%; min-height:0; margin:0; overflow:hidden; }.agentSlot :deep(.rightChatBox .chatBox) { height:auto; min-height:0; flex:1 1 auto; padding-bottom:8px; }.agentSlot :deep(.rightChatBox .t-chat__list) { flex:1 1 0; min-height:0; height:0; overflow-y:auto; }.agentSlot :deep(.rightChatBox .inputBox) { flex:0 0 auto; margin-top:auto; }
 .productionSteps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; overflow:hidden; border:1px solid var(--td-border-level-1-color); background:var(--td-border-level-1-color); }.productionSteps button { border:0; background:var(--td-bg-color-container); min-height:74px; padding:12px 16px; text-align:left; display:grid; grid-template-columns:30px 1fr; gap:1px 10px; cursor:pointer; }.productionSteps button.active { background:var(--td-brand-color-light); }.productionSteps button span { grid-row:span 2; color:var(--td-brand-color); font-weight:700; }.productionSteps button strong { font-size:15px; }.productionSteps button small { color:var(--td-text-color-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -574,6 +668,7 @@ const workTypeOptions = [{ label: "主题曲", value: "theme_song" }, { label: "
 .libraryGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; }.libraryCard { min-height:138px; display:flex; flex-direction:column; align-items:flex-start; text-align:left; border:1px solid var(--td-border-level-1-color); background:var(--td-bg-color-container); padding:12px; cursor:pointer; }.libraryCard:hover,.libraryCard.selected { border-color:var(--td-brand-color); background:var(--td-brand-color-light); }.libraryCard strong { margin:8px 0 4px; }.libraryCard em { margin-top:auto; font-style:normal; color:var(--td-text-color-secondary); font-size:12px; }.workType { font-size:12px; color:var(--td-brand-color); }.libraryInspector { margin-top:14px; border-top:1px solid var(--td-border-level-1-color); padding-top:14px; }.editionRow { width:100%; display:grid; grid-template-columns:1fr auto auto; align-items:center; gap:12px; padding:10px; margin-top:7px; border:1px solid var(--td-border-level-1-color); background:transparent; text-align:left; cursor:pointer; }.editionRow.selected { border-color:var(--td-brand-color); }.editionRow small,.editionRow em { color:var(--td-text-color-secondary); font-size:12px; font-style:normal; }
 .episodeToolbar,.productionTarget,.inlineActions,.promptSettings,.cueMeta,.audioActions,.trimSetup { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }.episodeToolbar { padding:10px 12px; border:1px solid var(--td-border-level-1-color); background:var(--td-bg-color-container); }.episodeToolbar :deep(.t-select) { min-width:260px; }.cueList { display:grid; gap:10px; }.cueCard { border:1px solid var(--td-border-level-1-color); background:var(--td-bg-color-container); padding:14px; cursor:pointer; }.cueCard.selected { border-color:var(--td-brand-color); }.cueCard h4 { margin:4px 0 0; }.cueKey { color:var(--td-brand-color); font-size:12px; }.cueNarrative { display:flex; align-items:center; gap:6px; }.cueBinding { display:grid; grid-template-columns:150px minmax(180px,1fr) minmax(160px,1fr) 140px auto; gap:8px; align-items:center; margin-top:12px; padding-top:12px; border-top:1px solid var(--td-border-level-1-color); }.silenceHint { margin:0; color:var(--td-text-color-secondary); }
 .productionTarget { padding:10px 12px; border:1px solid var(--td-border-level-1-color); background:var(--td-bg-color-container); }.productionTarget > span { color:var(--td-text-color-secondary); font-size:13px; }.modelSelect { width:220px; }.lyricsPanel,.promptPanel { min-width:0; }.lyricsPanel :deep(.t-textarea),.promptPanel :deep(.t-textarea) { margin-top:10px; }.promptSettings { margin-top:10px; color:var(--td-text-color-secondary); font-size:12px; }.promptHint { margin:10px 0 0; color:var(--td-text-color-secondary); font-size:12px; line-height:1.5; }.recommendedProduction,.candidateOutcome { display:grid; gap:3px; margin-top:12px; padding:10px; border-left:3px solid var(--td-brand-color); background:var(--td-bg-color-secondarycontainer); font-size:12px; }.recommendedProduction small,.candidateOutcome small { color:var(--td-text-color-secondary); }.warningText,.errorText { color:var(--td-error-color); font-size:12px; }.generationPanel { min-height:220px; }.versionList { display:grid; gap:8px; }.audioVersion { display:flex; align-items:center; justify-content:space-between; gap:12px; border:1px solid var(--td-border-level-1-color); padding:10px; }.audioVersion > div:first-child { display:grid; grid-template-columns:auto auto auto; align-items:center; gap:7px; }.audioVersion p,.audioVersion small { grid-column:1 / -1; margin:0; }.derivation { color:var(--td-brand-color); font-size:12px; }.audioActions { justify-content:flex-end; }.trimSetup { position:fixed; left:-9999px; opacity:0; pointer-events:none; }
+.targetDurationOnly .promptSettings span { display: none; }
 .agentRunStatus,.agentTaskFailures,.agentTimeline { margin:0 8px 8px 0; padding:9px 10px; border-left:3px solid var(--td-border-level-1-color); background:var(--td-bg-color-secondarycontainer); display:grid; gap:3px; font-size:12px; }.agentRunStatus.running { border-color:var(--td-brand-color); }.agentRunStatus small,.agentTimeline span { color:var(--td-text-color-secondary); line-height:1.45; }.agentTaskFailures { border-color:var(--td-error-color); }.agentTaskFailures p { margin:0; color:var(--td-error-color); line-height:1.45; }.agentTimeline { display:block; }.agentTimeline summary { cursor:pointer; font-weight:600; }.timelineItem { display:grid; gap:2px; padding:7px 0; border-top:1px solid var(--td-border-level-1-color); }.timelineItem:first-of-type { margin-top:7px; }
 .musicMarkdown { margin-top:10px; background:transparent; }.musicMarkdown :deep(.md-editor-preview-wrapper) { padding:0; background:transparent; }.musicMarkdown :deep(.md-editor-preview) { padding:0; color:var(--td-text-color-primary); font-size:14px; line-height:1.75; word-break:break-word; }.musicMarkdown :deep(h1),.musicMarkdown :deep(h2),.musicMarkdown :deep(h3),.musicMarkdown :deep(h4) { margin:18px 0 8px; color:var(--td-text-color-primary); line-height:1.35; }.musicMarkdown :deep(h1) { font-size:20px; }.musicMarkdown :deep(h2) { font-size:17px; }.musicMarkdown :deep(h3) { font-size:15px; }.musicMarkdown :deep(p) { margin:8px 0; }.musicMarkdown :deep(ul),.musicMarkdown :deep(ol) { margin:8px 0; padding-left:22px; }.musicMarkdown :deep(li + li) { margin-top:4px; }.musicMarkdown :deep(blockquote) { margin:10px 0; padding:7px 11px; border-left:3px solid var(--td-brand-color); background:var(--td-bg-color-secondarycontainer); color:var(--td-text-color-secondary); }.musicMarkdown :deep(code) { padding:1px 4px; border-radius:3px; background:var(--td-bg-color-secondarycontainer); }.musicMarkdown :deep(pre) { padding:10px; background:var(--td-bg-color-secondarycontainer); overflow:auto; }.episodePlanPreview { border:1px solid var(--td-border-level-1-color); background:var(--td-bg-color-container); padding:10px 12px; }.episodePlanPreview summary { cursor:pointer; color:var(--td-text-color-secondary); font-size:13px; }.episodePlanPreview[open] summary { margin-bottom:6px; color:var(--td-text-color-primary); }
 .musicAgentMenu { display:grid; min-width:180px; padding:4px; gap:2px; }.musicAgentMenu button { display:flex; align-items:center; gap:7px; width:100%; border:0; padding:7px 8px; background:transparent; color:var(--td-text-color-primary); cursor:pointer; text-align:left; }.musicAgentMenu button:hover { background:var(--td-bg-color-container-hover); }.musicAgentMenu button.danger { color:var(--td-error-color); }
@@ -727,6 +822,10 @@ const workTypeOptions = [{ label: "主题曲", value: "theme_song" }, { label: "
 .cueSelect strong { font-size: 13px; }
 .cueSelect small { color: var(--td-text-color-secondary); }
 .cueSelect :deep(.t-tag) { grid-row: span 2; }
+.cueCandidateModels { margin: -4px 0 0; color: var(--td-text-color-secondary); font-size: 12px; }
+.cueWorkspace .promptPanel :deep(.t-radio-group) { display: none; }
+.cueWorkspace .promptPanel .panelHeader h4 { font-size: 0; }
+.cueWorkspace .promptPanel .panelHeader h4::after { content: "本段创作 Prompt"; font-size: 16px; }
 
 @media (max-width: 1120px) {
   .workbenchSplit,

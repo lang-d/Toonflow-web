@@ -58,6 +58,16 @@ export interface XmlTagOption {
   keepInMessage?: boolean;
 }
 
+/**
+ * Optional, opt-in throttling for high-frequency text streams.  It deliberately
+ * affects only display publication; Socket receipt and raw message ordering stay
+ * immediate so a hidden scope can be restored without losing output.
+ */
+export interface StreamPublicationOptions {
+  shouldPublish: () => boolean;
+  minIntervalMs?: number;
+}
+
 export interface ChatSocketEvents {
   // 发送事件
   chat: { content: string; attachments?: any[]; [key: string]: any };
@@ -85,6 +95,8 @@ export interface UseChatOptions {
   manageLifecycle?: boolean;
   /** Prevent different Agent scopes from sharing one Socket.IO manager. */
   isolated?: boolean;
+  /** Coalesce append-only text rendering. Leave undefined for the legacy immediate behavior. */
+  streamPublication?: StreamPublicationOptions;
 }
 
 export interface ChatSocketLike {
@@ -126,6 +138,8 @@ export interface UseChatReturn {
   updateMessage: (id: string, updates: Partial<ChatMessagesData>) => void;
   findMessage: (id: string) => ChatMessagesData | undefined;
   syncGenerationStatus: (preferredMessageId?: string) => void;
+  /** Publish all buffered append-only text immediately, regardless of visibility policy. */
+  flushBufferedContent: () => void;
   getContentByType: <T extends AIMessageContent["type"]>(messageId: string, type: T) => Extract<AIMessageContent, { type: T }>[];
 }
 
@@ -142,6 +156,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     onDisconnect,
     manageLifecycle = true,
     isolated = false,
+    streamPublication,
   } = options;
 
   const socket = shallowRef<ChatSocketLike | null>(null);
@@ -164,14 +179,74 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   const hiddenXmlTags = normalizedXmlTagOptions.filter((item) => ((item.keepInMessage ?? keepXmlInMessage) ? false : true)).map((item) => item.tag);
   const emittedXmlState = new Map<string, Record<string, string>>();
   const rawContentState = new Map<string, string>();
+  const incrementalHiddenXmlState = new Map<string, IncrementalHiddenXmlState>();
+  const pendingStreamPublications = new Map<string, PendingStreamPublication>();
+  const streamPublishIntervalMs = Math.max(16, streamPublication?.minIntervalMs ?? 48);
+  let streamPublishTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastStreamPublicationAt = 0;
   const terminalStatuses = new Set<ChatMessageStatus>(["complete", "error", "stop"] as ChatMessageStatus[]);
-  const debugChat = import.meta.env.DEV && url.includes("/productionAgent");
+  const diagnosticsEnabled = import.meta.env.DEV && url.includes("/productionAgent") && localStorage.getItem("toonflow:production-agent-trace") === "1";
+  const debugChat = diagnosticsEnabled;
+  const streamDiagnostics = {
+    receivedFragments: 0,
+    receivedBytes: 0,
+    publishedBatches: 0,
+    bufferedBytes: 0,
+    lastPublishMs: 0,
+    longestActiveStreamMs: 0,
+    activeSince: 0,
+  };
+  let streamDiagnosticsTimer: ReturnType<typeof setTimeout> | null = null;
+
+  interface PendingStreamPublication {
+    messageId: string;
+    content: AIMessageContent;
+  }
+
+  interface CompletedHiddenXmlTag {
+    tag: string;
+    attrs: Record<string, string>;
+    value: string;
+  }
+
+  interface IncrementalHiddenXmlState {
+    visible: string;
+    pending: string;
+    activeTag: string | null;
+    activeAttrs: Record<string, string>;
+    activeValue: string;
+    completed: CompletedHiddenXmlTag[];
+  }
 
   const isTerminalStatus = (value?: ChatMessageStatus) => Boolean(value && terminalStatuses.has(value));
 
   const logChatEvent = (event: string, payload: Record<string, any>) => {
     if (!debugChat) return;
     console.debug("[production-agent chat]", event, payload);
+  };
+
+  const scheduleStreamDiagnostics = () => {
+    if (!diagnosticsEnabled || streamDiagnosticsTimer) return;
+    streamDiagnosticsTimer = setTimeout(() => {
+      streamDiagnosticsTimer = null;
+      const activeMs = streamDiagnostics.activeSince ? performance.now() - streamDiagnostics.activeSince : 0;
+      streamDiagnostics.longestActiveStreamMs = Math.max(streamDiagnostics.longestActiveStreamMs, activeMs);
+      console.debug("[production-agent chat] stream summary", {
+        receivedFragments: streamDiagnostics.receivedFragments,
+        receivedBytes: streamDiagnostics.receivedBytes,
+        bufferedBytes: streamDiagnostics.bufferedBytes,
+        publishedBatches: streamDiagnostics.publishedBatches,
+        lastPublishMs: Math.round(streamDiagnostics.lastPublishMs * 10) / 10,
+        longestActiveStreamMs: Math.round(streamDiagnostics.longestActiveStreamMs),
+      });
+      streamDiagnostics.receivedFragments = 0;
+      streamDiagnostics.receivedBytes = 0;
+      streamDiagnostics.publishedBatches = 0;
+      streamDiagnostics.bufferedBytes = 0;
+      streamDiagnostics.lastPublishMs = 0;
+      streamDiagnostics.longestActiveStreamMs = 0;
+      if (!pendingStreamPublications.size) streamDiagnostics.activeSince = 0;
+    }, 1000);
   };
 
   // 计算属性 - 修复：增加对内容流状态的判断
@@ -397,11 +472,180 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     content.data = hiddenXmlTags.length ? stripXmlFromMessage(rawText) : rawText;
   };
 
+  const createIncrementalHiddenXmlState = (): IncrementalHiddenXmlState => ({
+    visible: "",
+    pending: "",
+    activeTag: null,
+    activeAttrs: {},
+    activeValue: "",
+    completed: [],
+  });
+
+  const findNextHiddenOpeningTag = (text: string) => {
+    let result: { index: number; tag: string; attrs: string; length: number } | null = null;
+    for (const tag of hiddenXmlTags) {
+      const match = new RegExp(`<${escapeRegExp(tag)}(\\s[^>]*)?>`).exec(text);
+      if (!match || (result && match.index >= result.index)) continue;
+      result = { index: match.index, tag, attrs: match[1] ?? "", length: match[0].length };
+    }
+    return result;
+  };
+
+  const findTrailingHiddenTagPrefix = (text: string) => {
+    const openIndex = text.lastIndexOf("<");
+    if (openIndex < 0) return -1;
+    const tail = text.slice(openIndex);
+    return hiddenXmlTags.some((tag) => `<${tag}`.startsWith(tail)) ? openIndex : -1;
+  };
+
+  /**
+   * Keep hidden XML out of the reactive message payload while chunks are arriving.
+   * This is deliberately incremental: append streams never re-scan accumulated text.
+   */
+  const appendIncrementalHiddenXml = (messageId: string, content: AIMessageContent, delta: string, reset = false) => {
+    const contentKey = getContentKey(messageId, content);
+    const existing = incrementalHiddenXmlState.get(contentKey);
+    const state = reset || !existing ? createIncrementalHiddenXmlState() : existing;
+    if (reset || !existing) incrementalHiddenXmlState.set(contentKey, state);
+
+    if (!hiddenXmlTags.length) {
+      state.visible += delta;
+      return state;
+    }
+
+    state.pending += delta;
+    while (state.pending) {
+      if (state.activeTag) {
+        const closeTag = `</${state.activeTag}>`;
+        const closeIndex = state.pending.indexOf(closeTag);
+        if (closeIndex < 0) {
+          const preserveLength = Math.min(state.pending.length, closeTag.length - 1);
+          const appendLength = state.pending.length - preserveLength;
+          if (appendLength > 0) state.activeValue += state.pending.slice(0, appendLength);
+          state.pending = state.pending.slice(appendLength);
+          break;
+        }
+        state.activeValue += state.pending.slice(0, closeIndex);
+        state.completed.push({ tag: state.activeTag, attrs: state.activeAttrs, value: state.activeValue.trim() });
+        state.pending = state.pending.slice(closeIndex + closeTag.length);
+        state.activeTag = null;
+        state.activeAttrs = {};
+        state.activeValue = "";
+        continue;
+      }
+
+      const opening = findNextHiddenOpeningTag(state.pending);
+      if (opening) {
+        state.visible += state.pending.slice(0, opening.index);
+        state.pending = state.pending.slice(opening.index + opening.length);
+        state.activeTag = opening.tag;
+        state.activeAttrs = parseXmlAttributes(opening.attrs);
+        state.activeValue = "";
+        continue;
+      }
+
+      const pendingPrefix = findTrailingHiddenTagPrefix(state.pending);
+      if (pendingPrefix >= 0) {
+        state.visible += state.pending.slice(0, pendingPrefix);
+        state.pending = state.pending.slice(pendingPrefix);
+      } else {
+        state.visible += state.pending;
+        state.pending = "";
+      }
+      break;
+    }
+    return state;
+  };
+
+  const publishCompletedIncrementalXml = (messageId: string, content: AIMessageContent, state: IncrementalHiddenXmlState) => {
+    if (!state.completed.length) return;
+    const contentKey = getContentKey(messageId, content);
+    const previous = emittedXmlState.get(contentKey) ?? {};
+    const nextState = { ...previous };
+    const nextMessageData = { ...(xmlDataByMessage.value[messageId] ?? {}) };
+    const completed = state.completed.splice(0);
+    for (const item of completed) {
+      nextState[item.tag] = item.value;
+      nextMessageData[item.tag] = item.value;
+      xmlData.value = { ...xmlData.value, [item.tag]: item.value };
+      onXmlTag?.({
+        messageId,
+        contentId: content.id,
+        type: content.type as "text" | "markdown",
+        tag: item.tag,
+        value: item.value,
+        attrs: item.attrs,
+        children: parseXmlChildren(item.value),
+        status: "complete",
+        isComplete: true,
+      });
+    }
+    emittedXmlState.set(contentKey, nextState);
+    xmlDataByMessage.value = { ...xmlDataByMessage.value, [messageId]: nextMessageData };
+  };
+
+  const publishStreamContent = (messageId: string, content: AIMessageContent) => {
+    if (!isXmlTextContent(content)) return;
+    const contentKey = getContentKey(messageId, content);
+    const incremental = incrementalHiddenXmlState.get(contentKey);
+    if (incremental) {
+      content.data = incremental.visible;
+      publishCompletedIncrementalXml(messageId, content, incremental);
+      return;
+    }
+    syncContentDisplay(messageId, content);
+    syncXmlData(messageId, content);
+  };
+
+  const publishPendingStreamContent = (force = false) => {
+    if (streamPublishTimer) {
+      clearTimeout(streamPublishTimer);
+      streamPublishTimer = null;
+    }
+    if (!pendingStreamPublications.size) return;
+    if (!force && !streamPublication?.shouldPublish()) return;
+    const pending = [...pendingStreamPublications.values()];
+    pendingStreamPublications.clear();
+    lastStreamPublicationAt = performance.now();
+    const publishStartedAt = performance.now();
+    const messageIds = new Set<string>();
+    pending.forEach(({ messageId, content }) => {
+      publishStreamContent(messageId, content);
+      messageIds.add(messageId);
+    });
+    messageIds.forEach((messageId) => syncGenerationStatus(messageId));
+    if (diagnosticsEnabled) {
+      streamDiagnostics.publishedBatches++;
+      streamDiagnostics.lastPublishMs = performance.now() - publishStartedAt;
+      streamDiagnostics.bufferedBytes = 0;
+      scheduleStreamDiagnostics();
+    }
+  };
+
+  const scheduleStreamPublication = (messageId: string, content: AIMessageContent, force = false) => {
+    if (!streamPublication) {
+      publishStreamContent(messageId, content);
+      syncGenerationStatus(messageId);
+      return;
+    }
+    pendingStreamPublications.set(getContentKey(messageId, content), { messageId, content });
+    if (force) {
+      publishPendingStreamContent(true);
+      return;
+    }
+    if (!streamPublication.shouldPublish() || streamPublishTimer) return;
+    const delay = Math.max(0, streamPublishIntervalMs - (performance.now() - lastStreamPublicationAt));
+    streamPublishTimer = setTimeout(() => publishPendingStreamContent(false), delay);
+  };
+
+  const flushBufferedContent = () => publishPendingStreamContent(true);
+
   const syncXmlData = (messageId: string, content: AIMessageContent, messageStatus?: ChatMessageStatus) => {
     if (!normalizedXmlTags.length) return;
     if (!isXmlTextContent(content)) return;
 
     const contentKey = getContentKey(messageId, content);
+    if (incrementalHiddenXmlState.has(contentKey)) return;
     const prevState = emittedXmlState.get(contentKey) ?? {};
     const nextState = { ...prevState };
     const nextMessageData = { ...(xmlDataByMessage.value[messageId] ?? {}) };
@@ -461,7 +705,14 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     if (!message || message.role !== "assistant") return;
 
     const aiMessage = message as AIMessage;
-    aiMessage.content?.forEach((content) => syncXmlData(messageId, content, messageStatus ?? aiMessage.status));
+    aiMessage.content?.forEach((content) => {
+      const contentKey = getContentKey(messageId, content);
+      if (incrementalHiddenXmlState.has(contentKey)) {
+        publishStreamContent(messageId, content);
+        return;
+      }
+      syncXmlData(messageId, content, messageStatus ?? aiMessage.status);
+    });
   };
 
   // 深度合并工具
@@ -507,36 +758,60 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
     const content = findContent(msg, contentId);
     if (!content) return;
-    logChatEvent("content:update", {
-      messageId,
-      contentId,
-      type,
-      strategy,
-      status: eventStatus,
-      dataLength: typeof data === "string" ? data.length : undefined,
-      currentMessageId: currentMessageId.value,
-      globalStatus: status.value,
-    });
+    if (typeof data === "string" && isXmlTextContent(content)) {
+      if (diagnosticsEnabled) {
+        streamDiagnostics.receivedFragments++;
+        streamDiagnostics.receivedBytes += data.length;
+        streamDiagnostics.bufferedBytes += data.length;
+        if (!streamDiagnostics.activeSince) streamDiagnostics.activeSince = performance.now();
+        scheduleStreamDiagnostics();
+      }
+    } else {
+      logChatEvent("content:update", {
+        messageId,
+        contentId,
+        type,
+        strategy,
+        status: eventStatus,
+        dataLength: typeof data === "string" ? data.length : undefined,
+        currentMessageId: currentMessageId.value,
+        globalStatus: status.value,
+      });
+    }
 
     // 更新内容状态
-    if (eventStatus) {
+    let statusChanged = false;
+    if (eventStatus && content.status !== eventStatus) {
       content.status = eventStatus;
+      statusChanged = true;
     }
 
     // 关键修复：当内容块开始流式输出时，同步更新消息状态
     if (eventStatus === "streaming" || (strategy === "append" && data)) {
       if (msg.status === "pending") {
         msg.status = "streaming";
+        statusChanged = true;
       }
       if (currentMessageId.value === messageId) {
-        status.value = "streaming";
+        if (status.value !== "streaming") {
+          status.value = "streaming";
+          statusChanged = true;
+        }
       }
     }
 
     // 无数据时仅更新状态
     if (data === undefined || data === null) {
-      syncXmlData(messageId, content, msg.status);
-      syncGenerationStatus(messageId);
+      if (isTerminalStatus(eventStatus)) flushBufferedContent();
+      // A background Production Agent must not make its hidden/visible text
+      // reactive just because a status-only transport event arrived. Terminal
+      // events intentionally flushed above so final content is never delayed.
+      if (incrementalHiddenXmlState.has(getContentKey(messageId, content)) && (!streamPublication || streamPublication.shouldPublish() || isTerminalStatus(eventStatus))) {
+        publishStreamContent(messageId, content);
+      } else if (!incrementalHiddenXmlState.has(getContentKey(messageId, content))) {
+        syncXmlData(messageId, content, msg.status);
+      }
+      if (statusChanged || !streamPublication) syncGenerationStatus(messageId);
       return;
     }
 
@@ -547,7 +822,12 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       const nextRaw = strategy === "append" ? previousRaw + data : data;
 
       rawContentState.set(contentKey, nextRaw);
-      syncContentDisplay(messageId, content);
+      if (streamPublication) {
+        appendIncrementalHiddenXml(messageId, content, data, strategy !== "append");
+        scheduleStreamPublication(messageId, content, isTerminalStatus(eventStatus));
+      } else {
+        syncContentDisplay(messageId, content);
+      }
     } else if (strategy === "append") {
       if (typeof data === "string") {
         appendStringData(content, data);
@@ -563,10 +843,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     }
 
     // 流式状态（如果没有显式指定状态且是追加模式）
-    if (!eventStatus && strategy === "append") {
+    if (!eventStatus && strategy === "append" && content.status !== "streaming") {
       content.status = "streaming";
+      statusChanged = true;
     }
 
+    if (streamPublication && isXmlTextContent(content) && typeof data === "string") {
+      if (statusChanged && !pendingStreamPublications.has(getContentKey(messageId, content))) syncGenerationStatus(messageId);
+      return;
+    }
     syncXmlData(messageId, content, msg.status);
     syncGenerationStatus(messageId);
   };
@@ -604,7 +889,12 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         aiMessage.content?.forEach((content) => {
           if (!isXmlTextContent(content)) return;
           rawContentState.set(getContentKey(data.id, content), content.data);
-          syncContentDisplay(data.id, content);
+          if (streamPublication) {
+            appendIncrementalHiddenXml(data.id, content, content.data, true);
+            publishStreamContent(data.id, content);
+          } else {
+            syncContentDisplay(data.id, content);
+          }
         });
       }
 
@@ -641,6 +931,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       }
 
       if (data.status) {
+        if (isTerminalStatus(data.status)) flushBufferedContent();
         syncMessageXmlData(data.id, msg, data.status);
       }
 
@@ -671,7 +962,12 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
       if (isXmlTextContent(content)) {
         rawContentState.set(getContentKey(data.messageId, content), content.data);
-        syncContentDisplay(data.messageId, content);
+        if (streamPublication) {
+          appendIncrementalHiddenXml(data.messageId, content, content.data, true);
+          publishStreamContent(data.messageId, content);
+        } else {
+          syncContentDisplay(data.messageId, content);
+        }
       }
 
       // thinking 内容块需要放在 content 最前面，但如果最前面已经是 thinking 则放在其后
@@ -685,7 +981,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       } else {
         msg.content.push(content);
       }
-      syncXmlData(data.messageId, content, msg.status);
+      if (!incrementalHiddenXmlState.has(getContentKey(data.messageId, content))) {
+        syncXmlData(data.messageId, content, msg.status);
+      }
 
       // 关键修复：只有当内容块状态是 streaming 时才更新消息状态
       // pending 状态的内容块表示还没有真正开始输出
@@ -752,6 +1050,14 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   };
 
   const disconnect = () => {
+    if (streamPublishTimer) {
+      clearTimeout(streamPublishTimer);
+      streamPublishTimer = null;
+    }
+    if (streamDiagnosticsTimer) {
+      clearTimeout(streamDiagnosticsTimer);
+      streamDiagnosticsTimer = null;
+    }
     socket.value?.disconnect();
     connected.value = false;
     connecting.value = false;
@@ -855,6 +1161,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     xmlDataByMessage.value = {};
     emittedXmlState.clear();
     rawContentState.clear();
+    incrementalHiddenXmlState.clear();
+    pendingStreamPublications.clear();
+    if (streamPublishTimer) {
+      clearTimeout(streamPublishTimer);
+      streamPublishTimer = null;
+    }
+    if (streamDiagnosticsTimer) {
+      clearTimeout(streamDiagnosticsTimer);
+      streamDiagnosticsTimer = null;
+    }
   };
 
   const removeMessage = (id: string) => {
@@ -864,6 +1180,8 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       msg?.content?.forEach((content) => {
         emittedXmlState.delete(getContentKey(id, content));
         rawContentState.delete(getContentKey(id, content));
+        incrementalHiddenXmlState.delete(getContentKey(id, content));
+        pendingStreamPublications.delete(getContentKey(id, content));
       });
       const nextByMessage = { ...xmlDataByMessage.value };
       delete nextByMessage[id];
@@ -875,7 +1193,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   const removeMessagesAfter = (id: string) => {
     const idx = findMessageIndex(id);
     if (idx > -1) {
-      messages.value.splice(idx + 1);
+      const removed = messages.value.splice(idx + 1) as AIMessage[];
+      removed.forEach((message) => {
+        message.content?.forEach((content) => {
+          const contentKey = getContentKey(message.id, content);
+          emittedXmlState.delete(contentKey);
+          rawContentState.delete(contentKey);
+          incrementalHiddenXmlState.delete(contentKey);
+          pendingStreamPublications.delete(contentKey);
+        });
+      });
     }
   };
 
@@ -934,6 +1261,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     updateMessage,
     findMessage,
     syncGenerationStatus,
+    flushBufferedContent,
     getContentByType,
   };
 }

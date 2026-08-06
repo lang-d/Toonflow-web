@@ -58,8 +58,9 @@ export interface TaskSourceAdapter {
 
 type TaskListener = (task: RuntimeTask) => void;
 type LegacyRecord = Record<string, any>;
+type ProjectScopeGuard = { projectId: number; revision: number };
 
-const ACTIVE_STATUSES = new Set<TaskStatus>(["queued", "submitting", "processing"]);
+const ACTIVE_STATUSES = new Set<TaskStatus>(["pending", "queued", "submitting", "processing"]);
 const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled"]);
 const ALL_DOMAINS: TaskDomain[] = [
   "flowImage",
@@ -193,6 +194,7 @@ export default defineStore("taskCenter", () => {
   const lastLongTask = ref(0);
   const transportMode = ref<TaskTransport>((localStorage.getItem(TRANSPORT_STORAGE_KEY) as TaskTransport) || "auto");
   const activeTransport = ref<"legacy-polling" | "unified-events">("legacy-polling");
+  const activeProjectId = ref<number | null>(null);
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   let refreshPromise: Promise<void> | null = null;
@@ -202,6 +204,7 @@ export default defineStore("taskCenter", () => {
   let unifiedSocket: Socket | null = null;
   let visibilityHandlerInstalled = false;
   let performanceObserver: PerformanceObserver | null = null;
+  let projectScopeRevision = 0;
 
   const activeTasks = computed(() => Array.from(tasks.values()).filter((task) => ACTIVE_STATUSES.has(task.status)));
   const activeTaskCount = computed(() => activeTasks.value.length);
@@ -406,7 +409,7 @@ export default defineStore("taskCenter", () => {
   function schedule(delay = failureCount ? getFailureDelay() : getPollDelay()) {
     if (timer) clearTimeout(timer);
     timer = null;
-    if (!running.value || activeTaskCount.value === 0) return;
+    if (!running.value || (activeProjectId.value == null && activeTaskCount.value === 0)) return;
     timer = setTimeout(() => void runCycle(), delay);
   }
 
@@ -549,16 +552,20 @@ export default defineStore("taskCenter", () => {
       (eventUnifiedKey ? tasks.get(eventUnifiedKey) : undefined) ??
       Array.from(tasks.values()).find(
         (item) =>
-          (event.taskId && String(item.unifiedTaskId ?? item.taskId ?? "") === String(event.taskId)) ||
-          (event.legacyTaskId !== undefined && String(item.legacyTaskId ?? "") === String(event.legacyTaskId)) ||
-          (item.domain === domain && event.nodeId && item.nodeId === event.nodeId) ||
-          (item.domain === domain && event.targetId !== undefined && String(item.targetId) === String(event.targetId)),
+          item.projectId === Number(event.projectId) &&
+          ((event.taskId && String(item.unifiedTaskId ?? item.taskId ?? "") === String(event.taskId)) ||
+            (event.legacyTaskId !== undefined && String(item.legacyTaskId ?? "") === String(event.legacyTaskId)) ||
+            (item.domain === domain && event.nodeId && item.nodeId === event.nodeId) ||
+            (item.domain === domain && event.targetId !== undefined && String(item.targetId) === String(event.targetId))),
       )
     );
   }
 
   function applyUnifiedEvent(event: TaskStatusEvent, source: TaskSource = "socket") {
     const task = findTaskForEvent(event);
+    const eventProjectId = Number(event.projectId);
+    if (!task && source === "socket" && activeProjectId.value == null) return;
+    if (!task && activeProjectId.value != null && eventProjectId !== activeProjectId.value) return;
     const updatedAt = Number(event.updatedAt) || Date.now();
     if (!task) {
       const domain = normalizeDomain(event.taskType, event.targetType, event.nodeId);
@@ -652,15 +659,19 @@ export default defineStore("taskCenter", () => {
       auth: { token: localStorage.getItem("token") },
     });
     unifiedSocket.on("connect", () => {
-      if (running.value) void refreshUnified();
+      if (running.value) {
+        void refreshUnified().catch((error) => console.warn("[taskCenter] socket recovery sync failed", error));
+      }
     });
     unifiedSocket.on("reconnect", () => {
-      if (running.value) void refreshUnified();
+      if (running.value) {
+        void refreshUnified().catch((error) => console.warn("[taskCenter] socket reconnect sync failed", error));
+      }
     });
     unifiedSocket.on("task:status", (event: TaskStatusEvent) => applyUnifiedEvent(event, "socket"));
   }
 
-  async function refreshUnifiedTasks(tasksToRefresh: RuntimeTask[]) {
+  async function refreshUnifiedTasks(tasksToRefresh: RuntimeTask[], scopeGuard?: ProjectScopeGuard) {
     const groups = new Map<string, RuntimeTask[]>();
     tasksToRefresh.forEach((task) => {
       if (!task.unifiedTaskId) return;
@@ -679,6 +690,7 @@ export default defineStore("taskCenter", () => {
           { signal, suppressNetworkErrorNotify: true } as any,
         ),
       );
+      if (scopeGuard && (activeProjectId.value !== scopeGuard.projectId || projectScopeRevision !== scopeGuard.revision)) return;
       const snapshot = (response as any)?.data?.data ?? (response as any)?.data ?? response;
       const records = (Array.isArray(snapshot) ? snapshot : snapshot?.tasks ?? []) as TaskStatusEvent[];
       records.forEach((record: TaskStatusEvent) => applyUnifiedEvent(record, "snapshot"));
@@ -687,6 +699,11 @@ export default defineStore("taskCenter", () => {
   }
 
   async function refreshUnified() {
+    const projectId = activeProjectId.value;
+    if (projectId != null) {
+      await syncProjectTasks(projectId);
+      return;
+    }
     await refreshUnifiedTasks(activeTasks.value);
   }
 
@@ -717,6 +734,7 @@ export default defineStore("taskCenter", () => {
 
   async function syncProjectTasks(projectId: number, scriptId?: number) {
     if (!projectId) return;
+    const scopeRevision = activeProjectId.value === projectId ? projectScopeRevision : null;
     const response = await trackedRequest("media", (signal) =>
       axios.post(
         "/task/status/snapshot",
@@ -727,9 +745,12 @@ export default defineStore("taskCenter", () => {
         { signal, suppressNetworkErrorNotify: true } as any,
       ),
     );
+    if (scopeRevision != null && (scopeRevision !== projectScopeRevision || activeProjectId.value !== projectId)) return;
     const snapshot = (response as any)?.data?.data ?? (response as any)?.data ?? response;
     const records = (Array.isArray(snapshot) ? snapshot : snapshot?.tasks ?? []) as TaskStatusEvent[];
-    records.forEach((record) => applyUnifiedEvent(record, "snapshot"));
+    records
+      .filter((record) => Number(record.projectId) === projectId)
+      .forEach((record) => applyUnifiedEvent(record, "snapshot"));
 
     const knownProjectTasks = activeTasks.value.filter(
       (task) =>
@@ -737,7 +758,10 @@ export default defineStore("taskCenter", () => {
         (scriptId == null || task.scriptId === scriptId) &&
         Boolean(task.unifiedTaskId),
     );
-    await refreshUnifiedTasks(knownProjectTasks);
+    await refreshUnifiedTasks(
+      knownProjectTasks,
+      scopeRevision == null ? undefined : { projectId, revision: scopeRevision },
+    );
   }
 
   const unifiedAdapter: TaskSourceAdapter = {
@@ -789,7 +813,7 @@ export default defineStore("taskCenter", () => {
 
   async function runCycle() {
     timer = null;
-    if (!running.value || activeTaskCount.value === 0) return;
+    if (!running.value || (activeProjectId.value == null && activeTaskCount.value === 0)) return;
     if (interacting.value && !(typeof document !== "undefined" && document.hidden)) {
       schedule(500);
       return;
@@ -824,7 +848,7 @@ export default defineStore("taskCenter", () => {
   }
 
   function handleVisibilityChange() {
-    if (!running.value || activeTaskCount.value === 0) return;
+    if (!running.value || (activeProjectId.value == null && activeTaskCount.value === 0)) return;
     if (timer) clearTimeout(timer);
     timer = null;
     if (document.hidden) schedule(30_000);
@@ -832,7 +856,45 @@ export default defineStore("taskCenter", () => {
   }
 
   function handleOnline() {
-    if (running.value && activeTaskCount.value > 0) void runCycle();
+    if (running.value && (activeProjectId.value != null || activeTaskCount.value > 0)) void runCycle();
+  }
+
+  function clearProjectTasks(projectId: number) {
+    Array.from(tasks.values())
+      .filter((task) => task.projectId === projectId)
+      .forEach((task) => removeTask(task.key));
+  }
+
+  function clearTasksOutsideProject(projectId: number) {
+    Array.from(tasks.values())
+      .filter((task) => task.projectId > 0 && task.projectId !== projectId)
+      .forEach((task) => removeTask(task.key));
+  }
+
+  async function activateProjectScope(projectId: number) {
+    const nextProjectId = Number(projectId);
+    if (!Number.isFinite(nextProjectId) || nextProjectId <= 0) {
+      deactivateProjectScope();
+      return;
+    }
+
+    const previousProjectId = activeProjectId.value;
+    if (previousProjectId !== nextProjectId) {
+      projectScopeRevision++;
+      activeProjectId.value = nextProjectId;
+      clearTasksOutsideProject(nextProjectId);
+    }
+
+    start();
+    await syncProjectTasks(nextProjectId);
+  }
+
+  function deactivateProjectScope() {
+    const previousProjectId = activeProjectId.value;
+    projectScopeRevision++;
+    activeProjectId.value = null;
+    stop();
+    if (previousProjectId != null) clearProjectTasks(previousProjectId);
   }
 
   function start() {
@@ -861,7 +923,7 @@ export default defineStore("taskCenter", () => {
 
   function endInteraction() {
     interacting.value = false;
-    if (running.value && activeTaskCount.value > 0) {
+    if (running.value && (activeProjectId.value != null || activeTaskCount.value > 0)) {
       if (timer) clearTimeout(timer);
       timer = null;
       schedule(0);
@@ -874,7 +936,7 @@ export default defineStore("taskCenter", () => {
     localStorage.setItem(TRANSPORT_STORAGE_KEY, mode);
     unifiedProbeFinished = false;
     activeTransport.value = mode === "unified-events" ? "unified-events" : "legacy-polling";
-    if (activeTaskCount.value > 0) start();
+    if (activeProjectId.value != null || activeTaskCount.value > 0) start();
   }
 
   async function cancelTask(key: string) {
@@ -909,6 +971,8 @@ export default defineStore("taskCenter", () => {
   }
 
   function dispose() {
+    activeProjectId.value = null;
+    projectScopeRevision++;
     stop();
     tasks.clear();
     listeners.clear();
@@ -934,6 +998,7 @@ export default defineStore("taskCenter", () => {
     snapshotWarningCount,
     activeTasks,
     activeTaskCount,
+    activeProjectId,
     running,
     interacting,
     inFlightRequests,
@@ -951,6 +1016,8 @@ export default defineStore("taskCenter", () => {
     cancelTask,
     resyncTask,
     syncProjectTasks,
+    activateProjectScope,
+    deactivateProjectScope,
     getRuntimeDiagnostics,
     refresh,
     start,

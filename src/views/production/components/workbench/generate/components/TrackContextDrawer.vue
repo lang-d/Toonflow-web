@@ -286,23 +286,27 @@ function handleScrollPanelWheel(event: WheelEvent) {
 function toFactCard(storyboard: StoryboardItem) {
   const raw = storyboard as unknown as RecordValue;
   const row = parseTableRow(raw.tableRowJson);
+  const factVersion = Number(row.version ?? raw.factVersion);
+  const isLegacyRow = factVersion === 1;
+  const isV3 = factVersion === 3;
   const read = (...keys: string[]) => firstMeaningful(...keys.map((key) => raw[key]), ...keys.map((key) => row[key]));
   const fields: Array<[string, unknown]> = [
     ["场景", read("location", "scene")],
     ["时间", read("timeOfDay")],
     ["连续性", read("sceneContinuityId")],
-    ["画面", read("picture")],
-    ["动作", read("action")],
+    ...(isV3
+      ? ([['镜头描述', read("shotDescription")]] as Array<[string, unknown]>)
+      : ([['画面', read("picture")], ['动作', read("action")]] as Array<[string, unknown]>)),
     ["景别", read("shotSize")],
     ["运镜 / 机位", joinFacts(read("cameraMove"), read("cameraAngle"), read("cameraPosition", "camera"))],
-    ["角色", read("characters")],
-    ["情绪", read("visibleEmotion")],
+    ...(isLegacyRow ? ([["角色", read("characters")], ["情绪", read("visibleEmotion")]] as Array<[string, unknown]>) : []),
     ["台词", read("dialogue")],
     ["声音", read("sound")],
     ["所需资产", read("requiredAssets", "associateAssets")],
     ["转场", read("transitionFromPrevious")],
     ["调度原因", read("reason")],
     ["视频描述", read("videoDesc")],
+    ["派生状态", joinFacts(raw.promptStale === true ? "分镜图 Prompt 已过期" : "", raw.imageStale === true ? "分镜图已过期" : "")],
   ];
   const duration = formatDuration(read("duration"));
 

@@ -14,7 +14,12 @@
         <span class="referenceHint">拖动引用可调整生成顺序</span>
       </div>
       <div class="uploadBtn">
-        <imageSelect :mode="modelParmas.mode as VideoMode" v-model="imageList" :storyboard-list="storyboardList" @preview-audio="openReferenceAudioPreview" />
+        <imageSelect
+          :mode="modelParmas.mode as VideoMode"
+          v-model="imageList"
+          :storyboard-list="storyboardList"
+          @preview-audio="openReferenceAudioPreview"
+          @restore-references="restoreCurrentTrackReferences" />
       </div>
     </div>
     <AudioClipDialog
@@ -50,6 +55,12 @@
         <t-tag v-if="hasUnreadyStoryboardForCurrentTrack" size="small" theme="warning" variant="light">
           分镜事实待补齐
         </t-tag>
+        <t-tag v-if="currentTrack.videoPromptStale" size="small" theme="warning" variant="light">
+          {{ $t("workbench.production.node.storyboard.videoPromptStale") }}
+        </t-tag>
+        <t-tag v-if="currentTrack.sourceTracked === false" size="small" variant="light">
+          {{ $t("workbench.production.node.storyboard.sourceUntracked") }}
+        </t-tag>
         <t-button size="small" variant="outline" @click="trackContextVisible = true">分镜与剧本</t-button>
       </div>
     </div>
@@ -67,6 +78,16 @@
             </t-button>
           </template>
           <div class="promptData fc">
+            <t-alert
+              v-if="currentTrack.videoPromptStale"
+              theme="warning"
+              :message="$t('workbench.production.node.storyboard.videoPromptStaleHint')">
+              <template #operation>
+                <t-button size="small" variant="text" @click="genText">
+                  {{ $t("workbench.production.node.storyboard.recompile") }}
+                </t-button>
+              </template>
+            </t-alert>
             <div class="promptInput" @focusout="handlePromptBlur">
               <promptEditor v-model="currentTrack.prompt" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
             </div>
@@ -154,6 +175,7 @@ const cacheWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let promptAffixWriteTimer: ReturnType<typeof setTimeout> | null = null;
 let videoStatusPollTimer: ReturnType<typeof setTimeout> | null = null;
 let videoStatusPollInFlight = false;
+let modelDetailRequestId = 0;
 
 const modeOptions = ref<VideoModel>({
   name: "",
@@ -196,13 +218,13 @@ function restoreLastTrack() {
   if (restoredLastTrack.value) return;
   restoredLastTrack.value = true;
   const lastTrackId = Number(localStorage.getItem(getScriptStorageKey("lastTrackId")));
-  if (!lastTrackId) return;
-  const index = trackList.value.findIndex((track) => track.id === lastTrackId);
+  if (!Number.isFinite(lastTrackId)) return;
+  const index = trackList.value.findIndex((track) => Number(track.id) === lastTrackId);
   if (index >= 0) activeTrackIndex.value = index;
 }
 
-function rememberCurrentTrack(trackId?: number) {
-  if (!trackId) return;
+function rememberCurrentTrack(trackId?: number | string | null) {
+  if (trackId == null) return;
   localStorage.setItem(getScriptStorageKey("lastTrackId"), String(trackId));
 }
 
@@ -240,23 +262,12 @@ const imageList = computed({
   },
 });
 
-function modeChange(newVal: string) {
+function modeChange(newVal: string, automatic = false) {
   if (newVal == modelParmas.value.mode) return;
-  if ((imageList.value.length || currentTrack.value?.prompt) && modelParmas.value.mode) {
-    const dialog = DialogPlugin.confirm({
-      header: $t("workbench.generate.modeChange"),
-      body: $t("workbench.generate.modeChangeConfirm"),
-      confirmBtn: $t("settings.generate.modelChnageSure"),
-      cancelBtn: $t("settings.memory.msg.cancel"),
-      onConfirm: async () => {
-        imageList.value = [];
-        currentTrack.value.prompt = "";
-        dialog.destroy();
-        modelParmas.value.mode = newVal;
-      },
-    });
-  } else if (newVal) {
-    modelParmas.value.mode = newVal;
+  if (!newVal) return;
+  modelParmas.value.mode = newVal;
+  if (automatic) {
+    window.$message?.info?.("已切换为新模型支持的生成模式，提示词和引用已保留。");
   }
 }
 const modeList = computed(() => {
@@ -399,6 +410,26 @@ function normalizeTrackItem(track: TrackItem): TrackItem {
   };
 }
 
+function referenceIdentity(item: Pick<UploadItem, "id" | "sources">) {
+  return item.id == null ? "" : `${item.sources ?? ""}:${item.id}`;
+}
+
+function mergeRetainedReferences(localItems: UploadItem[], restoredItems: UploadItem[]) {
+  const seen = new Set<string>();
+  const merged = localItems.map((item) => ({ ...item }));
+  localItems.forEach((item) => {
+    const key = referenceIdentity(item);
+    if (key) seen.add(key);
+  });
+  restoredItems.forEach((item) => {
+    const key = referenceIdentity(item);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push({ ...item });
+  });
+  return merged;
+}
+
 function unwrapApiData(response: any) {
   return response?.data?.data ?? response?.data ?? response;
 }
@@ -525,6 +556,7 @@ async function addManualTrack() {
 watch(
   () => modelParmas.value.model,
   (val) => {
+    const requestId = ++modelDetailRequestId;
     if (!val) {
       modeOptions.value = {
         name: "",
@@ -534,10 +566,10 @@ watch(
         type: "video",
         mode: [],
       };
-      modelParmas.value.mode = "";
       return;
     }
     axios.post("/modelSelect/getModelDetail", { modelId: val }).then(({ data }) => {
+      if (requestId !== modelDetailRequestId || val !== modelParmas.value.model) return;
       modeOptions.value = data;
       modelParmas.value.audio = data.audio === true || data.audio === "true" || data.audio == "optional";
       const drMap = data.durationResolutionMap;
@@ -557,7 +589,11 @@ watch(
         });
       if (!modeMatched) {
         const newMode = Array.isArray(data.mode[0]) ? JSON.stringify(data.mode[0]) : data.mode[0];
-        modeChange(newMode);
+        modeChange(newMode, true);
+      }
+    }).catch((error) => {
+      if (requestId === modelDetailRequestId && val === modelParmas.value.model) {
+        console.warn("[production] failed to load video model detail", error);
       }
     });
   },
@@ -682,7 +718,7 @@ async function saveReferenceAudioClip(payload: { base64Data: string; name: strin
   }
 }
 
-async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: number | string } = {}) {
+async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: number | string; restoreReferencesTrackId?: number | string } = {}) {
   const response = await axios.post("/production/workbench/getGenerateData", {
     projectId: project.value?.id,
     scriptId: episodesId.value ?? 0,
@@ -699,6 +735,9 @@ async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: 
     ),
   ) as StoryboardItem[];
   data.trackList = mergePendingManualTracks((data.trackList ?? []).map((track: TrackItem) => normalizeTrackItem(track)));
+  const restoredTrackMedias = options.restoreReferencesTrackId == null
+    ? []
+    : (data.trackList.find((track: TrackItem) => Number(track.id) === Number(options.restoreReferencesTrackId))?.medias ?? []);
   // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
   const pid = project.value?.id;
   const sid = episodesId.value;
@@ -722,18 +761,38 @@ async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: 
     });
     // 整体赋值触发响应式
     trackList.value = [...data.trackList];
-    await refreshVideoResults(trackList.value.flatMap((track) => track.videoList));
     if (options.selectTrackId != null) {
       selectTrackById(options.selectTrackId);
     } else {
       if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(trackList.value.length - 1, 0);
       restoreLastTrack();
     }
+    // Restore the remembered track before the first await. Otherwise the default
+    // first track watcher can overwrite lastTrackId while results are refreshing.
+    await refreshVideoResults(trackList.value.flatMap((track) => track.videoList));
+    if (options.restoreReferencesTrackId != null) {
+      const targetTrack = trackList.value.find((track) => Number(track.id) === Number(options.restoreReferencesTrackId));
+      if (targetTrack?.id != null) {
+        targetTrack.medias = mergeRetainedReferences(targetTrack.medias as UploadItem[], restoredTrackMedias as UploadItem[]) as any;
+        setCache(pid, sid, targetTrack.id, targetTrack.medias as unknown as UploadItem[]);
+      }
+    }
     syncPromptTasks();
   }
 
   const selectedDuration = trackList.value?.[activeTrackIndex.value]?.duration;
   if (selectedDuration != null) modelParmas.value.duration = clampDuration(selectedDuration);
+}
+
+async function restoreCurrentTrackReferences() {
+  const trackId = currentTrack.value?.id;
+  if (trackId == null) return;
+  try {
+    await getGenerateData({ selectTrackId: trackId, restoreReferencesTrackId: trackId });
+    window.$message.success("已恢复当前轨道可用的分镜与资产引用，并保留本地引用。");
+  } catch (error: any) {
+    window.$message.error(error?.message || "恢复引用失败，请稍后重试。");
+  }
 }
 /** 提示词失焦时保存到后端 */
 function confirmRefreshReferenceCache() {
@@ -960,10 +1019,7 @@ function trackChange(prevIndex?: number) {
       curTrack.medias = cached as unknown as TrackMedia[];
     }
   }
-  // imageList 是基于 currentTrack.medias 的计算属性，切换轨道后自动切换数据
-  if (modelParmas.value.mode == "singleImage" && imageList.value.length > 1) {
-    imageList.value = imageList.value.slice(0, 1);
-  }
+  // The model limits what is submitted, never what a track is allowed to retain.
   modelParmas.value.duration = clampDuration(trackList.value?.[activeTrackIndex.value]?.duration);
 }
 /** 监听当前轨道的 medias 变化，实时同步到缓存 */

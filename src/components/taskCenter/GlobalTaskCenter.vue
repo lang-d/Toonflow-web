@@ -94,7 +94,21 @@ async function syncCurrentProject() {
   try {
     await taskCenter.syncProjectTasks(projectId);
   } catch (error) {
-    if (dialogVisible.value) {
+    if (requestId === syncRequestId && dialogVisible.value) {
+      window.$message.error((error as any)?.message || $t("workbench.globalTaskCenter.syncFailed"));
+    }
+  } finally {
+    if (requestId === syncRequestId) syncing.value = false;
+  }
+}
+
+async function activateCurrentProject(projectId: number) {
+  const requestId = ++syncRequestId;
+  syncing.value = true;
+  try {
+    await taskCenter.activateProjectScope(projectId);
+  } catch (error) {
+    if (requestId === syncRequestId && dialogVisible.value) {
       window.$message.error((error as any)?.message || $t("workbench.globalTaskCenter.syncFailed"));
     }
   } finally {
@@ -115,13 +129,23 @@ function handleVisibilityChange() {
 watch(
   [() => project.value?.id, apiReady],
   ([projectId, ready]) => {
-    if (projectId && ready) void syncCurrentProject();
+    const nextProjectId = Number(projectId);
+    if (ready && nextProjectId > 0) {
+      void activateCurrentProject(nextProjectId);
+      return;
+    }
+    syncRequestId++;
+    syncing.value = false;
+    taskCenter.deactivateProjectScope();
   },
   { immediate: true },
 );
 
 onMounted(() => document.addEventListener("visibilitychange", handleVisibilityChange));
-onBeforeUnmount(() => document.removeEventListener("visibilitychange", handleVisibilityChange));
+onBeforeUnmount(() => {
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+  taskCenter.deactivateProjectScope();
+});
 </script>
 
 <style scoped lang="scss">

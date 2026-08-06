@@ -1,6 +1,9 @@
 <template>
   <figure class="axisMapDiagram">
-    <figcaption>{{ map.title }}</figcaption>
+    <figcaption>
+      <span>{{ map.title }}</span>
+      <small v-if="unresolvedAxis">轴线：{{ unresolvedAxis.label }}（端点未声明，未绘制）</small>
+    </figcaption>
     <svg :viewBox="viewBox" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="map.title">
       <defs>
         <marker :id="markerId" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="3.6" markerHeight="3.6" orient="auto-start-reverse">
@@ -83,11 +86,12 @@ const fontSize = 3.1;
 const lineHeight = 3.8;
 const nodeById = computed(() => new Map(props.map.nodes.map((node) => [node.id, node])));
 const axisEndpoints = computed(() => {
-  if (!props.map.axis) return null;
+  if (!props.map.axis?.resolved) return null;
   const from = nodeById.value.get(props.map.axis.from);
   const to = nodeById.value.get(props.map.axis.to);
   return from && to ? { from, to } : null;
 });
+const unresolvedAxis = computed(() => (props.map.axis && !props.map.axis.resolved ? props.map.axis : null));
 
 const nodeRects = computed(() => props.map.nodes.map(nodeRect));
 const cameraRects = computed(() => props.map.cameras.map((camera) => circleRect(camera.x, camera.y, 3.5)));
@@ -268,6 +272,15 @@ function cameraBadge(id: string) {
     color: var(--td-text-color-primary, #222);
     font-size: 13px;
     font-weight: 600;
+
+    small {
+      display: block;
+      margin-top: 4px;
+      color: var(--td-text-color-secondary, #666);
+      font-size: 12px;
+      font-weight: 400;
+      line-height: 1.5;
+    }
   }
 
   svg {

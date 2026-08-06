@@ -83,36 +83,176 @@ export interface StoryboardRequiredAssetFact {
   order: number;
 }
 
-export interface StoryboardTableRow {
-  version: 1;
+interface StoryboardTableRowBase {
   index: number;
   sceneNo?: string;
   groupKey: string;
-  groupName: string;
-  groupIntent: string;
   beatId: string;
   durationSec: number;
   location: string;
   timeOfDay: string;
   sceneContinuityId?: string;
-  picture: string;
   shotSize: string;
-  cameraMove: string;
+  cameraMove?: string;
   cameraAngle?: string;
   transitionFromPrevious?: string;
-  action: string;
-  characters: StoryboardCharacterFact[];
-  visibleEmotion: string;
   dialogue: StoryboardDialogueFact[];
   soundEffects: string[];
   requiredAssets: StoryboardRequiredAssetFact[];
+}
+
+interface StoryboardTableRowV1V2Base extends StoryboardTableRowBase {
+  picture: string;
+  action: string;
+}
+
+/** Historical V1 rows remain readable and keep their own explicit version. */
+export interface StoryboardTableRowV1 extends StoryboardTableRowV1V2Base {
+  version: 1;
+  groupName: string;
+  groupIntent: string;
+  characters: StoryboardCharacterFact[];
+  visibleEmotion: string;
+}
+
+/**
+ * V2 stores the static starting composition in picture and all temporal
+ * performance in action. Group names are projected by the group plan/track,
+ * rather than duplicated into every row.
+ */
+export interface StoryboardTableRowV2 extends StoryboardTableRowV1V2Base {
+  version: 2;
+}
+
+/** V3 keeps one chronological visual fact instead of picture/action. */
+export interface StoryboardTableRowV3 extends StoryboardTableRowBase {
+  version: 3;
+  shotDescription: string;
+}
+
+export type StoryboardTableRow = StoryboardTableRowV1 | StoryboardTableRowV2 | StoryboardTableRowV3;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasString(value: Record<string, unknown>, key: string) {
+  return typeof value[key] === "string";
+}
+
+function hasOptionalString(value: Record<string, unknown>, key: string) {
+  return value[key] === undefined || typeof value[key] === "string";
+}
+
+function isDialogueFact(value: unknown): value is StoryboardDialogueFact {
+  return (
+    isRecord(value) &&
+    hasString(value, "speaker") &&
+    hasString(value, "text") &&
+    hasOptionalString(value, "voiceTone")
+  );
+}
+
+function isRequiredAssetFact(value: unknown): value is StoryboardRequiredAssetFact {
+  return (
+    isRecord(value) &&
+    typeof value.assetId === "number" &&
+    Number.isFinite(value.assetId) &&
+    hasString(value, "name") &&
+    ["role", "scene", "tool", "clip"].includes(String(value.type)) &&
+    typeof value.order === "number" &&
+    Number.isInteger(value.order)
+  );
+}
+
+function isCharacterFact(value: unknown): value is StoryboardCharacterFact {
+  return (
+    isRecord(value) &&
+    hasString(value, "name") &&
+    hasString(value, "action") &&
+    hasString(value, "orientation") &&
+    hasString(value, "spatialPosition") &&
+    hasOptionalString(value, "posture") &&
+    hasOptionalString(value, "expression") &&
+    hasOptionalString(value, "gaze") &&
+    hasOptionalString(value, "handAction") &&
+    hasOptionalString(value, "movement")
+  );
+}
+
+function excludesKeys(value: Record<string, unknown>, keys: string[]) {
+  return keys.every((key) => !(key in value));
+}
+
+function hasCommonStoryboardFields(value: Record<string, unknown>) {
+  return (
+    typeof value.index === "number" &&
+    Number.isInteger(value.index) &&
+    value.index >= 0 &&
+    hasString(value, "groupKey") &&
+    hasString(value, "beatId") &&
+    typeof value.durationSec === "number" &&
+    Number.isFinite(value.durationSec) &&
+    hasString(value, "location") &&
+    hasString(value, "timeOfDay") &&
+    hasOptionalString(value, "sceneNo") &&
+    hasOptionalString(value, "sceneContinuityId") &&
+    hasString(value, "shotSize") &&
+    hasOptionalString(value, "cameraMove") &&
+    hasOptionalString(value, "cameraAngle") &&
+    hasOptionalString(value, "transitionFromPrevious") &&
+    Array.isArray(value.dialogue) &&
+    value.dialogue.every(isDialogueFact) &&
+    Array.isArray(value.soundEffects) &&
+    value.soundEffects.every((item) => typeof item === "string") &&
+    Array.isArray(value.requiredAssets) &&
+    value.requiredAssets.every(isRequiredAssetFact)
+  );
+}
+
+export function isStoryboardTableRowV1(row?: StoryboardTableRow): row is StoryboardTableRowV1 {
+  return row?.version === 1;
+}
+
+export function isStoryboardTableRowV2(row?: StoryboardTableRow): row is StoryboardTableRowV2 {
+  return row?.version === 2;
+}
+
+export function isStoryboardTableRowV3(row?: StoryboardTableRow): row is StoryboardTableRowV3 {
+  return row?.version === 3;
 }
 
 export function parseStoryboardTableRow(value?: string | null): StoryboardTableRow | undefined {
   if (!value) return undefined;
   try {
     const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? (parsed as StoryboardTableRow) : undefined;
+    if (!isRecord(parsed) || !hasCommonStoryboardFields(parsed)) return undefined;
+    if (parsed.version === 1) {
+      return hasString(parsed, "picture") &&
+        hasString(parsed, "action") &&
+        hasString(parsed, "groupName") &&
+        hasString(parsed, "groupIntent") &&
+        Array.isArray(parsed.characters) &&
+        parsed.characters.every(isCharacterFact) &&
+        hasString(parsed, "visibleEmotion") &&
+        !("shotDescription" in parsed)
+        ? (parsed as unknown as StoryboardTableRowV1)
+        : undefined;
+    }
+    if (parsed.version === 2) {
+      return hasString(parsed, "picture") &&
+        hasString(parsed, "action") &&
+        excludesKeys(parsed, ["shotDescription", "characters", "visibleEmotion", "groupName", "groupIntent"])
+        ? (parsed as unknown as StoryboardTableRowV2)
+        : undefined;
+    }
+    if (parsed.version === 3) {
+      return hasString(parsed, "shotDescription") &&
+        excludesKeys(parsed, ["picture", "action", "characters", "visibleEmotion", "groupName", "groupIntent"])
+        ? (parsed as unknown as StoryboardTableRowV3)
+        : undefined;
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -128,6 +268,7 @@ export interface Storyboard {
   timeOfDay?: string | null;
   sceneContinuityId?: string | null;
   transitionFromPrevious?: string | null;
+  shotDescription?: string | null;
   picture?: string | null;
   shotSize?: string | null;
   cameraMove?: string | null;
@@ -142,6 +283,9 @@ export interface Storyboard {
   factStatus?: StoryboardFactStatus;
   factVersion?: number | null;
   factSource?: StoryboardFactSource;
+  promptStale?: boolean;
+  imageStale?: boolean;
+  sourceTracked?: boolean;
   trackId?: number;
   trackName?: string;
   groupKey?: string | null;
@@ -231,6 +375,7 @@ export interface FlowData {
   storyboardTable: string;
   storyboardTableMeta?: StoryboardTableMeta;
   storyboardGenerationLastFailure: StoryboardGenerationLastFailure | null;
+  storyboardFactWriteVersion?: 2 | 3;
   storyboard: Storyboard[];
   workbench: {
     videoList: VideoList[];

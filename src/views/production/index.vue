@@ -244,6 +244,13 @@ function goProjectList() {
 
 interface ProductionCanvasMemory {
   episodesId?: number;
+  canvases?: Record<
+    string,
+    {
+      positions: Record<string, { x: number; y: number }>;
+      viewport: { x: number; y: number; zoom: number };
+    }
+  >;
 }
 
 const isBootstrapping = ref(true);
@@ -268,13 +275,21 @@ function writeCanvasMemory(memory: ProductionCanvasMemory) {
 
 function saveCurrentCanvasMemory() {
   if (!project.value?.id || !episodesId.value) return;
-  writeCanvasMemory({
-    episodesId: episodesId.value,
-  });
+  const memory = readCanvasMemory() ?? {};
+  const episodeKey = String(episodesId.value);
+  memory.episodesId = episodesId.value;
+  memory.canvases = {
+    ...(memory.canvases ?? {}),
+    [episodeKey]: {
+      positions: Object.fromEntries(Object.entries(nodePositions.value).map(([id, position]) => [id, { ...position }])),
+      viewport: { ...getViewport() },
+    },
+  };
+  writeCanvasMemory(memory);
 }
 
 // 节点位置
-const nodePositions = ref<Record<string, { x: number; y: number }>>({
+const defaultNodePositions: Record<string, { x: number; y: number }> = {
   script: { x: 0, y: 0 },
   scriptPlan: { x: 900, y: 0 },
   assets: { x: 1200, y: 4000 },
@@ -282,8 +297,20 @@ const nodePositions = ref<Record<string, { x: number; y: number }>>({
   storyboard: { x: 2500, y: 0 },
   workbench: { x: 3000, y: 0 },
   // poster: { x: 4500, y: 0 },
-});
+};
+const nodePositions = ref<Record<string, { x: number; y: number }>>({ ...defaultNodePositions });
 const { nodes, edges } = useFlowBuilder(flowData, nodePositions);
+
+function restoreEpisodeCanvas(scriptId: number) {
+  const snapshot = readCanvasMemory()?.canvases?.[String(scriptId)];
+  if (!snapshot) return false;
+  nodePositions.value = {
+    ...defaultNodePositions,
+    ...Object.fromEntries(Object.entries(snapshot.positions).map(([id, position]) => [id, { ...position }])),
+  };
+  void nextTick(() => setViewport({ ...snapshot.viewport }));
+  return true;
+}
 
 function getRenderedNodeDimensions(id: string) {
   const element = document.querySelector<HTMLElement>(`.vue-flow__node[data-id="${id}"]`);
@@ -301,6 +328,7 @@ onNodeDragStop(async ({ nodes: draggedNodes }) => {
   for (const node of draggedNodes) {
     nodePositions.value[node.id] = { x: node.position.x, y: node.position.y };
   }
+  saveCurrentCanvasMemory();
 });
 
 async function waitForNodesReady(maxRetries = 60, delay = 100, isCurrent: () => boolean = () => true) {
@@ -323,6 +351,7 @@ onMounted(async () => {
     void router.replace("/project");
     return;
   }
+  agentStore.setProductionViewActive(true);
   await getScriptData();
   if (!episodesId.value) {
     isBootstrapping.value = false;
@@ -330,6 +359,14 @@ onMounted(async () => {
   }
   await loadEpisodeFlow();
   isBootstrapping.value = false;
+});
+
+onActivated(() => {
+  agentStore.setProductionViewActive(true);
+});
+
+onDeactivated(() => {
+  agentStore.setProductionViewActive(false);
 });
 
 const episodesOptions = ref<{ label: string; value: number }[]>([]);
@@ -569,17 +606,29 @@ async function loadEpisodeFlow() {
 
   const requestId = ++episodeLoadRequestId;
   const isCurrent = () => requestId === episodeLoadRequestId && episodesId.value === scriptId;
-  loading.value = true;
+  const hasWarmFlow = agentStore.activateEpisode(scriptId);
+  const restoredCanvas = restoreEpisodeCanvas(scriptId);
+  loading.value = !hasWarmFlow;
   try {
-    await agentStore.recoverPanel(scriptId);
+    // Flow and project tasks are a background reconciliation for warm episodes.
+    // Neither should delay switching the visible canvas.
+    const refreshFlow = agentStore.getFlowData(scriptId).catch((error) => {
+      console.warn("[production] failed to refresh episode flow", error);
+    });
+    void taskCenter.syncProjectTasks(Number(project.value?.id || 0), scriptId).catch((error) => {
+      console.warn("[production] failed to sync episode tasks", error);
+    });
+
+    if (hasWarmFlow && restoredCanvas) return;
+    await refreshFlow;
     if (!isCurrent()) return;
-    await Promise.all([
-      agentStore.getFlowData(scriptId),
-      taskCenter.syncProjectTasks(Number(project.value?.id || 0), scriptId),
-    ]);
-    if (!isCurrent()) return;
-    await layoutGraph("LR", { isCurrent, manageLoading: false });
-    if (isCurrent()) saveCurrentCanvasMemory();
+
+    // Full measuring/stabilising layout is only for an episode without a saved
+    // canvas. Returning to an episode restores its positions and viewport above.
+    if (!restoredCanvas) {
+      await layoutGraph("LR", { isCurrent, manageLoading: false });
+      if (isCurrent()) saveCurrentCanvasMemory();
+    }
   } finally {
     if (isCurrent()) loading.value = false;
   }
@@ -616,6 +665,7 @@ const steps = [
 const fps = ref(0);
 let lastFrameTime = performance.now();
 let frameCount = 0;
+let fpsFrameId: number | null = null;
 function animate() {
   const now = performance.now();
   frameCount++;
@@ -626,12 +676,30 @@ function animate() {
     lastFrameTime = now;
   }
   if (!openShowVisible.value) {
-    requestAnimationFrame(animate);
+    fpsFrameId = requestAnimationFrame(animate);
+  } else {
+    fpsFrameId = null;
   }
 }
 
+function startFpsMonitor() {
+  if (fpsFrameId !== null || openShowVisible.value) return;
+  lastFrameTime = performance.now();
+  frameCount = 0;
+  fpsFrameId = requestAnimationFrame(animate);
+}
+
+function stopFpsMonitor() {
+  if (fpsFrameId !== null) cancelAnimationFrame(fpsFrameId);
+  fpsFrameId = null;
+}
+
 watch(openShowVisible, (val) => {
-  if (!val) return animate();
+  if (!val) {
+    startFpsMonitor();
+    return;
+  }
+  stopFpsMonitor();
   if (episodesId.value) void agentStore.recoverPanel(episodesId.value);
 });
 
@@ -642,6 +710,8 @@ function openAgentPanel() {
 
 onBeforeUnmount(() => {
   if (interactionTimer) clearTimeout(interactionTimer);
+  stopFpsMonitor();
+  agentStore.setProductionViewActive(false);
   document.removeEventListener("mousemove", onSpaceMouseMove);
   taskCenter.endInteraction();
 });

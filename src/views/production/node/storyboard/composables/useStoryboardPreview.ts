@@ -1,5 +1,9 @@
 import { computed, type Ref, watch } from "vue";
-import type { Storyboard } from "../../../utils/flowBuilder";
+import {
+  isStoryboardTableRowV3,
+  parseStoryboardTableRow,
+  type Storyboard,
+} from "../../../utils/flowBuilder";
 import type { StoryboardGroup } from "../types";
 
 export function useStoryboardPreview(options: {
@@ -113,7 +117,11 @@ export function useStoryboardPreview(options: {
 
   function getStoryboardDescription(item: Storyboard) {
     const fallback = `S${String(options.getStoryboardIndex(item) + 1).padStart(2, "0")}`;
-    const structured = [item.location, item.timeOfDay, item.picture, item.action, item.dialogue, item.sound]
+    const tableRow = parseStoryboardTableRow(item.tableRowJson);
+    const visualFacts = isStoryboardTableRowV3(tableRow)
+      ? [tableRow.shotDescription]
+      : [item.picture ?? tableRow?.picture, item.action ?? tableRow?.action];
+    const structured = [item.location, item.timeOfDay, ...visualFacts, item.dialogue, item.sound]
       .map((value) => String(value ?? "").trim())
       .filter(Boolean)
       .join(" · ");

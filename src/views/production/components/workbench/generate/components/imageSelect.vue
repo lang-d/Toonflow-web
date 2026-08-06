@@ -1,7 +1,7 @@
 <template>
   <div class="imageUploadBox ac">
     <!-- 单图模式 -->
-    <template v-if="mode == 'singleImage' || isMultiReferenceMode">
+    <template v-if="isMultiReferenceMode">
       <VueDraggable v-if="isMultiReferenceMode" v-model="imageList" class="referenceDragList" :animation="150" handle=".dragHandle">
         <div class="uploadBtn c fc" v-for="(item, index) in imageList" :key="`${item.sources}-${item.id ?? index}-${index}`">
           <div class="dragHandle">
@@ -139,6 +139,37 @@
       <i-plus size="24"></i-plus>
       {{ $t("workbench.generate.addReference") }}
     </div>
+    <t-button v-if="isMultiReferenceMode" size="small" variant="text" @click="emit('restoreReferences')">恢复引用</t-button>
+
+    <section v-if="!isMultiReferenceMode" class="referenceShelf">
+      <div class="referenceShelfHeader">
+        <span>已保留引用 {{ persistedReferenceItems.length }}</span>
+        <div class="referenceShelfActions">
+          <t-button size="small" variant="outline" @click="handleMixedAdd()">添加引用</t-button>
+          <t-button size="small" variant="text" @click="emit('restoreReferences')">恢复引用</t-button>
+        </div>
+      </div>
+      <p v-if="mode === 'text'" class="referenceShelfHint">当前模型为文生视频，已保留的引用不会参与本次生成。</p>
+      <p v-else-if="limitedReferenceHint" class="referenceShelfHint">{{ limitedReferenceHint }}</p>
+      <div v-if="persistedReferenceItems.length" class="referenceShelfList">
+        <div v-for="entry in persistedReferenceItems" :key="`${entry.item.sources}-${entry.item.id}-${entry.index}`" class="referenceShelfItem">
+          <t-image
+            v-if="entry.item.fileType === 'image' && entry.item.src"
+            :src="getReferenceThumbnail(entry.item)"
+            fit="cover"
+            class="referenceShelfPreview"
+            @click="openImagePreview(entry.item)" />
+          <i-acoustic v-else-if="entry.item.fileType === 'audio'" size="18" @click="previewAudio(entry.item)" />
+          <i-video v-else-if="entry.item.fileType === 'video'" size="18" />
+          <span v-else>参</span>
+          <span class="referenceShelfName">{{ getReferenceLabel(entry.item, entry.index) }} {{ entry.item.name || entry.item.parentName || '' }}</span>
+          <t-button theme="danger" variant="text" size="small" @click="splitImage(entry.index)">
+            <template #icon><i-close size="14" /></template>
+          </t-button>
+        </div>
+      </div>
+      <p v-else class="referenceShelfEmpty">暂无已保留引用，可从资产或分镜中添加。</p>
+    </section>
 
     <!-- 分镜选择弹窗 -->
     <t-dialog
@@ -188,6 +219,7 @@ import { openImageLightbox } from "@/composables/useImageLightbox";
 import { getOriginalImageUrl, getThumbnailImageUrl } from "@/utils/imageUrl";
 import { getMediaOriginalUrl, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import { deriveReferenceTokens, getDerivedReferenceToken } from "../referenceTokens";
+import { isStoryboardTableRowV3, parseStoryboardTableRow } from "@/views/production/utils/flowBuilder";
 
 const props = defineProps<{
   mode: VideoMode;
@@ -198,6 +230,7 @@ const imageList = defineModel<UploadItem[]>({
 });
 const emit = defineEmits<{
   previewAudio: [item: UploadItem];
+  restoreReferences: [];
 }>();
 //分镜选择弹窗
 const storyboardDialogVisible = ref(false);
@@ -234,6 +267,19 @@ function isEmptySlot(item: UploadItem | undefined): boolean {
   return !item || !item.id;
 }
 
+function sameReference(left: UploadItem | undefined, right: UploadItem | undefined) {
+  return left?.id != null && left.id === right?.id && left.sources === right?.sources;
+}
+
+function setSingleReference(item: UploadItem) {
+  const list = [...imageList.value];
+  const replaced = list[0];
+  const retained = list.slice(1).filter((candidate) => !sameReference(candidate, item));
+  list[0] = item;
+  if (!isEmptySlot(replaced) && !sameReference(replaced, item)) retained.push(replaced);
+  imageList.value = [list[0], ...retained];
+}
+
 const buildLabel = computed(() => {
   const startOptional = props.mode === "startFrameOptional";
   const endOptional = props.mode === "endFrameOptional";
@@ -253,7 +299,10 @@ function ensureFrameSlots(): UploadItem[] {
 /** 将 item 设置到首帧或尾帧槽位 */
 function setFrameSlot(slot: "start" | "end", item: UploadItem) {
   const list = ensureFrameSlots();
-  list[slot === "start" ? 0 : 1] = item;
+  const targetIndex = slot === "start" ? 0 : 1;
+  const replaced = list[targetIndex];
+  list[targetIndex] = item;
+  if (!isEmptySlot(replaced)) list.push(replaced);
   imageList.value = list;
 }
 
@@ -271,6 +320,19 @@ function parseMode(value: string): VideoMode | null {
 
 const parsedMode = computed(() => parseMode(props.mode as string));
 const isMultiReferenceMode = computed(() => Array.isArray(parsedMode.value));
+const persistedReferenceItems = computed(() =>
+  imageList.value
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.id != null),
+);
+const limitedReferenceHint = computed(() => {
+  const mode = parsedMode.value;
+  if (mode === "singleImage") return "当前模型本次只使用第一个引用，其余引用已保留。";
+  if (typeof mode === "string" && ["endFrameOptional", "startFrameOptional", "startEndRequired"].includes(mode)) {
+    return "当前模型本次只使用首尾两个引用，其余引用已保留。";
+  }
+  return "";
+});
 const derivedReferenceItems = computed(() => deriveReferenceTokens(imageList.value as any[]));
 
 function normalizeCategory(type: string | undefined): UploadCategory {
@@ -298,6 +360,7 @@ function getSourceTip(item?: UploadItem) {
 
 //判断是否显示添加参考图
 const isShowAddImage = computed(() => {
+  if (!isMultiReferenceMode.value) return false;
   const mode = props.mode;
   if (mode == "singleImage" && imageList.value.length >= 1) {
     return false;
@@ -387,7 +450,8 @@ function handleMixedAdd(slot: "start" | "end" | "" = "") {
       if (slot === "start" || slot === "end") {
         setFrameSlot(slot, newItems[0]);
       } else if (props.mode === "singleImage") {
-        imageList.value = [newItems[0]];
+        // The selected item becomes the active one; the prior item stays retained.
+        setSingleReference(newItems[0]);
       } else {
         const assetsNotAudioIds = newItems.filter((i) => i.fileType !== "audio");
         const { data } = await axios.post("/production/workbench/getAudioBindAssetsList", {
@@ -421,17 +485,19 @@ function createStoryboardUploadItem(sb: StoryboardItem): UploadItem {
     thumbnail: sb.thumbnail ?? undefined,
     thumb: sb.thumb ?? undefined,
     id: sb.id,
-    prompt: getStoryboardFactSummary(sb) || undefined,
     name: `P${sb.index + 1}`,
     index: sb.index,
   } as UploadItem;
 }
 
 function getStoryboardFactSummary(sb: StoryboardItem) {
-  return [sb.location, sb.timeOfDay, sb.picture, sb.action, sb.dialogue, sb.sound]
+  const tableRow = parseStoryboardTableRow(sb.tableRowJson);
+  if (isStoryboardTableRowV3(tableRow)) return tableRow.shotDescription.trim();
+  const visualFacts = [tableRow?.picture ?? sb.picture, tableRow?.action ?? sb.action];
+  return [sb.location, sb.timeOfDay, ...visualFacts, sb.dialogue, sb.sound]
     .map((value) => String(value ?? "").trim())
     .filter(Boolean)
-    .join(" 路 ");
+    .join(" · ");
 }
 
 function isStoryboardSelected(sb: StoryboardItem) {
@@ -459,6 +525,8 @@ function pickStoryboard(sb: StoryboardItem) {
 
   if (currentSlot.value === "start" || currentSlot.value === "end") {
     setFrameSlot(currentSlot.value, newItem);
+  } else if (props.mode === "singleImage") {
+    setSingleReference(newItem);
   } else {
     imageList.value = [...imageList.value, newItem];
   }
@@ -501,6 +569,65 @@ function splitImage(index: number) {
     display: flex;
     flex-wrap: nowrap;
     gap: 8px;
+  }
+  .referenceShelf {
+    min-width: 360px;
+    max-width: min(760px, 58vw);
+    padding: 8px 10px;
+    border: 1px solid var(--td-component-border);
+    border-radius: 8px;
+    background: var(--td-bg-color-container);
+  }
+  .referenceShelfHeader,
+  .referenceShelfActions,
+  .referenceShelfItem,
+  .referenceShelfList {
+    display: flex;
+    align-items: center;
+  }
+  .referenceShelfHeader {
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .referenceShelfActions {
+    gap: 4px;
+  }
+  .referenceShelfHint,
+  .referenceShelfEmpty {
+    margin: 5px 0 0;
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+  }
+  .referenceShelfHint {
+    color: var(--td-warning-color);
+  }
+  .referenceShelfList {
+    gap: 6px;
+    margin-top: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .referenceShelfItem {
+    flex: 0 0 auto;
+    gap: 5px;
+    max-width: 210px;
+    min-height: 30px;
+    padding: 3px 5px;
+    border: 1px solid var(--td-component-border);
+    border-radius: 5px;
+    color: var(--td-text-color-secondary);
+  }
+  .referenceShelfPreview {
+    width: 24px;
+    height: 24px;
+    cursor: zoom-in;
+  }
+  .referenceShelfName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .imageToolsWrap {
     z-index: 99999;

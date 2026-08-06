@@ -15,6 +15,7 @@ const domainKeys: Record<TaskDomain, string> = {
 };
 
 const statusKeys: Partial<Record<TaskStatus, string>> = {
+  pending: "workbench.globalTaskCenter.status.pending",
   queued: "workbench.globalTaskCenter.status.queued",
   submitting: "workbench.globalTaskCenter.status.submitting",
   processing: "workbench.globalTaskCenter.status.processing",
@@ -29,7 +30,7 @@ export function getTaskStatusKey(status: TaskStatus) {
 }
 
 export function getTaskStatusTheme(status: TaskStatus): "default" | "primary" | "warning" {
-  if (status === "queued") return "warning";
+  if (status === "pending" || status === "queued") return "warning";
   if (status === "submitting") return "primary";
   return "default";
 }

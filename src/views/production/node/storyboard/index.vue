@@ -26,6 +26,12 @@
         theme="warning"
         message="当前包含草稿或旧数据分镜，可继续展示、编辑和生成分镜图，但生成视频前需要补齐结构化分镜事实。" />
 
+      <t-alert
+        v-if="hasStaleDerivedData"
+        class="historyFactAlert"
+        theme="warning"
+        :message="$t('workbench.production.node.storyboard.staleDerivedAlert')" />
+
       <StoryboardTableView
         v-if="storyboard.length && viewMode === 'table'"
         :groups="storyboardGroups"
@@ -46,6 +52,7 @@
         @generate-group="generateGroup"
         @toggle-select="toggleSelect"
         @open-prompt-editor="openPromptEditor"
+        @open-fact-editor="openFactEditor"
         @save-storyboard-info="saveStoryboardInfo"
         @open-image-viewer="openImageViewer"
         @regenerate-single-image="regenerateSingleImage"
@@ -69,6 +76,8 @@
         :is-storyboard-completed="isStoryboardCompleted"
         :is-storyboard-failed="isStoryboardFailed"
         @update:selected-ids="selectedIds = $event"
+        @open-prompt-editor="openPromptEditor"
+        @open-fact-editor="openFactEditor"
         @edit-storyboard-image="editStoryboaryImage"
         @regenerate-single-image="regenerateSingleImage"
         @remove="removeFn"
@@ -105,8 +114,6 @@
       v-model:visible="promptEditorVisible"
       v-model:prompt="promptDraft"
       v-model:primary-node-id="promptPrimaryNodeId"
-      v-model:facts="promptFactDraft"
-      v-model:characters="promptCharacterDraft"
       :loading="promptEditorLoading"
       :saving="promptEditorSaving"
       :shot-label="promptEditorShotLabel"
@@ -118,6 +125,19 @@
       @remove-reference="removePromptReference"
       @preview-reference="previewPromptReference"
       @confirm="savePromptEditor" />
+
+    <StoryboardFactsDialog
+      v-model:visible="factEditorVisible"
+      v-model:facts="factDraft"
+      v-model:required-asset-ids="factRequiredAssetIds"
+      :loading="factEditorLoading"
+      :saving="factEditorSaving"
+      :shot-label="factEditorShotLabel"
+      :fact-version="factEditorVersion"
+      :error="factEditorError"
+      :asset-options="factAssetOptions"
+      :legacy-performance="factLegacyPerformance"
+      @confirm="saveFactEditor" />
 
     <AudioClipDialog
       v-model:visible="promptAudioPreviewVisible"
@@ -171,7 +191,18 @@ import editImage from "../../components/editImage/index.vue";
 import { DialogPlugin, LoadingPlugin } from "tdesign-vue-next";
 import { Handle, Position } from "@vue-flow/core";
 import axios from "@/utils/axios";
-import { parseStoryboardTableRow, type AssetItem, type Storyboard, type StoryboardCharacterFact, type StoryboardReference } from "../../utils/flowBuilder";
+import {
+  isStoryboardTableRowV1,
+  isStoryboardTableRowV3,
+  parseStoryboardTableRow,
+  type AssetItem,
+  type Storyboard,
+  type StoryboardCharacterFact,
+  type StoryboardRequiredAssetFact,
+  type StoryboardReference,
+  type StoryboardTableRow,
+  type StoryboardTableRowV3,
+} from "../../utils/flowBuilder";
 import projectStore from "@/stores/project";
 import openAssetsSelector from "@/utils/assetsCheck";
 import productionAgentStore from "@/stores/productionAgent";
@@ -179,6 +210,7 @@ import StoryboardTableView from "./components/StoryboardTableView.vue";
 import StoryboardGridView from "./components/StoryboardGridView.vue";
 import StoryboardPreviewDialog from "./components/StoryboardPreviewDialog.vue";
 import StoryboardPromptDialog from "./components/StoryboardPromptDialog.vue";
+import StoryboardFactsDialog from "./components/StoryboardFactsDialog.vue";
 import StoryboardHistoryDialog from "./components/StoryboardHistoryDialog.vue";
 import storyboardImageCheck from "@/components/storyboardImageCheck.vue";
 import AudioClipDialog from "@/components/AudioClipDialog.vue";
@@ -209,7 +241,7 @@ import "./styles.scss";
 
 const { project } = storeToRefs(projectStore());
 const productionStore = productionAgentStore();
-const { episodesId } = storeToRefs(productionStore);
+const { episodesId, flowData } = storeToRefs(productionStore);
 const taskCenter = useTaskCenterStore();
 const { open, onChange, onCancel } = useFileDialog({ multiple: false, reset: true, accept: ".png,.jpg,.jpeg,.webp" });
 
@@ -244,38 +276,30 @@ const promptEditorLoading = ref(false);
 const promptEditorSaving = ref(false);
 const currentPromptTarget = ref<Storyboard | null>(null);
 const promptDraft = ref("");
- type StoryboardFactKey =
+const factEditorVisible = ref(false);
+const factEditorLoading = ref(false);
+const factEditorSaving = ref(false);
+const currentFactTarget = ref<Storyboard | null>(null);
+const factEditorVersion = ref<1 | 2 | 3>(3);
+const factEditorError = ref("");
+type StoryboardFactKey =
   | "scene"
   | "location"
   | "timeOfDay"
   | "sceneContinuityId"
   | "transitionFromPrevious"
+  | "shotDescription"
   | "picture"
   | "action"
   | "shotSize"
   | "cameraMove"
   | "cameraAngle"
   | "dialogue"
-  | "sound"
-  | "visibleEmotion";
- type StoryboardFactDraft = Record<StoryboardFactKey, string>;
- const storyboardFactKeys: StoryboardFactKey[] = [
-  "scene",
-  "location",
-  "timeOfDay",
-  "sceneContinuityId",
-  "transitionFromPrevious",
-  "picture",
-  "action",
-  "shotSize",
-  "cameraMove",
-  "cameraAngle",
-  "dialogue",
-  "sound",
-  "visibleEmotion",
-];
-const promptFactDraft = ref<StoryboardFactDraft>(createEmptyStoryboardFacts());
-const promptCharacterDraft = ref<StoryboardCharacterFact[]>([]);
+  | "sound";
+type StoryboardFactDraft = Record<StoryboardFactKey, string>;
+const factDraft = ref<StoryboardFactDraft>(createEmptyStoryboardFacts());
+const factRequiredAssetIds = ref<number[]>([]);
+const factLegacyPerformance = ref<{ visibleEmotion?: string; characters: StoryboardCharacterFact[] } | null>(null);
 const promptDraftReferences = ref<ReferenceImage[]>([]);
 const promptPrimaryNodeId = ref("");
 const promptNodeOptions = ref<{ label: string; value: string }[]>([]);
@@ -348,7 +372,25 @@ const promptEditorShotLabel = computed(() => {
   return `S${String(getStoryboardIndex(currentPromptTarget.value) + 1).padStart(2, "0")}`;
 });
 const hasUnreadyFacts = computed(() => storyboard.value.some((item) => item.factStatus !== "ready"));
+const hasStaleDerivedData = computed(() =>
+  storyboard.value.some((item) => item.promptStale === true || item.imageStale === true),
+);
 const promptDraftReferenceRows = computed(() => promptDraftReferences.value.map(referenceImageToView));
+const factEditorShotLabel = computed(() => {
+  if (!currentFactTarget.value) return "";
+  return `S${String(getStoryboardIndex(currentFactTarget.value) + 1).padStart(2, "0")}`;
+});
+const factAssetOptions = computed(() => {
+  const options = new Map<number, { label: string; value: number }>();
+  props.assetsData.forEach((asset) => {
+    if (!Number.isFinite(Number(asset.id))) return;
+    options.set(asset.id, { label: `${asset.name} · ${asset.type}`, value: asset.id });
+  });
+  getCurrentFactRequiredAssets().forEach((asset) => {
+    if (!options.has(asset.assetId)) options.set(asset.assetId, { label: `${asset.name} · ${asset.type}`, value: asset.assetId });
+  });
+  return [...options.values()];
+});
 
 function createEmptyStoryboardFacts(): StoryboardFactDraft {
   return {
@@ -357,6 +399,7 @@ function createEmptyStoryboardFacts(): StoryboardFactDraft {
     timeOfDay: "",
     sceneContinuityId: "",
     transitionFromPrevious: "",
+    shotDescription: "",
     picture: "",
     action: "",
     shotSize: "",
@@ -364,59 +407,129 @@ function createEmptyStoryboardFacts(): StoryboardFactDraft {
     cameraAngle: "",
     dialogue: "",
     sound: "",
-    visibleEmotion: "",
   };
 }
 
 function getStoryboardFacts(row: Storyboard): StoryboardFactDraft {
   const tableRow = parseStoryboardTableRow(row.tableRowJson);
+  const isV3 = isStoryboardTableRowV3(tableRow);
   const facts = createEmptyStoryboardFacts();
   facts.scene = String(row.scene ?? "");
-  facts.location = String(row.location ?? tableRow?.location ?? "");
-  facts.timeOfDay = String(row.timeOfDay ?? tableRow?.timeOfDay ?? "");
-  facts.sceneContinuityId = String(row.sceneContinuityId ?? tableRow?.sceneContinuityId ?? "");
-  facts.transitionFromPrevious = String(row.transitionFromPrevious ?? tableRow?.transitionFromPrevious ?? "");
-  facts.picture = String(row.picture ?? tableRow?.picture ?? "");
-  facts.action = String(row.action ?? tableRow?.action ?? "");
-  facts.shotSize = String(row.shotSize ?? tableRow?.shotSize ?? "");
-  facts.cameraMove = String(row.cameraMove ?? tableRow?.cameraMove ?? "");
-  facts.cameraAngle = String(row.cameraAngle ?? tableRow?.cameraAngle ?? "");
+  facts.location = String(tableRow?.location ?? row.location ?? "");
+  facts.timeOfDay = String(tableRow?.timeOfDay ?? row.timeOfDay ?? "");
+  facts.sceneContinuityId = String(tableRow?.sceneContinuityId ?? row.sceneContinuityId ?? "");
+  facts.transitionFromPrevious = String(tableRow?.transitionFromPrevious ?? row.transitionFromPrevious ?? "");
+  facts.shotDescription = isV3 ? String(tableRow.shotDescription) : "";
+  facts.picture = !isV3 ? String(tableRow?.picture ?? row.picture ?? "") : "";
+  facts.action = !isV3 ? String(tableRow?.action ?? row.action ?? "") : "";
+  facts.shotSize = String(tableRow?.shotSize ?? row.shotSize ?? "");
+  facts.cameraMove = String(tableRow?.cameraMove ?? row.cameraMove ?? "");
+  facts.cameraAngle = String(tableRow?.cameraAngle ?? row.cameraAngle ?? "");
   facts.dialogue = tableRow?.dialogue?.length
     ? tableRow.dialogue.map((item) => [item.speaker, item.text].filter(Boolean).join("：")).join("\n")
     : String(row.dialogue ?? "");
   facts.sound = tableRow?.soundEffects?.length ? tableRow.soundEffects.join("\n") : String(row.sound ?? "");
-  facts.visibleEmotion = String(tableRow?.visibleEmotion ?? row.visibleEmotion ?? "");
   return facts;
 }
 
-function getStoryboardCharacters(row: Storyboard): StoryboardCharacterFact[] {
-  const fallback = parseStoryboardTableRow(row.tableRowJson)?.characters || [];
-  const characters = Array.isArray(row.characters) ? row.characters : fallback;
-  return characters.map((character) => ({
-    name: String(character?.name || ""),
-    spatialPosition: String(character?.spatialPosition || ""),
-    orientation: String(character?.orientation || ""),
-    action: String(character?.action || ""),
-    ...(character?.posture ? { posture: String(character.posture) } : {}),
-    ...(character?.gaze ? { gaze: String(character.gaze) } : {}),
-    ...(character?.handAction ? { handAction: String(character.handAction) } : {}),
-  }));
+function getStoryboardVersion(row: Storyboard): 1 | 2 | 3 {
+  const version = parseStoryboardTableRow(row.tableRowJson)?.version;
+  if (version === 1 || version === 2 || version === 3) return version;
+  return row.factVersion === 1 ? 1 : row.factVersion === 3 ? 3 : 2;
 }
 
-function getStoryboardFactPayload(row: Storyboard) {
-  return storyboardFactKeys.reduce<Record<string, string | null>>((payload, key) => {
-    const value = String(row[key] ?? "").trim();
-    payload[key] = key === "sceneContinuityId" ? value || null : value;
-    return payload;
-  }, {});
+function getLegacyStoryboardPerformance(row: Storyboard): { visibleEmotion?: string; characters: StoryboardCharacterFact[] } | null {
+  const tableRow = parseStoryboardTableRow(row.tableRowJson);
+  const isLegacy = isStoryboardTableRowV1(tableRow) || Number(row.factVersion) === 1;
+  if (!isLegacy) return null;
+  const characters = isStoryboardTableRowV1(tableRow) ? tableRow.characters : Array.isArray(row.characters) ? row.characters : [];
+  const visibleEmotion = isStoryboardTableRowV1(tableRow) ? tableRow.visibleEmotion : String(row.visibleEmotion ?? "");
+  if (!characters.length && !visibleEmotion) return null;
+  return { visibleEmotion, characters };
 }
 
-function getStoryboardFactDraftPayload(facts: StoryboardFactDraft) {
-  return storyboardFactKeys.reduce<Record<string, string | null>>((payload, key) => {
-    const value = facts[key]?.trim() || "";
-    payload[key] = key === "sceneContinuityId" ? value || null : value;
-    return payload;
-  }, {});
+function getCurrentFactRequiredAssets() {
+  const tableRow = currentFactTarget.value ? parseStoryboardTableRow(currentFactTarget.value.tableRowJson) : undefined;
+  return tableRow?.requiredAssets ?? [];
+}
+
+function parseDialogueDraft(value: string, existing: StoryboardTableRow["dialogue"]) {
+  const normalized = value.trim();
+  const existingText = existing.map((item) => [item.speaker, item.text].filter(Boolean).join("：")).join("\n");
+  if (normalized === existingText.trim()) return existing;
+  return normalized
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.search(/[：:]/);
+      return separator >= 0
+        ? { speaker: line.slice(0, separator).trim(), text: line.slice(separator + 1).trim() }
+        : { speaker: "", text: line };
+    })
+    .filter((item) => item.text);
+}
+
+function optionalFact(value: string) {
+  return value.trim() || undefined;
+}
+
+function getRequiredAssetsForSave(existing: StoryboardRequiredAssetFact[], ids: number[]) {
+  const existingById = new Map(existing.map((asset) => [asset.assetId, asset]));
+  const assetsById = new Map(props.assetsData.map((asset) => [asset.id, asset]));
+  return [...new Set(ids)]
+    .filter((id) => Number.isFinite(Number(id)))
+    .map((assetId, order) => {
+      const existingAsset = existingById.get(assetId);
+      if (existingAsset) return { ...existingAsset, order };
+      const asset = assetsById.get(assetId);
+      const type = asset?.type === "role" || asset?.type === "scene" || asset?.type === "clip" ? asset.type : "tool";
+      return { assetId, name: asset?.name || `资产 ${assetId}`, type, order } as StoryboardRequiredAssetFact;
+    });
+}
+
+function buildNativeFactTableRow(row: Storyboard, facts: StoryboardFactDraft, requiredAssetIds: number[]): StoryboardTableRow {
+  const existing = parseStoryboardTableRow(row.tableRowJson);
+  if (!existing) throw new Error("当前分镜事实不是有效的原生结构，无法安全编辑。");
+  const common = {
+    ...existing,
+    index: existing.index,
+    durationSec: Number(row.duration ?? existing.durationSec),
+    location: facts.location.trim(),
+    timeOfDay: facts.timeOfDay.trim(),
+    ...(optionalFact(facts.sceneContinuityId) ? { sceneContinuityId: optionalFact(facts.sceneContinuityId) } : {}),
+    shotSize: facts.shotSize.trim(),
+    ...(optionalFact(facts.cameraMove) ? { cameraMove: optionalFact(facts.cameraMove) } : {}),
+    ...(optionalFact(facts.cameraAngle) ? { cameraAngle: optionalFact(facts.cameraAngle) } : {}),
+    ...(optionalFact(facts.transitionFromPrevious)
+      ? { transitionFromPrevious: optionalFact(facts.transitionFromPrevious) }
+      : {}),
+    dialogue: parseDialogueDraft(facts.dialogue, existing.dialogue),
+    soundEffects: facts.sound
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+    requiredAssets: getRequiredAssetsForSave(existing.requiredAssets, requiredAssetIds),
+  } as Record<string, unknown>;
+  if (!optionalFact(facts.sceneContinuityId)) delete common.sceneContinuityId;
+  if (!optionalFact(facts.cameraMove)) delete common.cameraMove;
+  if (!optionalFact(facts.cameraAngle)) delete common.cameraAngle;
+  if (!optionalFact(facts.transitionFromPrevious)) delete common.transitionFromPrevious;
+  if (isStoryboardTableRowV3(existing)) return { ...common, version: 3, shotDescription: facts.shotDescription.trim() } as StoryboardTableRowV3;
+  return { ...common, picture: facts.picture.trim(), action: facts.action.trim() } as StoryboardTableRow;
+}
+
+async function updateStoryboardFacts(row: Storyboard, facts: StoryboardFactDraft, requiredAssetIds: number[]) {
+  if (!row.id) throw new Error("分镜 ID 缺失");
+  const tableRowJson = buildNativeFactTableRow(row, facts, requiredAssetIds);
+  const { data } = await axios.post("/production/storyboard/facts/update", {
+    projectId: Number(project.value?.id),
+    scriptId: Number(episodesId.value),
+    storyboardId: row.id,
+    tableRowJson,
+  });
+  notifyStoryboardIssues(data);
+  await productionStore.getFlowData();
 }
 
 function notifyStoryboardIssues(data: any) {
@@ -768,8 +881,6 @@ onBeforeUnmount(() => {
 async function openPromptEditor(row: Storyboard) {
   currentPromptTarget.value = row;
   promptDraft.value = row.prompt || "";
-  promptFactDraft.value = getStoryboardFacts(row);
-  promptCharacterDraft.value = getStoryboardCharacters(row);
   promptDraftReferences.value = [...getAssetReferenceImagesByIds(row.associateAssetsIds), ...getLocalReferenceImages(row)];
   promptPrimaryNodeId.value = "";
   promptNodeOptions.value = [];
@@ -800,6 +911,42 @@ async function openPromptEditor(row: Storyboard) {
     window.$message.error((e as any)?.message || $t("workbench.production.editImage.fetchFailed"));
   } finally {
     promptEditorLoading.value = false;
+  }
+}
+
+function openFactEditor(row: Storyboard) {
+  currentFactTarget.value = row;
+  factEditorLoading.value = false;
+  factEditorError.value = "";
+  const tableRow = parseStoryboardTableRow(row.tableRowJson);
+  if (!tableRow) {
+    factEditorVersion.value = getStoryboardVersion(row);
+    factDraft.value = createEmptyStoryboardFacts();
+    factRequiredAssetIds.value = [];
+    factLegacyPerformance.value = null;
+    factEditorError.value = "当前分镜事实不是有效的原生结构，无法安全编辑。请通过 Agent 或后端修订后再试。";
+    factEditorVisible.value = true;
+    return;
+  }
+  factEditorVersion.value = tableRow.version;
+  factDraft.value = getStoryboardFacts(row);
+  factRequiredAssetIds.value = tableRow.requiredAssets.map((asset) => asset.assetId);
+  factLegacyPerformance.value = getLegacyStoryboardPerformance(row);
+  factEditorVisible.value = true;
+}
+
+async function saveFactEditor() {
+  const row = currentFactTarget.value;
+  if (!row?.id || factEditorSaving.value || factEditorError.value) return;
+  factEditorSaving.value = true;
+  try {
+    await updateStoryboardFacts(row, factDraft.value, factRequiredAssetIds.value);
+    factEditorVisible.value = false;
+    window.$message.success($t("common.editSuccess"));
+  } catch (error) {
+    window.$message.error((error as any)?.message || $t("common.saveFailed"));
+  } finally {
+    factEditorSaving.value = false;
   }
 }
 
@@ -939,21 +1086,9 @@ function previewPromptReference(ref: ReferenceView) {
 async function saveStoryboardInfo(row: Storyboard) {
   if (!row.id) return;
   try {
-    const { data } = await axios.post("/production/storyboard/editStoryboardInfo", {
-      id: row.id,
-      prompt: row.prompt,
-      videoDesc: "",
-      duration: row.duration,
-      groupKey: row.groupKey,
-      groupName: row.groupName,
-      groupIntent: row.groupIntent,
-      beatId: row.beatId,
-      ...getStoryboardFactPayload(row),
-      associateAssetsIds: row.associateAssetsIds ?? [],
-      referenceImages: row.referenceImages ?? [],
-    });
-    notifyStoryboardIssues(data);
-    await productionStore.getFlowData();
+    const tableRow = parseStoryboardTableRow(row.tableRowJson);
+    if (!tableRow) throw new Error("当前分镜事实不是有效的原生结构，无法更新时长。");
+    await updateStoryboardFacts(row, getStoryboardFacts(row), tableRow.requiredAssets.map((asset) => asset.assetId));
   } catch (e) {
     window.$message.error((e as any)?.message || $t("common.saveFailed"));
   }
@@ -1313,9 +1448,8 @@ async function submitStoryboardImageBatch(rows: Storyboard[], compulsory = false
 async function savePromptEditor() {
   const row = currentPromptTarget.value;
   if (!row?.id || promptEditorSaving.value) return;
-  const invalidCharacter = promptCharacterDraft.value.find((character) => !character.name.trim() || !character.spatialPosition.trim() || !character.orientation.trim() || !character.action.trim());
-  if (invalidCharacter) return window.$message.warning("人物事实需填写姓名、空间位置、朝向和动作");
   promptEditorSaving.value = true;
+  let flowSaved = false;
   try {
     const { nodes, edges, primary } = buildPromptFlow(row);
     const { data } = await axios.post("/production/editImage/saveImageFlow", {
@@ -1329,31 +1463,19 @@ async function savePromptEditor() {
     });
     const flowId = data?.flowId ?? data?.id;
     if (!flowId) throw new Error($t("workbench.production.editImage.saveFailed"));
+    flowSaved = true;
 
     const references = promptDraftReferences.value.map(normalizeReferenceImage);
     const referenceFields = splitStoryboardReferences(references);
-    const { data: editResult } = await axios.post("/production/storyboard/editStoryboardInfo", {
-      id: row.id,
+    const { data: panelResult } = await axios.post("/production/storyboard/panel/update", {
+      projectId: Number(project.value?.id),
+      scriptId: Number(episodesId.value),
+      storyboardId: row.id,
       prompt: promptDraft.value,
-      videoDesc: "",
-      duration: row.duration,
-      groupKey: row.groupKey,
-      groupName: row.groupName,
-      groupIntent: row.groupIntent,
-      beatId: row.beatId,
-      ...getStoryboardFactDraftPayload(promptFactDraft.value),
-      characters: promptCharacterDraft.value.map((character) => ({
-        name: character.name.trim(),
-        spatialPosition: character.spatialPosition.trim(),
-        orientation: character.orientation.trim(),
-        action: character.action.trim(),
-        ...(character.posture?.trim() ? { posture: character.posture.trim() } : {}),
-        ...(character.gaze?.trim() ? { gaze: character.gaze.trim() } : {}),
-        ...(character.handAction?.trim() ? { handAction: character.handAction.trim() } : {}),
-      })),
+      shouldGenerateImage: Boolean(row.shouldGenerateImage),
       ...referenceFields,
     });
-    notifyStoryboardIssues(editResult);
+    notifyStoryboardIssues(panelResult);
 
     await productionStore.getFlowData();
     promptFlowSnapshot.value = {
@@ -1364,7 +1486,7 @@ async function savePromptEditor() {
     promptEditorVisible.value = false;
     window.$message.success($t("common.editSuccess"));
   } catch (e) {
-    window.$message.error((e as any)?.message || $t("common.saveFailed"));
+    window.$message.error((e as any)?.message || (flowSaved ? "画布已保存，但分镜图面板信息未保存，可重试。" : $t("common.saveFailed")));
   } finally {
     promptEditorSaving.value = false;
   }
@@ -1425,6 +1547,26 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
   if (id === null && insertAfterIndex !== null && imageUrl) {
     const referenceFields = splitStoryboardReferences(references);
     const sourceFrame = storyboard.value[insertAfterIndex];
+    const useV3 = flowData.value?.storyboardFactWriteVersion === 3;
+    const v3TableRow: StoryboardTableRowV3 | null = useV3
+      ? {
+          version: 3,
+          index: Math.max(0, Number(sourceFrame?.index ?? insertAfterIndex) + 1),
+          groupKey: String(sourceFrame?.groupKey ?? ""),
+          beatId: String(sourceFrame?.beatId ?? ""),
+          durationSec: 0,
+          location: String(sourceFrame?.location ?? ""),
+          timeOfDay: String(sourceFrame?.timeOfDay ?? ""),
+          ...(sourceFrame?.sceneContinuityId ? { sceneContinuityId: sourceFrame.sceneContinuityId } : {}),
+          shotDescription: "",
+          shotSize: String(sourceFrame?.shotSize ?? ""),
+          ...(sourceFrame?.cameraMove ? { cameraMove: sourceFrame.cameraMove } : {}),
+          ...(sourceFrame?.cameraAngle ? { cameraAngle: sourceFrame.cameraAngle } : {}),
+          dialogue: [],
+          soundEffects: [],
+          requiredAssets: [],
+        }
+      : null;
     const newFrame: Storyboard = {
       duration: 0,
       prompt,
@@ -1442,13 +1584,21 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
       location: sourceFrame?.location,
       timeOfDay: sourceFrame?.timeOfDay,
       sceneContinuityId: sourceFrame?.sceneContinuityId,
-      picture: "",
-      action: "",
+      ...(v3TableRow
+        ? {
+            factVersion: 3,
+            tableRowJson: JSON.stringify(v3TableRow),
+            shotDescription: "",
+          }
+        : {
+            factVersion: 2,
+            picture: "",
+            action: "",
+          }),
       shotSize: sourceFrame?.shotSize,
       cameraMove: sourceFrame?.cameraMove,
       dialogue: "",
       sound: sourceFrame?.sound,
-      visibleEmotion: "",
       status: "completed",
       state: "已完成",
     };
@@ -1475,16 +1625,12 @@ async function save({ imageUrl, media, flowId, primaryNodeId, prompt, references
     if (primaryNodeId) {
       const referenceFields = splitStoryboardReferences(references);
       try {
-        const { data } = await axios.post("/production/storyboard/editStoryboardInfo", {
-          id: target.id,
+        const { data } = await axios.post("/production/storyboard/panel/update", {
+          projectId: Number(project.value?.id),
+          scriptId: Number(episodesId.value),
+          storyboardId: target.id,
           prompt,
-          videoDesc: "",
-          duration: target.duration,
-          groupKey: target.groupKey,
-          groupName: target.groupName,
-          groupIntent: target.groupIntent,
-          beatId: target.beatId,
-          ...getStoryboardFactPayload(target),
+          shouldGenerateImage: Boolean(target.shouldGenerateImage),
           ...referenceFields,
         });
         notifyStoryboardIssues(data);

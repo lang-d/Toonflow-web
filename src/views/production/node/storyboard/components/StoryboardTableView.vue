@@ -34,9 +34,13 @@
         <template #shot="{ row }">
           <div class="shotCell">
             <t-checkbox :checked="selectedIds.includes(row.id!)" :disabled="!row.id" @change="(checked: boolean) => emit('toggleSelect', row.id!, checked)" />
-            <t-tag :style="{ backgroundColor: tagColors[getStoryboardIndex(row) % tagColors.length], color: '#fff', border: 'none' }">
-              S{{ String(getStoryboardIndex(row) + 1).padStart(2, "0") }}
-            </t-tag>
+            <t-tooltip content="编辑正式分镜事实">
+              <button class="shotFactButton" type="button" @click="emit('openFactEditor', row)">
+                <t-tag :style="{ backgroundColor: tagColors[getStoryboardIndex(row) % tagColors.length], color: '#fff', border: 'none' }">
+                  S{{ String(getStoryboardIndex(row) + 1).padStart(2, "0") }}
+                </t-tag>
+              </button>
+            </t-tooltip>
             <t-tag v-if="row.factStatus && row.factStatus !== 'ready'" size="small" :theme="getFactStatusTheme(row.factStatus)" variant="light">
               {{ getFactStatusLabel(row.factStatus) }}
             </t-tag>
@@ -81,6 +85,14 @@
         </template>
         <template #prompt="{ row }">
           <button class="promptCell" type="button" @click="emit('openPromptEditor', row)">
+            <div v-if="row.promptStale || row.sourceTracked === false" class="promptReferenceSummary">
+              <t-tag v-if="row.promptStale" size="small" theme="warning" variant="light">
+                {{ $t("workbench.production.node.storyboard.promptStale") }}
+              </t-tag>
+              <t-tag v-if="row.sourceTracked === false" size="small" variant="light">
+                {{ $t("workbench.production.node.storyboard.sourceUntracked") }}
+              </t-tag>
+            </div>
             <div v-if="getStoryboardReferences(row).length" class="promptReferenceSummary">
               <span v-for="ref in getStoryboardReferences(row).slice(0, 3)" :key="ref.key" class="promptReferenceChip">
                 <img :src="ref.src" />
@@ -96,6 +108,9 @@
         </template>
         <template #image="{ row }">
           <div class="tableImageCell">
+            <t-tag v-if="row.imageStale" size="small" theme="warning" variant="light">
+              {{ $t("workbench.production.node.storyboard.imageStale") }}
+            </t-tag>
             <div
               v-if="getStoryboardImageUrl(row, 'display') && isStoryboardCompleted(row)"
               class="storyboardThumbWrap"
@@ -142,9 +157,9 @@
         </template>
         <template #operate="{ row }">
           <div class="rowActions">
-            <t-tooltip :content="$t('workbench.production.node.storyboard.editInfo')">
-              <t-button size="small" shape="circle" variant="text" @click="emit('openPromptEditor', row)">
-                <template #icon><i-edit /></template>
+            <t-tooltip content="编辑正式分镜事实">
+              <t-button size="small" shape="circle" variant="text" @click="emit('openFactEditor', row)">
+                <template #icon><i-notes /></template>
               </t-button>
             </t-tooltip>
             <t-tooltip :content="$t('workbench.production.node.storyboard.deleteNode')">
@@ -182,6 +197,7 @@ const emit = defineEmits<{
   generateGroup: [rows: any[]];
   toggleSelect: [id: number, checked: boolean];
   openPromptEditor: [row: any];
+  openFactEditor: [row: any];
   saveStoryboardInfo: [row: any];
   openImageViewer: [row: any];
   regenerateSingleImage: [row: any];
@@ -227,6 +243,14 @@ function getFactStatusTheme(status?: string) {
 
 .assetChipButton:hover {
   color: var(--td-brand-color);
+}
+
+.shotFactButton {
+  display: inline-flex;
+  padding: 0;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
 }
 
 .assetAudioIcon,

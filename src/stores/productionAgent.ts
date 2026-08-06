@@ -138,6 +138,9 @@ interface EpisodeSession {
   flowRefreshPromise: Promise<void> | null;
   completedMessageIds: Set<string>;
   storyboardFailureNoticeKeys: Set<string>;
+  historyHydrated: boolean;
+  historyDirty: boolean;
+  flowHydrated: boolean;
 }
 
 interface ProductionAssetTaskBinding {
@@ -685,6 +688,7 @@ function makeProductionAgentStore(projectId: string) {
     const episodesId = ref<number>();
     const sessions = new Map<number, EpisodeSession>();
     const fallbackFlowData = ref<FlowData>(createEmptyFlowData());
+    const productionViewActive = ref(false);
     const taskCenter = useTaskCenterStore();
 
     watch(
@@ -1063,22 +1067,33 @@ function makeProductionAgentStore(projectId: string) {
         await syncRunStatus(session.episodeId);
         if (recoveryId !== session.recoveryRequestId) return;
 
-        try {
-          await getHistory(session.episodeId);
-        } catch (error) {
-          console.warn("[productionAgent] failed to recover Memory", error);
-        }
-        if (recoveryId !== session.recoveryRequestId) return;
-
-        const run = session.latestRun.value ?? session.activeRun.value;
-        if (run?.runId) await loadRunDetail(session, run.runId, recoveryId);
-        else clearRunDetail(session);
+        // History and detail may be large. They are a background reconciliation,
+        // not a prerequisite for swapping the canvas to this episode.
+        void reconcilePanelInBackground(session, recoveryId, force);
       })();
       session.recoveryPromise = recovery;
       try {
         await recovery;
       } finally {
         if (session.recoveryPromise === recovery) session.recoveryPromise = null;
+      }
+    }
+
+    async function reconcilePanelInBackground(session: EpisodeSession, recoveryId: number, force = false) {
+      try {
+        if ((force || !session.historyHydrated || session.historyDirty) && !session.loadingHistory.value) {
+          await getHistory(session.episodeId);
+        }
+        if (recoveryId !== session.recoveryRequestId) return;
+
+        const run = session.latestRun.value ?? session.activeRun.value;
+        if (run?.runId) {
+          if (!session.runDetailLoading.value) await loadRunDetail(session, run.runId, recoveryId);
+        } else {
+          clearRunDetail(session);
+        }
+      } catch (error) {
+        console.warn("[productionAgent] failed to reconcile panel history", error);
       }
     }
 
@@ -1090,6 +1105,7 @@ function makeProductionAgentStore(projectId: string) {
         const oldest = session.terminalRunKeys.values().next().value;
         if (oldest) session.terminalRunKeys.delete(oldest);
       }
+      session.historyDirty = true;
       const detailSync = run.runId ? loadRunDetail(session, run.runId).catch(() => null) : Promise.resolve(null);
       void detailSync.finally(() => refreshCompletedAgentFlow(session));
     }
@@ -1165,9 +1181,8 @@ function makeProductionAgentStore(projectId: string) {
     async function handleXmlTag(session: EpisodeSession, data: XmlTagEvent) {
       const { tag, value, status, isComplete } = data;
       if (tag !== "script") return;
-      session.flowData.value.script = value ?? "";
-
       if (status !== "complete" || !isComplete) return;
+      session.flowData.value.script = value ?? "";
       session.contentSavePromise = session.contentSavePromise.catch(() => {}).then(() => setFlowData(session.episodeId));
       await session.contentSavePromise;
     }
@@ -1292,6 +1307,9 @@ function makeProductionAgentStore(projectId: string) {
         (socket) => {
           if (!socket) return;
           socket.on("connect", () => {
+            // A reconnect may have missed persisted transcript entries while the
+            // socket was unavailable, so force the next background reconcile.
+            session.historyDirty = true;
             void recoverPanel(session.episodeId);
           });
           socket.on("agent:run:update", (payload: ProductionAgentRunUpdatePayload) => {
@@ -1355,12 +1373,16 @@ function makeProductionAgentStore(projectId: string) {
           socket.on("message", (event: { id?: string; role?: string; status?: string; ext?: Record<string, any> }) => {
             handleCommitResultPayload(session, event.ext, event.id);
             if (event.role === "assistant" && event.status === "complete") {
+              session.historyDirty = true;
               void refreshCompletedAgentFlow(session, event.id);
             }
           });
           socket.on("message:update", (event: { id?: string; status?: string; ext?: Record<string, any> }) => {
             handleCommitResultPayload(session, event.ext, event.id);
-            if (event.status === "complete") void refreshCompletedAgentFlow(session, event.id);
+            if (event.status === "complete") {
+              session.historyDirty = true;
+              void refreshCompletedAgentFlow(session, event.id);
+            }
           });
           socket.on("content:add", (event: { messageId?: string; content?: any }) => {
             handleCommitResultPayload(session, event.content?.data, event.messageId);
@@ -1371,7 +1393,11 @@ function makeProductionAgentStore(projectId: string) {
               if (result) void handleStoryboardCommitTerminal(session, result, event.messageId);
               return;
             }
-            handleCommitResultPayload(session, event.data, event.messageId);
+            // Text chunks are handled by useChat. Avoid reparsing every string
+            // fragment here; only structured tool payloads can carry a commit.
+            if (event.data && typeof event.data === "object") {
+              handleCommitResultPayload(session, event.data, event.messageId);
+            }
           });
         },
         { immediate: true },
@@ -1407,6 +1433,10 @@ function makeProductionAgentStore(projectId: string) {
         xmlTags: [
           { tag: "script", keepInMessage: false },
         ],
+        streamPublication: {
+          shouldPublish: () => productionViewActive.value && episodesId.value === scriptId,
+          minIntervalMs: 48,
+        },
         onXmlTag: (event) => {
           void handleXmlTag(session, event);
         },
@@ -1453,6 +1483,9 @@ function makeProductionAgentStore(projectId: string) {
         flowRefreshPromise: null,
         completedMessageIds: new Set(),
         storyboardFailureNoticeKeys: new Set(),
+        historyHydrated: false,
+        historyDirty: true,
+        flowHydrated: false,
       };
       session.stopSocketWatch = setupSocketHandlers(session);
       sessions.set(scriptId, session);
@@ -1559,6 +1592,7 @@ function makeProductionAgentStore(projectId: string) {
       session.assetTaskBindings.forEach((release) => release());
       session.assetTaskBindings.clear();
       session.flowData.value = normalizeFlowData(data);
+      session.flowHydrated = true;
       restoreAssetTaskBindings(session);
       notifyStoryboardFailure(session, session.flowData.value.storyboardGenerationLastFailure);
       if (import.meta.env.DEV) {
@@ -1969,6 +2003,35 @@ function makeProductionAgentStore(projectId: string) {
       });
     }
 
+    /**
+     * Makes an episode visible without waiting for its (potentially very long)
+     * archived transcript. The returned flag lets the canvas immediately use a
+     * warm in-memory flow while reconciliation continues in the background.
+     */
+    function activateEpisode(scriptId: number) {
+      const session = getSession(scriptId);
+      if (!session) return false;
+      if (productionViewActive.value && episodesId.value === session.episodeId) {
+        session.chatApi.flushBufferedContent();
+      }
+      void recoverPanel(session.episodeId);
+      return session.flowHydrated;
+    }
+
+    /** Keep agent sockets alive while suppressing off-screen transcript renders. */
+    function setProductionViewActive(active: boolean) {
+      productionViewActive.value = active;
+      if (!active) return;
+      const session = getActiveSession();
+      if (!session) return;
+      session.chatApi.flushBufferedContent();
+      void recoverPanel(session.episodeId);
+    }
+
+    function hasEpisodeFlow(scriptId: number) {
+      return Boolean(sessions.get(scriptId)?.flowHydrated);
+    }
+
     async function getHistory(scriptId = episodesId.value) {
       const session = getSession(scriptId);
       if (!session) return;
@@ -1978,6 +2041,8 @@ function makeProductionAgentStore(projectId: string) {
       try {
         const data = await fetchAgentMemory(session);
         if (requestId !== session.historyRequestId) return;
+        session.historyHydrated = true;
+        session.historyDirty = false;
         const hasLiveMessage = hasLiveGenerationMessage(session.chatApi.messages.value);
         if (hasLiveMessage && session.activeRun.value?.status === "running") {
           session.chatApi.syncGenerationStatus();
@@ -2105,6 +2170,7 @@ function makeProductionAgentStore(projectId: string) {
     }
 
     function disposeSession() {
+      productionViewActive.value = false;
       sessions.forEach((session) => {
         session.assetTaskBindings.forEach((release) => release());
         session.storyboardTaskBindings.forEach((release) => release());
@@ -2151,6 +2217,9 @@ function makeProductionAgentStore(projectId: string) {
       getFlowData,
       episodesId,
       updateContext,
+      activateEpisode,
+      setProductionViewActive,
+      hasEpisodeFlow,
       getHistory,
       loadingHistory,
       batchGenerateStoryboard,
@@ -2244,6 +2313,9 @@ const useEmptyProductionAgentStore = defineStore("productionAgent-empty", () => 
     getFlowData: noopAsync,
     episodesId,
     updateContext: noop,
+    activateEpisode: () => false,
+    setProductionViewActive: noop,
+    hasEpisodeFlow: () => false,
     getHistory: noopAsync,
     loadingHistory,
     batchGenerateStoryboard: noopAsync,

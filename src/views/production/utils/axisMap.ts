@@ -21,6 +21,7 @@ export interface AxisMapAxis {
   from: string;
   to: string;
   label: string;
+  resolved: boolean;
 }
 
 export interface AxisMap {
@@ -113,8 +114,8 @@ function parseAxisMap(source: string): AxisMap | null {
     const from = stringValue(input.axis.from);
     const to = stringValue(input.axis.to);
     const label = stringValue(input.axis.label);
-    if (!from || !to || !label || from === to || !nodeById.has(from) || !nodeById.has(to)) return null;
-    axis = { from, to, label };
+    if (!from || !to || !label || from === to) return null;
+    axis = { from, to, label, resolved: nodeById.has(from) && nodeById.has(to) };
   }
 
   const cameras: AxisMapCamera[] = [];
