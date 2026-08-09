@@ -40,6 +40,18 @@ interface VideoModel {
   associationSkills?: string;
   audio: "optional" | false | true;
   durationResolutionMap: { duration: number[]; resolution: string[] }[];
+  videoPromptTypeCapability?: VideoPromptTypeCapability | null;
+  selectedVideoPromptType?: string | null;
+}
+
+interface VideoPromptTypeOption {
+  value: string;
+  label: string;
+}
+
+interface VideoPromptTypeCapability {
+  options: VideoPromptTypeOption[];
+  defaultValue?: string;
 }
 interface UploadItemAssets extends UploadItemBase {
   sources: "assets";
@@ -120,6 +132,8 @@ interface TrackItem {
   reviewState?: import("@/types/productionReview").ProductionReviewState;
   reviewIssues?: import("@/types/productionReview").ProductionReviewSuggestion[];
   status?: import("@/types/api").TaskStatus;
+  phase?: string | null;
+  progress?: number | null;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   reason?: string;
   taskId?: string;
@@ -134,6 +148,8 @@ interface VideoItem {
   src: string;
   media?: import("@/types/api").MediaRef;
   status?: import("@/types/api").TaskStatus;
+  phase?: string | null;
+  progress?: number | null;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   errorReason?: string | null;
   taskId?: string;

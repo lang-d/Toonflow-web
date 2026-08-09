@@ -78,7 +78,6 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from "vue";
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
@@ -87,18 +86,20 @@ import JSZip from "jszip";
 import settingStore from "@/stores/setting";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus } from "@/stores/taskCenter";
 import { getReviewMessage } from "@/utils/productionReview";
+import { buildVideoReferencePayload } from "../videoGenerationCapabilities";
 
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
 const { removeCache } = imageListCacheStore();
 const taskCenter = useTaskCenterStore();
-const episodesId = inject<Ref<number>>("episodesId")!;
 const props = defineProps<{
+  scriptId: number;
   modelParmas: ModelSetting;
   imageList: UploadItem[];
-  clampDuration: (trackDuration: number) => number;
+  supportedDurations: number[];
   promptPrefix?: string;
   promptSuffix?: string;
+  videoPromptType?: string | null;
   addTrackLoading?: boolean;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
@@ -113,6 +114,8 @@ const emit = defineEmits<{
   change: [prevIndex: number];
   saveImageList: [trackId: number];
   addTrack: [];
+  "video-task-submitted": [payload: { videoId: number; trackId: number; taskId?: string; queueTaskId?: number; status?: unknown }];
+  "prompt-task-submitted": [payload: { trackId: number; taskId?: string; status?: unknown }];
 }>();
 const itemBoxRef = ref<HTMLElement>();
 const trackItemRefs = ref<HTMLElement[]>([]);
@@ -216,12 +219,14 @@ async function deleteTrack(index: number) {
   checkedTrackIds.value = checkedTrackIds.value.filter((id) => id !== track.id);
   // 删除该轨道的图片缓存
   const pid = project.value?.id;
-  const sid = episodesId.value;
+  const sid = props.scriptId;
   if (pid != null && sid != null && track.id != null) {
     removeCache(pid, sid, track.id);
   }
-  taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), track.id));
-  track.videoList.forEach((video) => taskCenter.removeTask(createTaskKey("video", Number(project.value?.id), video.id)));
+  if (track.taskId) taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), track.id, undefined, track.taskId));
+  track.videoList.forEach((video) => {
+    if (video.taskId) taskCenter.removeTask(createTaskKey("video", Number(project.value?.id), track.id, undefined, video.taskId));
+  });
   if (activeTrackIndex.value >= trackList.value.length) {
     activeTrackIndex.value = trackList.value.length - 1;
   }
@@ -289,12 +294,7 @@ function batchGenText() {
   trackList.value.forEach((track, index) => {
     if (!checkedTrackIds.value.includes(track.id)) return;
     const trackId = track.id;
-    const info = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track);
-    trackData.push({
-      trackId,
-      info: info.filter((i) => i.id),
-    });
-    taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), track.id));
+    trackData.push({ trackId, info: buildVideoReferencePayload(props.modelParmas.mode, getTrackReferences(track)) });
     track.state = "生成中";
     track.status = "processing";
   });
@@ -306,6 +306,7 @@ function batchGenText() {
       mode: props.modelParmas.mode,
       promptPrefix: props.promptPrefix ?? "",
       promptSuffix: props.promptSuffix ?? "",
+      videoPromptType: props.videoPromptType ?? undefined,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
     })
     .then(({ data }) => {
@@ -320,6 +321,7 @@ function batchGenText() {
         if (taskId) {
           track.taskId = taskId;
           track.status = "queued";
+          emit("prompt-task-submitted", { trackId: track.id, taskId, status: "queued" });
         }
       });
       window.$message.success("开始生成提示词");
@@ -342,19 +344,9 @@ function batchGenText() {
  * 其他轨道 → uploadBoxCache（含切换前的编辑）→ 降级 track.medias
  * @param filterEmpty 是否过滤掉没有 src 的项（生成视频时需要过滤，生成提示词时不需要）
  */
-function getTrackUploadInfo(track: TrackItem, filterEmpty = false) {
+function getTrackReferences(track: TrackItem): UploadItem[] {
   const activeTrackId = trackList.value[activeTrackIndex.value]?.id;
-
-  if (track.id === activeTrackId) {
-    const items = props.imageList as UploadItem[];
-    return (filterEmpty ? items.filter((item) => Boolean(item.src)) : items).filter((item) => item.id != null && Boolean(item.sources)).map(({ id, sources }) => ({
-      id,
-      sources: sources as WorkbenchReferenceSource,
-    }));
-  }
-  return track.medias
-    .filter((m) => (!filterEmpty || Boolean(m.src)) && m.id != null && Boolean(m.sources))
-    .map(({ id, sources }) => ({ id, sources: sources as WorkbenchReferenceSource }));
+  return (track.id === activeTrackId ? props.imageList : track.medias) as UploadItem[];
 }
 const generateVideoLoad = ref(false);
 /** 批量为已勾选轨道生成视频 */
@@ -365,7 +357,7 @@ function batchGenVideo() {
   }
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.generateConfirm"),
-    body: $t("workbench.generate.generateVideosInBatches"),
+    body: `${$t("workbench.generate.generateVideosInBatches")}\n\n模型：${props.modelParmas.model}\n模式：${props.modelParmas.mode}\n分辨率：${props.modelParmas.resolution}\n音频：${props.modelParmas.audio ? "生成" : "不生成"}\n已选轨道：${checkedTrackIds.value.length} 条（按各轨道已保存时长）`,
     onConfirm: async () => {
       dlg.destroy();
       generateVideoLoad.value = true;
@@ -376,11 +368,20 @@ function batchGenVideo() {
         generateVideoLoad.value = false;
         return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
       }
+      const invalidDurations = checkedTrackData
+        .map((track) => ({ track, duration: Number(track.duration || props.modelParmas.duration) }))
+        .filter(({ duration }) => props.supportedDurations.length > 0 && !props.supportedDurations.includes(duration));
+      if (invalidDurations.length) {
+        generateVideoLoad.value = false;
+        const supported = props.supportedDurations.join(", ");
+        return window.$message.warning(`当前模型不支持以下轨道时长：${invalidDurations.map(({ track, duration }) => `#${track.id} ${duration}s`).join("、")}。支持：${supported}s`);
+      }
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
-        const uploadData = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track, true);
+        const duration = Number(track.duration || props.modelParmas.duration);
+        const uploadData = buildVideoReferencePayload(props.modelParmas.mode, getTrackReferences(track));
         return {
-          duration: props.clampDuration(track.duration || props.modelParmas.duration),
+          duration,
           prompt: composeTrackPrompt(track.prompt),
           uploadData,
           trackId,
@@ -388,11 +389,12 @@ function batchGenVideo() {
       });
       const requestData = {
         projectId: project.value?.id,
-        scriptId: episodesId.value,
+        scriptId: props.scriptId,
         model: props.modelParmas.model,
         mode: props.modelParmas.mode,
         resolution: props.modelParmas.resolution,
         audio: Boolean(props.modelParmas.audio),
+        videoPromptType: props.videoPromptType ?? undefined,
         trackData,
       };
       try {
@@ -418,6 +420,13 @@ function batchGenVideo() {
             src: "",
             taskId: record.taskId,
             queueTaskId: record.queueTaskId,
+          });
+          emit("video-task-submitted", {
+            videoId: record.videoId,
+            trackId: item.trackId,
+            taskId: record.taskId,
+            queueTaskId: record.queueTaskId,
+            status: record.status,
           });
         });
         checkedTrackIds.value = [];

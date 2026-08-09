@@ -32,15 +32,19 @@
 
           <div v-if="isVideoGenerating(v)" class="loadingOverlay c fc">
             <t-loading size="24px" />
-            <span class="loadingText">{{ $t("workbench.generate.generating") }}</span>
+            <span class="loadingText">{{ getVideoRuntimeLabel(v) }}</span>
+            <span v-if="v.progress != null" class="loadingProgress">{{ Math.round(v.progress) }}%</span>
             <t-button v-if="isVideoQueued(v)" size="small" variant="base" @click.stop="cancelQueuedVideo(v)">取消排队</t-button>
           </div>
 
-          <t-tooltip v-if="isVideoFailed(v)" placement="top" :content="v?.errorReason || ''" theme="light">
-            <t-tag class="stateTag" theme="danger" size="small">
-              {{ $t("workbench.generate.generateFailed") }}
-            </t-tag>
-          </t-tooltip>
+          <div v-if="isVideoFailed(v)" class="failedState">
+            <t-tooltip placement="top" :content="v?.errorReason || ''" theme="light">
+              <t-tag class="stateTag" theme="danger" size="small">
+                {{ $t("workbench.generate.generateFailed") }}
+              </t-tag>
+            </t-tooltip>
+            <span v-if="v.errorReason" class="failedReason">{{ v.errorReason }}</span>
+          </div>
 
           <div v-if="canUseVideo(v)" class="selectBtn" @click.stop="selectVideo(v)">
             <i-check size="16" />
@@ -119,13 +123,14 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from "vue";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus } from "@/stores/taskCenter";
+import { getTaskPhaseLabel } from "@/components/taskCenter/taskDisplay";
 
-defineProps<{
+const props = defineProps<{
   activeTrackIndex: number;
+  scriptId: number;
   generating?: boolean;
 }>();
 
@@ -139,7 +144,6 @@ const emit = defineEmits<{
 }>();
 
 const { project } = storeToRefs(projectStore());
-const episodesId = inject<Ref<number>>("episodesId")!;
 const taskCenter = useTaskCenterStore();
 
 const selectVideoId = ref<number>();
@@ -171,11 +175,19 @@ function isVideoQueued(video: VideoItem) {
 }
 
 function isVideoGenerating(video: VideoItem) {
-  return ["queued", "submitting", "processing"].includes(getVideoStatus(video));
+  return ["pending", "queued", "submitting", "processing"].includes(getVideoStatus(video));
 }
 
 function isVideoFailed(video: VideoItem) {
   return ["failed", "cancelled"].includes(getVideoStatus(video));
+}
+
+function getVideoRuntimeLabel(video: VideoItem) {
+  const phase = getTaskPhaseLabel(video.phase);
+  if (phase) return phase;
+  const status = getVideoStatus(video);
+  if (status === "queued" || status === "pending" || status === "submitting") return "排队中";
+  return $t("workbench.generate.generating");
 }
 
 function canUseVideo(video: VideoItem) {
@@ -187,7 +199,7 @@ async function selectVideo(video: VideoItem) {
   try {
     await axios.post("/production/workbench/selectVideo", {
       projectId: project.value?.id,
-      scriptId: episodesId.value ?? 0,
+      scriptId: props.scriptId,
       videoId: video.id,
       trackId: currentTrack.value.id,
     });
@@ -201,10 +213,7 @@ async function selectVideo(video: VideoItem) {
 async function cancelQueuedVideo(video: VideoItem) {
   if (!video.taskId) return window.$message.warning("缺少任务 ID，无法取消排队");
   try {
-    await taskCenter.cancelTask(createTaskKey("video", Number(project.value?.id), video.id, undefined, video.taskId));
-    video.status = "cancelled";
-    video.state = "生成失败";
-    video.errorReason = "已取消排队";
+    await taskCenter.cancelTask(createTaskKey("video", Number(project.value?.id), currentTrack.value.id, undefined, video.taskId));
     window.$message.success("已取消本地排队");
   } catch (error: any) {
     window.$message.warning(error?.message || "当前任务无法取消");
@@ -461,6 +470,34 @@ watch(
         .loadingText {
           font-size: 11px;
           color: #fff;
+        }
+        .loadingProgress {
+          font-size: 11px;
+          color: rgba(255, 255, 255, 0.82);
+        }
+      }
+      .failedState {
+        position: absolute;
+        right: 4px;
+        bottom: 4px;
+        left: 4px;
+        display: flex;
+        align-items: flex-end;
+        gap: 4px;
+        min-width: 0;
+        .stateTag {
+          position: static;
+          flex: 0 0 auto;
+        }
+        .failedReason {
+          min-width: 0;
+          overflow: hidden;
+          color: #fff;
+          font-size: 10px;
+          line-height: 16px;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
         }
       }
       .stateTag {

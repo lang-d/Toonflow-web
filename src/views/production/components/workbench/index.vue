@@ -1,39 +1,33 @@
 <template>
-  <t-dialog
-    body="String"
-    :header="false"
-    :footer="false"
-    :closeBtn="false"
-    v-model:visible="visible"
-    attach="body"
-    placement="center"
-    mode="full-screen"
-    dialogClassName="noFooter"
-    class="fullscreenDialog">
-    <div v-if="!trackContextDrawerVisible" class="closure">
-      <i-close-small theme="outline" size="24" fill="#4a4a4a" @click="visible = false" />
-    </div>
-    <div class="topMenu f ac">
-      <t-tooltip :content="$t('workbench.production.wb.quickPreview')" placement="bottom" theme="light" destroyOnClose :showArrow="false">
-        <div class="item fc c" :class="{ active: activeMenu === 'preview' }" @click="changeMenu('preview')">
-          <i-blackboard class="icon" />
-        </div>
-      </t-tooltip>
-      <t-tooltip :content="$t('workbench.production.wb.videoGeneration')" placement="bottom" theme="light" destroyOnClose :showArrow="false">
-        <div class="item fc c" :class="{ active: activeMenu === 'generate' }" @click="changeMenu('generate')">
-          <i-playback-progress class="icon" />
-        </div>
-      </t-tooltip>
-      <t-tooltip :content="$t('workbench.production.wb.videoEditing')" placement="bottom" theme="light" destroyOnClose :showArrow="false">
-        <div class="item fc c" :class="{ active: activeMenu === 'editVideo' }" @click="changeMenu('editVideo')">
-          <i-editing class="icon" />
-        </div>
-      </t-tooltip>
-    </div>
+  <section class="videoProductionWorkbench">
+    <nav class="topMenu f ac" aria-label="视频生产功能">
+      <div class="workbenchMenuTabs f ac">
+        <t-tooltip :content="$t('workbench.production.wb.quickPreview')" placement="bottom" theme="light" destroyOnClose :showArrow="false">
+          <div class="item fc c" :class="{ active: activeMenu === 'preview' }" @click="changeMenu('preview')">
+            <i-blackboard class="icon" />
+          </div>
+        </t-tooltip>
+        <t-tooltip :content="$t('workbench.production.wb.videoGeneration')" placement="bottom" theme="light" destroyOnClose :showArrow="false">
+          <div class="item fc c" :class="{ active: activeMenu === 'generate' }" @click="changeMenu('generate')">
+            <i-playback-progress class="icon" />
+          </div>
+        </t-tooltip>
+        <t-tooltip :content="$t('workbench.production.wb.videoEditing')" placement="bottom" theme="light" destroyOnClose :showArrow="false">
+          <div class="item fc c" :class="{ active: activeMenu === 'editVideo' }" @click="changeMenu('editVideo')">
+            <i-editing class="icon" />
+          </div>
+        </t-tooltip>
+      </div>
+      <div class="workbenchActions">
+        <slot name="actions" />
+      </div>
+    </nav>
     <div class="content">
-      <preview v-if="activeMenu === 'preview'" />
+      <preview v-if="activeMenu === 'preview'" :script-id="scriptId" :refresh-token="refreshToken" />
       <generate
         v-if="activeMenu === 'generate'"
+        :script-id="scriptId"
+        :refresh-token="refreshToken"
         v-model="extractLines"
         @importVideo="handleBatchDownload"
         @track-context-visible-change="trackContextDrawerVisible = $event" />
@@ -53,11 +47,11 @@
         <t-loading size="large" :text="$t('workbench.production.wb.importingLoading')" />
       </div>
     </div>
-  </t-dialog>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { watch, type Ref } from "vue";
+import { watch } from "vue";
 import axios from "@/utils/axios";
 import preview from "./preview.vue";
 import generate from "./generate/index.vue";
@@ -67,16 +61,20 @@ import type { MediaItem, AudioItem } from "./editVideo/utils/mediaData";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 
-const visible = defineModel("visible", {
-  type: Boolean,
-  default: false,
-});
+const props = defineProps<{
+  scriptId: number;
+  refreshToken?: number;
+}>();
 const activeMenu = ref("preview");
 const trackContextDrawerVisible = ref(false);
 
-watch(visible, (isVisible) => {
-  if (!isVisible) trackContextDrawerVisible.value = false;
-});
+watch(
+  () => [props.scriptId, props.refreshToken],
+  () => {
+    trackContextDrawerVisible.value = false;
+    editFootage();
+  },
+);
 
 // 画布尺寸配置
 const canvasWidth = ref(1920);
@@ -138,19 +136,28 @@ function changeMenu(type: string) {
   activeMenu.value = type;
   if (type == "editVideo") editFootage();
 }
-const episodesId = inject<Ref<number>>("episodesId")!;
 //查询剪辑素材
+let editFootageRequestId = 0;
 function editFootage() {
+  const requestId = ++editFootageRequestId;
+  const projectId = project.value?.id;
+  const scriptId = props.scriptId;
+  if (!projectId || !scriptId) return;
+
   axios
     .post("/assets/getMaterialData", {
-      projectId: project.value?.id,
-      scriptId: episodesId.value ?? 0,
+      projectId,
+      scriptId,
     })
     .then(({ data }) => {
-      const videoList = data.data.filter((item: any) => getMediaType(item.filePath) === "video");
-      const audioList = data.data.filter((item: any) => getMediaType(item.filePath) === "audio");
-      const imageList = data.data.filter((item: any) => getMediaType(item.filePath) === "image");
-      initialVideoItems.value = data.video.flatMap((item: any, index: number) => {
+      if (requestId !== editFootageRequestId || project.value?.id !== projectId || props.scriptId !== scriptId) return;
+
+      const materialItems = Array.isArray(data?.data) ? data.data : [];
+      const storyboardVideos = Array.isArray(data?.video) ? data.video : [];
+      const videoList = materialItems.filter((item: any) => getMediaType(item.filePath) === "video");
+      const audioList = materialItems.filter((item: any) => getMediaType(item.filePath) === "audio");
+      const imageList = materialItems.filter((item: any) => getMediaType(item.filePath) === "image");
+      initialVideoItems.value = storyboardVideos.flatMap((item: any, index: number) => {
         if (Array.isArray(item.video)) {
           return item.video.map((subItem: any, subIndex: number) => ({
             id: `video-${subItem.id}`,
@@ -221,14 +228,16 @@ function handleBatchDownload(value: ImportVideoItem[]) {}
 </script>
 
 <style lang="scss" scoped>
-:deep(.t-dialog__body) {
+.videoProductionWorkbench {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
   position: relative;
 }
-.fullscreenDialog {
+
+.videoProductionWorkbench {
   .importLoadingMask {
     position: absolute;
     inset: 0;
@@ -245,25 +254,24 @@ function handleBatchDownload(value: ImportVideoItem[]) {}
       gap: 16px;
     }
   }
-  .closure {
-    position: absolute;
-    top: var(--td-comp-paddingTB-xl);
-    right: var(--td-comp-paddingLR-xxl);
-    z-index: 9999;
-    cursor: pointer;
-    margin-top: 20px;
-  }
   .topMenu {
-    padding-bottom: 16px;
-    width: fit-content;
-    margin-top: 10px;
+    width: 100%;
+    min-height: 38px;
+    justify-content: space-between;
+    padding: 0 0 4px;
+    margin-top: 0;
+    .workbenchActions {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
     .item {
       margin-right: 4px;
       cursor: pointer;
-      width: 50px;
-      height: 50px;
+      width: 38px;
+      height: 38px;
       .icon {
-        font-size: 24px;
+        font-size: 20px;
       }
       .title {
         font-size: 10px;
@@ -271,17 +279,18 @@ function handleBatchDownload(value: ImportVideoItem[]) {}
       }
       &:hover {
         background-color: var(--td-bg-color-container-hover);
-        border-radius: 16px;
+        border-radius: 10px;
       }
     }
     .active {
       background-color: var(--td-brand-color) !important;
-      border-radius: 16px;
+      border-radius: 10px;
       color: #fff;
     }
   }
   .content {
     flex: 1;
+    min-height: 0;
     overflow: hidden;
   }
   .editImage {

@@ -56,7 +56,13 @@
                 <span class="requiredText">{{ $t("settings.vendor.required") }}</span>
               </span>
             </template>
-            <t-input v-model="currentVendor.inputValues[input.key]" :type="input.type" clearable @blur="onBlurFn">
+            <t-textarea
+              v-if="input.type === 'textarea'"
+              v-model="currentVendor.inputValues[input.key]"
+              :autosize="{ minRows: 3, maxRows: 8 }"
+              clearable
+              @blur="onBlurFn" />
+            <t-input v-else v-model="currentVendor.inputValues[input.key]" :type="input.type" clearable @blur="onBlurFn">
               <template #prefix-icon>
                 <t-icon :name="getInputIcon(input.type)" />
               </template>
@@ -70,7 +76,13 @@
             <t-collapse>
               <t-collapse-panel value="optional-inputs" :header="$t('settings.vendor.optionalSection')">
                 <t-form-item v-for="input in optionalInputs" :key="input.key" :name="input.key" :label="input.label">
-                  <t-input v-model="currentVendor.inputValues[input.key]" :type="input.type" clearable @blur="onBlurFn">
+                  <t-textarea
+                    v-if="input.type === 'textarea'"
+                    v-model="currentVendor.inputValues[input.key]"
+                    :autosize="{ minRows: 3, maxRows: 8 }"
+                    clearable
+                    @blur="onBlurFn" />
+                  <t-input v-else v-model="currentVendor.inputValues[input.key]" :type="input.type" clearable @blur="onBlurFn">
                     <template #prefix-icon>
                       <t-icon :name="getInputIcon(input.type)" />
                     </template>
@@ -125,6 +137,10 @@
                 <t-tag theme="warning" variant="light">模型说明</t-tag>
               </t-tooltip>
             </div>
+            <ZealmanWorkflowExecutionPanel
+              v-if="isZealmanWorkflowModel(item)"
+              :key="item.modelName"
+              :model-name="item.modelName" />
           </t-card>
         </t-form>
         <div v-if="!isDreaminaVendor" class="updateAction">
@@ -361,6 +377,7 @@ import TextModelTest from "./vendorTest/TextModelTest.vue";
 import ImageModelTest from "./vendorTest/ImageModelTest.vue";
 import VideoModelTest from "./vendorTest/VideoModelTest.vue";
 import DreaminaCliPanel from "./DreaminaCliPanel.vue";
+import ZealmanWorkflowExecutionPanel from "./ZealmanWorkflowExecutionPanel.vue";
 import type { DreaminaQueueConfig } from "@/types/dreamina";
 const { themeSetting } = storeToRefs(settingStore());
 const mdTheme = computed(() => (themeSetting.value.mode === "auto" ? undefined : themeSetting.value.mode));
@@ -408,7 +425,7 @@ interface TextTestTarget {
 interface VendorInput {
   key: string;
   label: string;
-  type: "text" | "password" | "url";
+  type: "text" | "password" | "url" | "textarea";
   required: boolean;
   placeholder?: string;
 }
@@ -449,6 +466,8 @@ const MODE_LABEL_MAP: Record<string, string> = {
   videoReference: "settings.vendor.videoRef",
   imageReference: "settings.vendor.imageRef",
 };
+
+const ZEALMAN_WORKFLOW_EXECUTION_MODELS = new Set(["minimax-h3-u06", "minimax-h3-u06-light2v"]);
 
 function getTypeLabel(type: string) {
   return TYPE_LABEL_MAP[type] || type;
@@ -543,8 +562,13 @@ const activeVendorId = ref<string>();
 const currentVendor = computed(() => vendorList.value.find((v) => v.id === activeVendorId.value));
 const vendorModels = computed(() => currentVendor.value?.models || currentVendor.value?.model || []);
 const isDreaminaVendor = computed(() => currentVendor.value?.id === "dreamina");
+const isZealmanVendor = computed(() => currentVendor.value?.id === "zealman");
 const requiredInputs = computed(() => currentVendor.value?.inputs?.filter((input) => input.required) || []);
 const optionalInputs = computed(() => currentVendor.value?.inputs?.filter((input) => !input.required) || []);
+
+function isZealmanWorkflowModel(model: VendorModel) {
+  return isZealmanVendor.value && model.type === "video" && ZEALMAN_WORKFLOW_EXECUTION_MODELS.has(model.modelName);
+}
 
 // ── 供应商弹窗 ──
 const vendorDialogVisible = ref(false);

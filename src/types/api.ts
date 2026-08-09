@@ -62,10 +62,12 @@ export interface TaskStatusEvent {
   scriptId?: number;
   targetType?: string;
   targetId?: string | number;
+  /** Business object identity. For video generation this is the video candidate ID. */
+  businessId?: string | number;
   nodeId?: string;
   status: TaskStatus;
   phase?: string;
-  progress?: number;
+  progress?: number | null;
   result?: TaskResult;
   reason?: string;
   updatedAt: number;

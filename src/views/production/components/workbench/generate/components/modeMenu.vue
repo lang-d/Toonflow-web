@@ -4,6 +4,15 @@
       <div class="model">
         <modelSelect v-model="modelParmas.model" type="video" size="small" />
       </div>
+      <t-select
+        v-if="videoPromptTypeCapability?.options.length"
+        size="small"
+        class="videoPromptType"
+        :value="videoPromptType ?? undefined"
+        :options="videoPromptTypeCapability.options"
+        clearable
+        placeholder="视频类型"
+        @change="handleVideoPromptTypeChange" />
       <t-select size="small" class="mode" :value="modelParmas.mode" :onChange="handleBeforeChange">
         <t-option v-for="(item, index) in modeList" :key="index" :value="item.value" :label="item.label"></t-option>
       </t-select>
@@ -12,7 +21,9 @@
         variant="outline"
         :theme="modelParmas.audio ? 'success' : 'danger'"
         class="audio"
-        @click="modelParmas.audio = !modelParmas.audio">
+        :disabled="audioFixed"
+        :title="audioFixed ? audioFixedHint : undefined"
+        @click="emit('audioChange', !modelParmas.audio)">
         <template #icon>
           <i-volume-notice v-if="modelParmas.audio" size="16" />
           <i-volume-mute v-else size="16" />
@@ -20,49 +31,37 @@
       </t-button>
       <div class="status">
         <t-popup
+          v-model:visible="pickerVisible"
           trigger="click"
-          placement="top"
+          placement="bottom"
           overlay-class-name="resDurPickerPopup"
           :overlay-inner-style="{ padding: '16px', borderRadius: '8px' }">
-          <t-tag class="btn" variant="outline">{{ modelParmas.resolution }}·{{ modelParmas.duration }}s</t-tag>
+          <t-tag class="btn" :theme="durationInvalid ? 'warning' : 'default'" variant="outline">{{ modelParmas.resolution }}·{{ modelParmas.duration }}s</t-tag>
           <template #content>
             <div class="resolutionDurationPicker">
-              <div
-                v-if="
-                  Array.isArray(modeOptions.durationResolutionMap) &&
-                  modeOptions.durationResolutionMap.length > 0 &&
-                  modeOptions.durationResolutionMap[0].resolution &&
-                  modeOptions.durationResolutionMap[0].resolution.length > 0
-                "
-                class="pickerSection">
+              <div v-if="resolutionOptions.length" class="pickerSection resolutionSection">
                 <div class="pickerLabel">{{ $t("workbench.generate.resolution") }}</div>
                 <div class="pickerOptions">
                   <div
-                    v-for="res in modeOptions.durationResolutionMap[0].resolution"
+                    v-for="res in resolutionOptions"
                     :key="res"
                     class="pickerOption"
                     :class="{ active: modelParmas.resolution == res }"
-                    @click="modelParmas.resolution = res">
+                    @click="emit('resolutionChange', res)">
                     {{ res }}
                   </div>
                 </div>
               </div>
-              <div
-                v-if="
-                  Array.isArray(modeOptions.durationResolutionMap) &&
-                  modeOptions.durationResolutionMap.length > 0 &&
-                  modeOptions.durationResolutionMap[0].duration &&
-                  modeOptions.durationResolutionMap[0].duration.length > 0
-                "
-                class="pickerSection">
+              <div v-if="durationOptions.length" class="pickerSection durationSection">
                 <div class="pickerLabel">{{ $t("workbench.generate.duration") }}</div>
-                <div class="pickerOptions">
+                <div ref="durationOptionsEl" class="pickerOptions durationOptions">
                   <div
-                    v-for="dur in modeOptions.durationResolutionMap[0].duration"
+                    v-for="dur in durationOptions"
                     :key="dur"
                     class="pickerOption"
                     :class="{ active: modelParmas.duration == dur }"
-                    @click="updateDuration(dur)">
+                    :data-duration="dur"
+                    @click="emit('durationChange', dur)">
                     {{ dur }}s
                   </div>
                 </div>
@@ -77,13 +76,14 @@
 
 <script setup lang="ts">
 import "@/views/production/components/workbench/type/type";
-import axios from "@/utils/axios";
 import type { SelectValue } from "tdesign-vue-next";
+import { getSupportedDurations, getSupportedResolutions, isSupportedDuration } from "../videoGenerationCapabilities";
 
 const props = defineProps<{
   modeOptions: VideoModel;
   modeList: { value: string; label: string }[];
-  trackId: number | undefined;
+  videoPromptTypeCapability?: VideoPromptTypeCapability | null;
+  videoPromptType?: string | null;
 }>();
 const modelParmas = defineModel<ModelSetting>({
   default: {
@@ -91,17 +91,37 @@ const modelParmas = defineModel<ModelSetting>({
     model: "",
     resolution: "480p",
     duration: 8,
-    audio: false,
+    audio: true,
   },
 });
-const emit = defineEmits(["modeChange"]);
+const emit = defineEmits<{
+  modeChange: [value: string];
+  resolutionChange: [value: string];
+  durationChange: [value: number];
+  audioChange: [value: boolean];
+  videoPromptTypeChange: [value: string | null];
+}>();
+const pickerVisible = ref(false);
+const durationOptionsEl = ref<HTMLElement>();
+const resolutionOptions = computed(() => getSupportedResolutions(props.modeOptions));
+const durationOptions = computed(() => getSupportedDurations(props.modeOptions, modelParmas.value.resolution));
+const durationInvalid = computed(() => !isSupportedDuration(props.modeOptions, modelParmas.value.resolution, modelParmas.value.duration));
+const audioFixed = computed(() => props.modeOptions.audio === true || props.modeOptions.audio === false);
+const audioFixedHint = computed(() => props.modeOptions.audio === true ? "当前模型始终生成音频" : "当前模型不支持生成音频");
+
 function handleBeforeChange(newVal: SelectValue) {
   emit("modeChange", String(newVal));
 }
-function updateDuration(newDuration: number) {
-  modelParmas.value.duration = newDuration;
-  if (props.trackId) axios.post("/production/workbench/updateVideoDuration", { id: props.trackId, duration: newDuration });
+
+function handleVideoPromptTypeChange(value: SelectValue) {
+  emit("videoPromptTypeChange", typeof value === "string" && value ? value : null);
 }
+
+watch(pickerVisible, async (visible) => {
+  if (!visible) return;
+  await nextTick();
+  durationOptionsEl.value?.querySelector<HTMLElement>(`[data-duration="${modelParmas.value.duration}"]`)?.scrollIntoView({ block: "center" });
+});
 </script>
 
 <style lang="scss" scoped>
@@ -112,6 +132,9 @@ function updateDuration(newDuration: number) {
     gap: 8px;
     .mode {
       width: 280px;
+    }
+    .videoPromptType {
+      width: 160px;
     }
     .status {
       .btn {
@@ -127,6 +150,10 @@ function updateDuration(newDuration: number) {
 <style lang="scss">
 .resolutionDurationPicker {
   min-width: 240px;
+  max-height: min(420px, calc(100dvh - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   .pickerSection {
     margin-bottom: 16px;
 
@@ -168,6 +195,19 @@ function updateDuration(newDuration: number) {
           font-weight: 500;
         }
       }
+    }
+
+    &.durationSection {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .durationOptions {
+      max-height: 260px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding-right: 2px;
     }
   }
 }

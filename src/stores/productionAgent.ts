@@ -14,6 +14,7 @@ import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import useTaskCenterStore, { createTaskKey, normalizeTaskStatus, type RuntimeTask } from "@/stores/taskCenter";
 import { attachLegacyMediaFields, getMediaPreviewUrl, normalizeMediaRef } from "@/utils/mediaRef";
 import type { MediaRef } from "@/types/api";
+import { resolvePrimaryGeneratedNode, type NodeType } from "@/views/production/utils/editImageType";
 import type { Ref, WatchStopHandle } from "vue";
 
 type ProductionChat = ReturnType<typeof useChat>;
@@ -186,6 +187,17 @@ interface ProductionAssetBatchResult {
   errors: ProductionAssetBatchError[];
 }
 
+interface DeriveAssetGenerationParams {
+  model: string;
+  quality: string;
+  ratio: string;
+}
+
+interface DeriveAssetGenerationGroup {
+  params: DeriveAssetGenerationParams;
+  assets: DeriveAsset[];
+}
+
 const CHAT_TERMINAL_STATUSES = new Set(["complete", "error", "stop"]);
 const HISTORY_RECONCILE_MAX_ATTEMPTS = 20;
 const HISTORY_RECONCILE_RETRY_DELAY_MS = 3_000;
@@ -350,6 +362,19 @@ function normalizeBatchGenerateAssetsResult(value: any): ProductionAssetBatchRes
 
 function getBatchAssetErrorMessage(error: ProductionAssetBatchError) {
   return error.error || error.message || "衍生资产生成任务创建失败";
+}
+
+function normalizeDeriveAssetGenerationParams(value: unknown): DeriveAssetGenerationParams | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  const model = String(source.model ?? "").trim();
+  const quality = String(source.quality ?? "").trim();
+  const ratio = String(source.ratio ?? "").trim();
+  return model && quality && ratio ? { model, quality, ratio } : null;
+}
+
+function deriveAssetGenerationParamsKey(params: DeriveAssetGenerationParams) {
+  return `${params.model}\u0000${params.quality}\u0000${params.ratio}`;
 }
 
 function createEmptyFlowData(): FlowData {
@@ -777,6 +802,36 @@ function makeProductionAgentStore(projectId: string) {
       if (status === "completed") return "已完成";
       if (status === "failed" || status === "cancelled") return "生成失败";
       return "生成中";
+    }
+
+    async function resolveDeriveAssetGenerationParams(
+      derive: DeriveAsset,
+      projectDefaults: DeriveAssetGenerationParams | null,
+      flowParamsCache: Map<number, Promise<DeriveAssetGenerationParams | null>>,
+    ) {
+      const flowId = Number(derive.flowId);
+      if (!Number.isFinite(flowId) || flowId <= 0) return projectDefaults;
+
+      let request = flowParamsCache.get(flowId);
+      if (!request) {
+        request = axios
+          .post("/production/editImage/getImageFlow", { id: flowId })
+          .then(({ data }) => {
+            const nodes = Array.isArray(data?.nodes) ? (data.nodes as NodeType[]) : [];
+            const primary = resolvePrimaryGeneratedNode(nodes, {
+              preferredNodeId: derive.nodeId ?? undefined,
+              prompt: derive.prompt,
+              fallbackToLast: true,
+            });
+            return normalizeDeriveAssetGenerationParams(primary?.data);
+          })
+          .catch((error) => {
+            console.warn("[productionAgent] failed to read derive asset image flow; falling back to project defaults", { flowId, error });
+            return null;
+          });
+        flowParamsCache.set(flowId, request);
+      }
+      return (await request) ?? projectDefaults;
     }
 
     function notifyStoryboardFailure(session: EpisodeSession, failure: StoryboardGenerationLastFailure | null) {
@@ -1844,7 +1899,6 @@ function makeProductionAgentStore(projectId: string) {
       if (!session) throw new Error("Production session is unavailable");
       const activeSession = session;
       const currentProject = projectStore().project;
-      if (!currentProject?.imageModel || !currentProject.imageQuality) throw new Error("请先配置图片模型和清晰度");
 
       const normalizedIds = normalizeNumericIds(allIds);
       if (!normalizedIds.length) throw new Error("没有可提交的衍生资产 ID");
@@ -1857,8 +1911,36 @@ function makeProductionAgentStore(projectId: string) {
 
       if (!selectedDeriveAssets.length) throw new Error("没有可生成图片的角色、场景或道具资产");
 
+      const projectDefaults = normalizeDeriveAssetGenerationParams({
+        model: currentProject?.imageModel,
+        quality: currentProject?.imageQuality,
+        ratio: currentProject?.videoRatio || "16:9",
+      });
+      const flowParamsCache = new Map<number, Promise<DeriveAssetGenerationParams | null>>();
+      const groups = new Map<string, DeriveAssetGenerationGroup>();
+      const preflightErrors: ProductionAssetBatchError[] = [];
+
+      for (const { derive } of selectedDeriveAssets) {
+        const params = await resolveDeriveAssetGenerationParams(derive, projectDefaults, flowParamsCache);
+        if (!params) {
+          preflightErrors.push({ assetId: derive.id, error: "请先在画布中配置图片模型、清晰度和比例，或在项目中配置默认图片参数" });
+          continue;
+        }
+        const key = deriveAssetGenerationParamsKey(params);
+        const group = groups.get(key) ?? { params, assets: [] };
+        group.assets.push(derive);
+        groups.set(key, group);
+      }
+
+      const submittableDeriveAssets = Array.from(groups.values()).flatMap((group) => group.assets);
+      if (!submittableDeriveAssets.length) {
+        const error = new Error(getBatchAssetErrorMessage(preflightErrors[0] ?? {}));
+        (error as any).productionAssetBusinessFailure = true;
+        throw error;
+      }
+
       const previousState = new Map(
-        selectedDeriveAssets.map(({ derive }) => [
+        submittableDeriveAssets.map((derive) => [
           derive.id,
           {
             state: derive.state,
@@ -1876,7 +1958,7 @@ function makeProductionAgentStore(projectId: string) {
       );
       const previousBindings = new Map(
         readProductionAssetTaskBindings(Number(projectId), session.episodeId)
-          .filter((binding) => selectedIds.has(binding.assetId))
+          .filter((binding) => submittableDeriveAssets.some((derive) => derive.id === binding.assetId))
           .map((binding) => [binding.assetId, binding]),
       );
 
@@ -1889,7 +1971,7 @@ function makeProductionAgentStore(projectId: string) {
         if (previousBinding) upsertProductionAssetTaskBinding(previousBinding);
       }
 
-      selectedDeriveAssets.forEach(({ derive }) => {
+      submittableDeriveAssets.forEach((derive) => {
         releaseAssetTask(session, derive.id);
         taskCenter.removeTask(createTaskKey("flowImage", Number(projectId), derive.id, derive.nodeId ?? undefined, derive.unifiedTaskId ?? undefined));
         taskCenter.removeTask(createTaskKey("assetImage", Number(projectId), derive.id, undefined, derive.taskId));
@@ -1903,16 +1985,32 @@ function makeProductionAgentStore(projectId: string) {
       });
 
       try {
-        const { data } = await axios.post("/production/assets/batchGenerateAssetsImage", {
-          projectId: Number(projectId),
-          scriptId: session.episodeId,
-          assetIds: selectedDeriveAssets.map(({ derive }) => derive.id),
-          model: currentProject.imageModel,
-          quality: currentProject.imageQuality,
-          ratio: "16:9",
-          concurrentCount: settingStore().otherSetting.assetsBatchGenereateSize,
-        });
-        const result = normalizeBatchGenerateAssetsResult(data);
+        const result: ProductionAssetBatchResult = {
+          total: 0,
+          successCount: 0,
+          failedCount: 0,
+          tasks: [],
+          errors: [...preflightErrors],
+        };
+        for (const group of groups.values()) {
+          try {
+            const { data } = await axios.post("/production/assets/batchGenerateAssetsImage", {
+              projectId: Number(projectId),
+              scriptId: session.episodeId,
+              assetIds: group.assets.map((derive) => derive.id),
+              model: group.params.model,
+              quality: group.params.quality,
+              ratio: group.params.ratio,
+              concurrentCount: settingStore().otherSetting.assetsBatchGenereateSize,
+            });
+            const groupResult = normalizeBatchGenerateAssetsResult(data);
+            result.tasks.push(...groupResult.tasks);
+            result.errors.push(...groupResult.errors);
+          } catch (error) {
+            const message = (error as any)?.message || "衍生资产生成任务创建失败";
+            result.errors.push(...group.assets.map((derive) => ({ assetId: derive.id, error: message })));
+          }
+        }
         if (!result.tasks.length && !result.errors.length) {
           throw new Error("后端未返回可识别的衍生资产生成任务结果");
         }
@@ -1965,9 +2063,10 @@ function makeProductionAgentStore(projectId: string) {
           if (!derive) continue;
           erroredAssetIds.add(derive.id);
           if (returnedAssetIds.has(derive.id)) continue;
-          restoreDeriveAsset(derive, getBatchAssetErrorMessage(error));
+          if (previousState.has(derive.id)) restoreDeriveAsset(derive, getBatchAssetErrorMessage(error));
+          else derive.errorReason = getBatchAssetErrorMessage(error);
         }
-        selectedDeriveAssets.forEach(({ derive }) => {
+        submittableDeriveAssets.forEach((derive) => {
           if (returnedAssetIds.has(derive.id) || erroredAssetIds.has(derive.id)) return;
           restoreDeriveAsset(derive);
         });
@@ -1975,7 +2074,7 @@ function makeProductionAgentStore(projectId: string) {
         result.errors = normalizedErrors;
         result.successCount = returnedAssetIds.size;
         result.failedCount = normalizedErrors.length;
-        result.total = result.total || result.successCount + result.failedCount;
+        result.total = result.successCount + result.failedCount;
         if (result.successCount === 0 && result.failedCount > 0) {
           const businessError = new Error(getBatchAssetErrorMessage(result.errors[0]));
           (businessError as any).productionAssetBusinessFailure = true;
@@ -1987,7 +2086,7 @@ function makeProductionAgentStore(projectId: string) {
           syncAssetTasks(session);
           throw error;
         }
-        selectedDeriveAssets.forEach(({ derive }) => {
+        submittableDeriveAssets.forEach((derive) => {
           restoreDeriveAsset(derive);
         });
         syncAssetTasks(session);

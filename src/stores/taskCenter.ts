@@ -28,13 +28,14 @@ export interface RuntimeTask {
   legacyTaskId?: string | number;
   targetType?: string;
   targetId: string | number;
+  businessId?: string | number;
   projectId: number;
   scriptId?: number;
   nodeId?: string;
   status: TaskStatus;
   version?: number;
   phase?: string;
-  progress?: number;
+  progress?: number | null;
   result?: TaskResult;
   reason?: string;
   source?: TaskSource;
@@ -45,6 +46,11 @@ export interface TaskSnapshotWarning {
   taskKey: string;
   missingCount: number;
   lastCheckedAt: number;
+}
+export interface TaskSubscriptionFilter {
+  projectId?: number;
+  targetTypes?: string[];
+  replay?: boolean;
 }
 export type { TaskStatusEvent };
 
@@ -57,6 +63,7 @@ export interface TaskSourceAdapter {
 }
 
 type TaskListener = (task: RuntimeTask) => void;
+type TaskSubscriber = { filter: TaskSubscriptionFilter; listener: TaskListener };
 type LegacyRecord = Record<string, any>;
 type ProjectScopeGuard = { projectId: number; revision: number };
 
@@ -80,8 +87,13 @@ const TASK_RETENTION_MS = 60_000;
 const SNAPSHOT_MISSING_THRESHOLD = 2;
 const TRANSPORT_STORAGE_KEY = "taskTransport";
 
+function hasOwn(value: object, key: PropertyKey) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function normalizeDomain(value: TaskStatusEvent["taskType"] | TaskDomain, targetType?: string, nodeId?: string): TaskDomain {
   const hint = `${value ?? ""}:${targetType ?? ""}`.toLowerCase();
+  if (["musicbible", "musicplan", "musicprompt", "musiclyrics", "musiccueasset", "musiclibraryversion"].includes(String(targetType || "").toLowerCase())) return "media";
   const hasFlowImageHint = Boolean(nodeId) || hint.includes("deriveasset") || hint.includes("flow") || hint.includes("editimage") || hint.includes("node") || hint.includes("canvas");
   if (hint.includes("assetprompt") || hint.includes("asset_prompt") || hint.includes("polish")) return "assetPrompt";
   if (hint.includes("audiobind") || hint.includes("audio_bind")) return "audioBind";
@@ -160,6 +172,7 @@ function parseJsonObject(value: unknown) {
 export default defineStore("taskCenter", () => {
   const tasks = shallowReactive(new Map<string, RuntimeTask>());
   const listeners = new Map<string, Set<TaskListener>>();
+  const subscribers = new Set<TaskSubscriber>();
   const cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const snapshotReconciliations = shallowReactive(new Map<string, TaskSnapshotWarning>());
   const requestControllers = new Set<AbortController>();
@@ -262,6 +275,24 @@ export default defineStore("taskCenter", () => {
 
   function notify(task: RuntimeTask) {
     listeners.get(task.key)?.forEach((listener) => listener(task));
+    subscribers.forEach(({ filter, listener }) => {
+      if (filter.projectId != null && task.projectId !== filter.projectId) return;
+      if (filter.targetTypes?.length && !filter.targetTypes.includes(String(task.targetType || ""))) return;
+      listener(task);
+    });
+  }
+
+  function subscribeTasks(filter: TaskSubscriptionFilter, listener: TaskListener) {
+    const subscriber = { filter, listener };
+    subscribers.add(subscriber);
+    if (filter.replay !== false) {
+      Array.from(tasks.values()).forEach((task) => {
+        if (filter.projectId != null && task.projectId !== filter.projectId) return;
+        if (filter.targetTypes?.length && !filter.targetTypes.includes(String(task.targetType || ""))) return;
+        listener(task);
+      });
+    }
+    return () => subscribers.delete(subscriber);
   }
 
   function findTaskByKey(key: string) {
@@ -577,6 +608,7 @@ export default defineStore("taskCenter", () => {
         legacyTaskId: event.legacyTaskId,
         targetType: event.targetType,
         targetId: event.targetId ?? event.taskId,
+        businessId: event.businessId,
         projectId: Number(event.projectId),
         scriptId: event.scriptId,
         nodeId: event.nodeId,
@@ -600,11 +632,12 @@ export default defineStore("taskCenter", () => {
       legacyTaskId: event.legacyTaskId ?? task.legacyTaskId,
       taskId: event.taskId ?? task.taskId,
       targetType: event.targetType ?? task.targetType,
+      ...(hasOwn(event, "businessId") ? { businessId: event.businessId } : {}),
       status: normalizeTaskStatus(event.status, task.status),
       result: normalizeTaskResult(event.result ?? event, mediaFallbackType(task.domain)),
       reason: event.reason ?? "",
       phase: event.phase ?? task.phase,
-      progress: event.progress ?? task.progress,
+      ...(hasOwn(event, "progress") ? { progress: event.progress } : {}),
       version: event.version ?? task.version,
       source,
       updatedAt,
@@ -621,13 +654,14 @@ export default defineStore("taskCenter", () => {
       taskId: detail.taskId ?? detail.unifiedTaskId ?? task.taskId,
       targetType: detail.targetType ?? task.targetType,
       targetId: detail.targetId ?? task.targetId,
+      ...(hasOwn(detail, "businessId") ? { businessId: detail.businessId } : {}),
       scriptId: detail.scriptId ?? task.scriptId,
       nodeId: detail.nodeId ?? task.nodeId,
       status: normalizeTaskStatus(detail.status, task.status),
       result: normalizeTaskResult(result && typeof result === "object" ? result : resultJson, mediaFallbackType(task.domain)),
       reason: detail.reason ?? detail.errorReason ?? detail.message ?? "",
       phase: detail.phase ?? task.phase,
-      progress: detail.progress ?? task.progress,
+      ...(hasOwn(detail, "progress") ? { progress: detail.progress } : {}),
       version: detail.version ?? task.version,
       source: "snapshot",
       updatedAt,
@@ -976,6 +1010,7 @@ export default defineStore("taskCenter", () => {
     stop();
     tasks.clear();
     listeners.clear();
+    subscribers.clear();
     snapshotReconciliations.clear();
     registeredListenerCount.value = 0;
     cleanupTimers.forEach((cleanupTimer) => clearTimeout(cleanupTimer));
@@ -1009,6 +1044,7 @@ export default defineStore("taskCenter", () => {
     transportMode,
     activeTransport,
     registerTask,
+    subscribeTasks,
     unregisterTask,
     removeTask,
     getTask,

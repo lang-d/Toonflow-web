@@ -173,7 +173,7 @@
 
 <script setup lang="ts">
 import { useLocalStorage, useEventListener } from "@vueuse/core";
-import { ref, computed, watch, nextTick, onUnmounted, type Ref } from "vue";
+import { ref, computed, watch, nextTick, onUnmounted } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import { DialogPlugin } from "tdesign-vue-next";
 import axios from "@/utils/axios";
@@ -207,7 +207,10 @@ interface Shot {
   selected?: boolean;
   characters?: ShotCharacter[];
 }
-const episodesId = inject<Ref<number>>("episodesId");
+const props = defineProps<{
+  scriptId: number;
+  refreshToken?: number;
+}>();
 
 // 模拟分镜数据
 const shotList = ref<Shot[]>([]);
@@ -236,11 +239,30 @@ function normalizeShot(input: Record<string, any>): Shot {
 }
 
 onMounted(getShotList);
+watch(
+  () => [props.scriptId, props.refreshToken],
+  () => {
+    stopPlay();
+    currentShotIndex.value = 0;
+    selectAll.value = false;
+    void getShotList();
+  },
+);
 //查询分镜数据
+let shotListRequestId = 0;
 async function getShotList() {
+  const requestId = ++shotListRequestId;
+  const scriptId = props.scriptId;
+  if (!scriptId) {
+    shotList.value = [];
+    return;
+  }
+
   const { data } = await axios.post("/production/getStoryboardData", {
-    scriptId: episodesId!.value,
+    scriptId,
   });
+  if (requestId !== shotListRequestId || props.scriptId !== scriptId) return;
+
   shotList.value = Array.isArray(data) ? data.map(normalizeShot) : [];
   initialOrder.value = shotList.value.map((shot) => shot.id);
   currentShotIndex.value = Math.min(currentShotIndex.value, Math.max(shotList.value.length - 1, 0));
@@ -509,8 +531,10 @@ function getFileExtension(path: string) {
 .previewContainer {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 120px);
-  gap: 16px;
+  height: 100%;
+  min-height: 0;
+  gap: 6px;
+  overflow: hidden;
 
   .mainContent {
     display: flex;
@@ -553,14 +577,14 @@ function getFileExtension(path: string) {
       .playerControls {
         width: 100%;
         flex-shrink: 0;
-        padding: 10px 16px 12px;
+        padding: 6px 12px 8px;
         background: var(--td-bg-color-container);
         border-top: 1px solid var(--td-border-level-1-color);
 
         .controlButtons {
           @extend %flex-center;
           gap: 8px;
-          margin-bottom: 8px;
+          margin-bottom: 4px;
         }
 
         .progressArea {
@@ -751,14 +775,15 @@ function getFileExtension(path: string) {
 
   .shotListArea {
     flex-shrink: 0;
+    min-height: 0;
     border-top: 1px solid var(--td-border-level-1-color);
-    padding-top: 12px;
+    padding-top: 6px;
 
     .shotListHeader {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 12px;
+      margin-bottom: 6px;
       padding: 0 4px;
 
       .headerLeft {
@@ -787,8 +812,8 @@ function getFileExtension(path: string) {
 
         .shotItem {
           flex-shrink: 0;
-          width: 160px;
-          margin-right: 12px;
+          width: 136px;
+          margin-right: 10px;
           cursor: pointer;
           border-radius: 12px;
           overflow: hidden;
@@ -811,7 +836,7 @@ function getFileExtension(path: string) {
           .shotImageWrapper {
             position: relative;
             width: 100%;
-            height: 100px;
+            height: 86px;
             background: var(--td-bg-color-secondarycontainer);
 
             .shotImage {

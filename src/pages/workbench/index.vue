@@ -120,6 +120,7 @@ const rightBtnList = ref([
   { path: "/script", labelKey: "workbench.menu.scriptManage", icon: "i-document-folder", needProject: true, group: "content" },
   { path: "/cornerScape", labelKey: "workbench.menu.cornerScape", icon: "i-peoples-two", needProject: true, group: "content" },
   { path: "/production", labelKey: "workbench.menu.production", icon: "i-carousel-video", needProject: true, group: "production" },
+  { path: "/videoProduction", labelKey: "workbench.menu.videoProduction", icon: "i-playback-progress", needProject: true, group: "production" },
   { path: "/productionMusic", labelKey: "workbench.menu.productionMusic", icon: "i-music", needProject: true, group: "production" },
   { path: "/assets", labelKey: "workbench.menu.assetCenter", icon: "i-receive", needProject: true, group: "assets" },
 ]);

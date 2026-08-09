@@ -9,7 +9,6 @@ const NODE_IDS = {
   assets: "assets",
   storyboardTable: "storyboardTable",
   storyboard: "storyboard",
-  workbench: "workbench",
   poster: "poster",
 } as const;
 
@@ -461,19 +460,6 @@ export function useFlowBuilder(_flowData: Ref<FlowData>, nodePositions: Ref<Node
           },
         },
       },
-      // 5. Workbench 节点
-      {
-        id: ids.workbench,
-        type: "workbench",
-        dragHandle: ".dragHandle",
-        position: positions[ids.workbench] || { x: 0, y: 0 },
-        data: {
-          handleIds: {
-            target: `${ids.workbench}-target`,
-            source: `${ids.workbench}-source`,
-          },
-        },
-      },
       // 6. Poster 节点
       // {
       //   id: ids.poster,
@@ -536,26 +522,6 @@ export function useFlowBuilder(_flowData: Ref<FlowData>, nodePositions: Ref<Node
         animated: false,
         style: edgeStyle,
       },
-      // Storyboard -> Workbench
-      {
-        id: `${ids.storyboard}-${ids.workbench}`,
-        source: ids.storyboard,
-        target: ids.workbench,
-        sourceHandle: `${ids.storyboard}-source`,
-        targetHandle: `${ids.workbench}-target`,
-        animated: false,
-        style: edgeStyle,
-      },
-      // Workbench -> Poster
-      // {
-      //   id: `${ids.workbench}-${ids.poster}`,
-      //   source: ids.workbench,
-      //   target: ids.poster,
-      //   sourceHandle: `${ids.workbench}-source`,
-      //   targetHandle: `${ids.poster}-target`,
-      //   animated: false,
-      //   style: edgeStyle,
-      // },
     ];
 
     return allEdges;

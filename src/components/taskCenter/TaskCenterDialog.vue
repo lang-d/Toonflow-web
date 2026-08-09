@@ -33,7 +33,7 @@
               {{ $t(getTaskStatusKey(task.status)) }}
             </t-tag>
             <span v-if="task.scriptId">{{ $t("workbench.globalTaskCenter.episode") }} {{ task.scriptId }}</span>
-            <span v-if="task.phase">{{ task.phase }}</span>
+            <span v-if="task.phase">{{ getTaskPhaseLabel(task.phase) }}</span>
             <span v-if="task.progress != null">{{ Math.round(task.progress) }}%</span>
           </div>
           <div class="taskTime">{{ formatTime(task.updatedAt) }}</div>
@@ -78,7 +78,7 @@
 import type { RuntimeTask } from "@/stores/taskCenter";
 import useTaskCenterStore from "@/stores/taskCenter";
 import projectStore from "@/stores/project";
-import { getTaskDomainKey, getTaskStatusKey, getTaskStatusTheme, getTaskTargetLabel } from "./taskDisplay";
+import { getTaskDomainKey, getTaskPhaseLabel, getTaskStatusKey, getTaskStatusTheme, getTaskTargetLabel } from "./taskDisplay";
 
 const visible = defineModel<boolean>("visible", { default: false });
 const props = defineProps<{ syncing?: boolean }>();

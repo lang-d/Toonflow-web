@@ -55,9 +55,6 @@
     <template #node-storyboard="props">
       <storyboard :id="props.id" v-model="flowData.storyboard" :assetsData="flowData.assets" :handleIds="props.data.handleIds" />
     </template>
-    <template #node-workbench="props">
-      <workbench :id="props.id" v-model="flowData.workbench" :handleIds="props.data.handleIds" />
-    </template>
     <!-- <template #node-poster="props">
       <poster :id="props.id" v-model="flowData.poster" :handleIds="props.data.handleIds" />
     </template> -->
@@ -130,7 +127,6 @@ import scriptPlan from "./node/scriptPlan.vue";
 import assets from "./node/assets.vue";
 import storyboardTable from "./node/storyboardTable.vue";
 import storyboard from "./node/storyboard.vue";
-import workbench from "./node/workbench.vue";
 import poster from "./node/poster.vue";
 import rightChatBox from "./components/rightChatBox/index.vue";
 import { useLayout } from "./utils/dagre";
@@ -273,6 +269,15 @@ function writeCanvasMemory(memory: ProductionCanvasMemory) {
   } catch {}
 }
 
+/** Persist episode selection independently from canvas interactions. */
+function rememberSelectedEpisode(scriptId: number) {
+  if (!project.value?.id || !Number.isFinite(scriptId) || scriptId <= 0) return;
+  const memory = readCanvasMemory() ?? {};
+  if (memory.episodesId === scriptId) return;
+  memory.episodesId = scriptId;
+  writeCanvasMemory(memory);
+}
+
 function saveCurrentCanvasMemory() {
   if (!project.value?.id || !episodesId.value) return;
   const memory = readCanvasMemory() ?? {};
@@ -295,7 +300,6 @@ const defaultNodePositions: Record<string, { x: number; y: number }> = {
   assets: { x: 1200, y: 4000 },
   storyboardTable: { x: 1800, y: 0 },
   storyboard: { x: 2500, y: 0 },
-  workbench: { x: 3000, y: 0 },
   // poster: { x: 4500, y: 0 },
 };
 const nodePositions = ref<Record<string, { x: number; y: number }>>({ ...defaultNodePositions });
@@ -375,6 +379,8 @@ function handleEpisodesChange(value: unknown) {
   const nextEpisodesId = Number(rawValue);
   if (!Number.isFinite(nextEpisodesId) || nextEpisodesId === episodesId.value) return;
 
+  // Selection must survive even when the user does not move the canvas afterwards.
+  rememberSelectedEpisode(nextEpisodesId);
   episodesId.value = nextEpisodesId;
 }
 
@@ -465,7 +471,7 @@ async function layoutGraph(direction: "LR" | "TB" = "LR", options: LayoutGraphOp
 
     if (direction === "LR") {
       // 手动布局：主链从左到右排列，assets 放在 script 正下方
-      const mainChain = ["script", "scriptPlan", "storyboardTable", "storyboard", "workbench", "poster"];
+      const mainChain = ["script", "scriptPlan", "storyboardTable", "storyboard", "poster"];
       const chainNodes = mainChain.filter((id) => oldData.nodes.some((n) => n.id === id));
 
       // 逐个排列主链节点，x 基于前一个节点的右边缘 + gap，顶部对齐
@@ -592,6 +598,7 @@ watch(
   async (newVal) => {
     if (!newVal || newVal < 0) return;
     if (isBootstrapping.value) return;
+    rememberSelectedEpisode(newVal);
     await loadEpisodeFlow();
   },
 );

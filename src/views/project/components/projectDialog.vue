@@ -313,6 +313,7 @@ const emit = defineEmits<{
       projectType: string;
       imageQuality: "1K" | "2K" | "4K" | "";
       mode: string;
+      videoPromptType: string | null;
     },
   ): void;
 }>();
@@ -332,6 +333,7 @@ interface ProjectData {
   imageQuality: "1K" | "2K" | "4K" | "";
   visualManual?: string;
   mode: string;
+  videoPromptType?: string | null;
 }
 
 interface ProjectFormData {
@@ -346,6 +348,7 @@ interface ProjectFormData {
   videoModel: string;
   imageQuality: "1K" | "2K" | "4K" | "";
   mode: string;
+  videoPromptType: string;
 }
 interface VisualManualItem {
   name: string;
@@ -404,6 +407,7 @@ const DEFAULT_FORM: () => ProjectFormData & { id: number; era: string; createTim
   videoModel: "",
   imageQuality: "",
   mode: "",
+  videoPromptType: "",
   directorManual: "",
 });
 
@@ -444,6 +448,7 @@ function handleOk() {
       directorManual: formState.value.directorManual,
       imageQuality: formState.value.imageQuality,
       mode: formState.value.mode,
+      videoPromptType: formState.value.videoPromptType,
     });
   } else {
     emit("add", {
@@ -458,6 +463,7 @@ function handleOk() {
       imageQuality: formState.value.imageQuality,
       directorManual: formState.value.directorManual,
       mode: formState.value.mode,
+      videoPromptType: formState.value.videoPromptType,
     });
   }
   resetForm();
@@ -496,6 +502,7 @@ watch(addProjectShow, async (visible) => {
         imageQuality: props.projectData.imageQuality || "",
         projectType: props.projectData.projectType || "novel",
         mode: props.projectData.mode || "text",
+        videoPromptType: props.projectData.videoPromptType || "",
         directorManual: props.projectData.directorManual || "",
       };
       // 编辑模式下主动获取视频模型详情，填充 mode 列表以回显 label

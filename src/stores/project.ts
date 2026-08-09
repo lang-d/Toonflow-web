@@ -14,6 +14,7 @@ export interface Project {
   projectType: string;
   imageQuality: "1K" | "2K" | "4K" | "";
   mode: string;
+  videoPromptType: string | null;
   directorManual: string;
 }
 

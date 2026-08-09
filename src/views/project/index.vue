@@ -109,6 +109,7 @@ const editProjectData = ref<{
   projectType: string;
   imageQuality: "1K" | "2K" | "4K" | "";
   mode: string;
+  videoPromptType: string | null;
   directorManual: string;
 } | null>(null);
 
@@ -274,6 +275,7 @@ function openEdit(item: {
   imageQuality: "1K" | "2K" | "4K" | "";
   projectType: string;
   mode: string;
+  videoPromptType: string | null;
 }) {
   editProjectData.value = {
     ...item,
@@ -293,6 +295,7 @@ function editProjectFn(data: {
   videoModel: string;
   imageQuality: "1K" | "2K" | "4K" | "";
   mode: string;
+  videoPromptType: string | null;
 }) {
   axios
     .post("/project/editProject", data)
@@ -317,6 +320,7 @@ function addProjectFn(data: {
   videoModel: string;
   imageQuality: string;
   mode: string;
+  videoPromptType: string | null;
 }) {
   axios
     .post("/project/addProject", data)

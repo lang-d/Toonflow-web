@@ -31,7 +31,17 @@
       save-label="截取并作为引用"
       @save="saveReferenceAudioClip" />
     <div class="modelSelect">
-      <modeMenu v-model="modelParmas" :modeOptions="modeOptions" :trackId="currentTrack?.id" :modeList="modeList" @modeChange="modeChange" />
+      <modeMenu
+        v-model="modelParmas"
+        :modeOptions="modeOptions"
+        :modeList="modeList"
+        :video-prompt-type-capability="videoPromptTypeCapability"
+        :video-prompt-type="videoPromptType"
+        @modeChange="modeChange"
+        @resolutionChange="changeResolution"
+        @durationChange="changeCurrentTrackDuration"
+        @audioChange="changeAudio"
+        @videoPromptTypeChange="changeVideoPromptType" />
     </div>
     <div class="globalPromptAffix">
       <t-input v-model="promptPrefix" size="small" placeholder="前置提示词" clearable />
@@ -98,6 +108,7 @@
         <videoCard
           v-if="currentTrack"
           :active-track-index="activeTrackIndex"
+          :script-id="scriptId"
           v-model:current-track="currentTrack"
           @refresh="getGenerateData"
           @generate="generateVideo" />
@@ -107,7 +118,7 @@
       v-model:visible="trackContextVisible"
       @visible-change="emit('track-context-visible-change', $event)"
       :project-id="Number(project?.id) || undefined"
-      :script-id="episodesId"
+      :script-id="scriptId"
       :track="currentTrack"
       :storyboards="currentTrackStoryboards" />
     <div class="track">
@@ -117,18 +128,21 @@
         :image-list="imageList"
         @change="trackChange"
         :modelParmas="modelParmas"
-        :clampDuration="clampDuration"
+        :script-id="scriptId"
+        :supported-durations="supportedDurations"
         :prompt-prefix="promptPrefix"
         :prompt-suffix="promptSuffix"
+        :video-prompt-type="videoPromptType"
         :add-track-loading="addTrackLoading"
         @addTrack="addManualTrack"
+        @video-task-submitted="registerSubmittedVideoTask"
+        @prompt-task-submitted="registerSubmittedPromptTask"
         @getData="getGenerateData" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import type { Ref } from "vue";
 import newTrack from "./components/track.vue";
 import imageSelect from "./components/imageSelect.vue";
 import modeMenu from "./components/modeMenu.vue";
@@ -145,16 +159,20 @@ import { attachLegacyMediaFields, getMediaOriginalUrl, getMediaPreviewUrl, norma
 import { deriveReferenceTokens, getDerivedReferenceToken } from "./referenceTokens";
 import { getReviewMessage } from "@/utils/productionReview";
 import type { TaskStatus } from "@/types/api";
+import { buildVideoReferencePayload, getSupportedDurations, getSupportedResolutions, isSupportedDuration } from "./videoGenerationCapabilities";
 
 const { project } = storeToRefs(projectStore());
 const emit = defineEmits<{
   "track-context-visible-change": [visible: boolean];
 }>();
-const episodesId = inject<Ref<number>>("episodesId")!;
+const props = defineProps<{
+  scriptId: number;
+  refreshToken?: number;
+}>();
 const activeTrackIndex = ref(0);
 const cacheStore = imageListCacheStore();
 const taskCenter = useTaskCenterStore();
-const { getCache, setCache, initCacheFromTrackList, forceInitCacheFromTrackList, warmUpUrls, clearUrlMap } = cacheStore;
+const { getCache, getCacheWithResolve, setCache, removeCache, initCacheFromTrackList, forceInitCacheFromTrackList, warmUpUrls, clearUrlMap } = cacheStore;
 const { urlMap } = storeToRefs(cacheStore);
 const cacheRefreshing = ref(false);
 const mergeLoading = ref<"" | "storyboard" | "assets">("");
@@ -165,17 +183,20 @@ const trackContextVisible = ref(false);
 const promptPrefix = ref("");
 const promptSuffix = ref("");
 const restoredLastTrack = ref(false);
-const videoTaskBindings = new Map<number, () => void>();
-const promptTaskBindings = new Map<number, () => void>();
 const promptResultRefreshing = new Set<number>();
 const videoResultRefreshing = new Set<number>();
 const videoTerminalReconcileTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const reportedFailures = new Set<string>();
 const cacheWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let promptAffixWriteTimer: ReturnType<typeof setTimeout> | null = null;
-let videoStatusPollTimer: ReturnType<typeof setTimeout> | null = null;
-let videoStatusPollInFlight = false;
+let releaseVideoTaskSubscription: (() => void) | null = null;
 let modelDetailRequestId = 0;
+let savingVideoPromptType = false;
+const videoPromptTypeSaveQueue: Array<{ projectId: number; model: string; value: string | null }> = [];
+
+const videoPromptTypeCapability = ref<VideoPromptTypeCapability | null>(null);
+const videoPromptType = ref<string | null>(null);
+const confirmedVideoPromptTypes = new Map<string, string | null>();
 
 const modeOptions = ref<VideoModel>({
   name: "",
@@ -194,7 +215,8 @@ const modelParmas = ref<ModelSetting>({
   model: "",
   resolution: "480p",
   duration: 8,
-  audio: false,
+  // Optional-audio video models should generate audio unless the user turns it off.
+  audio: true,
 });
 
 const storyboardList = ref<StoryboardItem[]>([]); // 分镜列表
@@ -202,7 +224,7 @@ const STRUCTURED_FACT_REQUIRED_MESSAGE = "请先补齐结构化分镜事实后�
 
 /** 当前剧集维度的本地操作状态 */
 function getScriptStorageKey(name: string) {
-  return `workbench:generate:${project.value?.id ?? "unknown"}:${episodesId.value ?? "unknown"}:${name}`;
+  return `workbench:generate:${project.value?.id ?? "unknown"}:${props.scriptId || "unknown"}:${name}`;
 }
 
 function loadPromptAffixes() {
@@ -235,7 +257,7 @@ const imageList = computed({
     urlMap.value;
     const trackId = currentTrack.value?.id;
     const pid = project.value?.id;
-    const sid = episodesId.value;
+    const sid = props.scriptId;
     const medias = currentTrack.value?.medias;
     if (medias?.length) return medias as UploadItem[];
     // 后端数据尚未装载到当前轨道时再从缓存恢复
@@ -253,10 +275,10 @@ const imageList = computed({
       currentTrack.value.medias = val as any;
       // 同步写入缓存
       const pid = project.value?.id;
-      const sid = episodesId.value;
+      const sid = props.scriptId;
       const trackId = currentTrack.value.id;
       if (pid != null && sid != null && trackId != null) {
-        scheduleCacheWrite(pid, sid, trackId, val);
+        persistCurrentTrackReferences();
       }
     }
   },
@@ -265,9 +287,98 @@ const imageList = computed({
 function modeChange(newVal: string, automatic = false) {
   if (newVal == modelParmas.value.mode) return;
   if (!newVal) return;
+  persistCurrentTrackReferences();
   modelParmas.value.mode = newVal;
   if (automatic) {
     window.$message?.info?.("已切换为新模型支持的生成模式，提示词和引用已保留。");
+  }
+}
+
+function changeResolution(resolution: string) {
+  if (!resolution || resolution === modelParmas.value.resolution) return;
+  persistCurrentTrackReferences();
+  modelParmas.value.resolution = resolution;
+}
+
+async function changeCurrentTrackDuration(duration: number) {
+  const track = currentTrack.value;
+  if (!track?.id || !isSupportedDuration(modeOptions.value, modelParmas.value.resolution, duration)) return;
+  const previousDuration = Number(track.duration || modelParmas.value.duration);
+  modelParmas.value.duration = duration;
+  track.duration = duration;
+  try {
+    await axios.post("/production/workbench/updateVideoDuration", { id: track.id, duration });
+  } catch (error: any) {
+    modelParmas.value.duration = previousDuration;
+    track.duration = previousDuration;
+    window.$message.error(error?.message || "保存视频时长失败");
+  }
+}
+
+function changeAudio(audio: boolean) {
+  if (modeOptions.value.audio !== "optional") return;
+  modelParmas.value.audio = audio;
+}
+
+function normalizeVideoPromptTypeCapability(value: unknown): VideoPromptTypeCapability | null {
+  if (!value || typeof value !== "object" || !Array.isArray((value as VideoPromptTypeCapability).options)) return null;
+  const options = (value as VideoPromptTypeCapability).options
+    .filter((item): item is VideoPromptTypeOption => !!item && typeof item.value === "string" && !!item.value && typeof item.label === "string")
+    .map((item) => ({ value: item.value, label: item.label }));
+  if (!options.length) return null;
+  const defaultValue = typeof (value as VideoPromptTypeCapability).defaultValue === "string" ? (value as VideoPromptTypeCapability).defaultValue : undefined;
+  return { options, defaultValue: options.some((item) => item.value === defaultValue) ? defaultValue : undefined };
+}
+
+function normalizeVideoPromptType(capability: VideoPromptTypeCapability | null, value: unknown) {
+  if (!capability || typeof value !== "string") return null;
+  return capability.options.some((item) => item.value === value) ? value : null;
+}
+
+function changeVideoPromptType(value: string | null) {
+  const capability = videoPromptTypeCapability.value;
+  const nextValue = value == null ? null : normalizeVideoPromptType(capability, value);
+  if (value != null && nextValue == null) return;
+  if (nextValue === videoPromptType.value) return;
+  const projectId = Number(project.value?.id);
+  const model = modelParmas.value.model;
+  if (!Number.isFinite(projectId) || !model || !capability) return;
+
+  videoPromptType.value = nextValue;
+  videoPromptTypeSaveQueue.push({ projectId, model, value: nextValue });
+  void flushVideoPromptTypeSave();
+}
+
+async function flushVideoPromptTypeSave() {
+  if (savingVideoPromptType) return;
+  savingVideoPromptType = true;
+  try {
+    while (videoPromptTypeSaveQueue.length) {
+      const job = videoPromptTypeSaveQueue.shift();
+      if (!job) continue;
+      try {
+        const { data } = await axios.post("/project/updateVideoPromptTypeSelection", {
+          projectId: job.projectId,
+          model: job.model,
+          videoPromptType: job.value,
+        });
+        const persisted = normalizeVideoPromptType(videoPromptTypeCapability.value, data?.selectedVideoPromptType);
+        const savedValue = data?.selectedVideoPromptType === null ? null : persisted ?? job.value;
+        confirmedVideoPromptTypes.set(job.model, savedValue);
+        if (modelParmas.value.model === job.model && videoPromptType.value === job.value) videoPromptType.value = savedValue;
+      } catch (error: any) {
+        const failedModel = job.model;
+        const failedValue = job.value;
+        const superseded = videoPromptTypeSaveQueue.some((queuedJob) => queuedJob.model === failedModel);
+        if (!superseded && modelParmas.value.model === failedModel && videoPromptType.value === failedValue) {
+          videoPromptType.value = confirmedVideoPromptTypes.get(failedModel) ?? null;
+          window.$message.error(error?.message || "保存视频类型失败");
+        }
+      }
+    }
+  } finally {
+    savingVideoPromptType = false;
+    if (videoPromptTypeSaveQueue.length) void flushVideoPromptTypeSave();
   }
 }
 const modeList = computed(() => {
@@ -342,10 +453,26 @@ function ensureCurrentTrackStoryboardReady() {
 
 /** 将时长限制在模型支持的范围内 */
 watch(
-  () => [project.value?.id, episodesId.value],
-  () => {
+  () => [project.value?.id, props.scriptId, props.refreshToken],
+  ([, scriptId], previous) => {
+    const previousScriptId = previous?.[1];
     restoredLastTrack.value = false;
     loadPromptAffixes();
+    if (!scriptId) {
+      trackList.value = [];
+      storyboardList.value = [];
+      return;
+    }
+    if (scriptId !== previousScriptId) {
+      trackContextVisible.value = false;
+      releaseVideoTaskSubscription?.();
+      releaseVideoTaskSubscription = null;
+      pendingManualTracks.value = [];
+      trackList.value = [];
+      storyboardList.value = [];
+      activeTrackIndex.value = 0;
+    }
+    void getGenerateData();
   },
   { immediate: true },
 );
@@ -389,13 +516,27 @@ function scheduleCacheWrite(projectId: string | number, scriptId: string | numbe
   );
 }
 
-function clampDuration(trackDuration: number): number {
-  const drMap = modeOptions.value?.durationResolutionMap;
-  if (Array.isArray(drMap) && drMap.length > 0 && drMap[0].duration?.length) {
-    const durations = drMap[0].duration;
-    return Math.max(Math.min(...durations), Math.min(trackDuration, Math.max(...durations)));
+const supportedDurations = computed(() => getSupportedDurations(modeOptions.value, modelParmas.value.resolution));
+
+function isCurrentDurationSupported(duration = modelParmas.value.duration) {
+  return isSupportedDuration(modeOptions.value, modelParmas.value.resolution, duration);
+}
+
+function persistTrackReferences(track?: TrackItem) {
+  const pid = project.value?.id;
+  const sid = props.scriptId;
+  if (pid == null || sid == null || track?.id == null) return;
+  const key = `${pid}:${sid}:${track.id}`;
+  const pending = cacheWriteTimers.get(key);
+  if (pending) {
+    clearTimeout(pending);
+    cacheWriteTimers.delete(key);
   }
-  return trackDuration;
+  setCache(pid, sid, track.id, track.medias as unknown as UploadItem[]);
+}
+
+function persistCurrentTrackReferences() {
+  persistTrackReferences(currentTrack.value);
 }
 
 function normalizeTrackItem(track: TrackItem): TrackItem {
@@ -408,26 +549,6 @@ function normalizeTrackItem(track: TrackItem): TrackItem {
       status: normalizeTaskStatus((video as any).status ?? video.state, "pending"),
     })),
   };
-}
-
-function referenceIdentity(item: Pick<UploadItem, "id" | "sources">) {
-  return item.id == null ? "" : `${item.sources ?? ""}:${item.id}`;
-}
-
-function mergeRetainedReferences(localItems: UploadItem[], restoredItems: UploadItem[]) {
-  const seen = new Set<string>();
-  const merged = localItems.map((item) => ({ ...item }));
-  localItems.forEach((item) => {
-    const key = referenceIdentity(item);
-    if (key) seen.add(key);
-  });
-  restoredItems.forEach((item) => {
-    const key = referenceIdentity(item);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    merged.push({ ...item });
-  });
-  return merged;
 }
 
 function unwrapApiData(response: any) {
@@ -471,9 +592,8 @@ function getNextManualGroupName() {
 
 function getManualTrackDuration() {
   const rawDuration = Number(modelParmas.value.duration);
-  const fallbackDuration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 8;
-  const clamped = clampDuration(fallbackDuration);
-  return Number.isFinite(clamped) && clamped > 0 ? clamped : 8;
+  if (Number.isFinite(rawDuration) && rawDuration > 0 && isCurrentDurationSupported(rawDuration)) return rawDuration;
+  return supportedDurations.value[0] ?? 8;
 }
 
 function getAddTrackPayload(response: any) {
@@ -487,7 +607,7 @@ function selectTrackById(trackId: number | string | null | undefined) {
   if (nextIndex < 0) return false;
   activeTrackIndex.value = nextIndex;
   const selectedTrack = trackList.value[nextIndex];
-  modelParmas.value.duration = clampDuration(selectedTrack.duration || modelParmas.value.duration);
+  modelParmas.value.duration = Number(selectedTrack.duration || modelParmas.value.duration);
   rememberCurrentTrack(selectedTrack.id);
   return true;
 }
@@ -516,7 +636,7 @@ async function addManualTrack() {
   if (addTrackLoading.value) return;
   const current = currentTrack.value;
   const pid = project.value?.id;
-  const sid = episodesId.value;
+  const sid = props.scriptId;
   if (pid == null || sid == null) {
     window.$message.warning("当前项目或剧集缺少 ID");
     return;
@@ -545,7 +665,6 @@ async function addManualTrack() {
     const nextIndex = upsertTrackItem(normalizedTrack);
     if (!selectTrackById(normalizedTrack.id)) activeTrackIndex.value = nextIndex;
     window.$message.success("已新增空视频组");
-    syncPromptTasks();
     void getGenerateData({ selectTrackId: normalizedTrack.id });
   } catch (error: any) {
     window.$message.error(error?.message || "新增视频组失败");
@@ -556,7 +675,10 @@ async function addManualTrack() {
 watch(
   () => modelParmas.value.model,
   (val) => {
+    persistCurrentTrackReferences();
     const requestId = ++modelDetailRequestId;
+    videoPromptTypeCapability.value = null;
+    videoPromptType.value = null;
     if (!val) {
       modeOptions.value = {
         name: "",
@@ -568,15 +690,25 @@ watch(
       };
       return;
     }
-    axios.post("/modelSelect/getModelDetail", { modelId: val }).then(({ data }) => {
+    axios.post("/modelSelect/getModelDetail", { modelId: val, projectId: Number(project.value?.id) || undefined }).then(({ data }) => {
       if (requestId !== modelDetailRequestId || val !== modelParmas.value.model) return;
       modeOptions.value = data;
-      modelParmas.value.audio = data.audio === true || data.audio === "true" || data.audio == "optional";
-      const drMap = data.durationResolutionMap;
-      if (Array.isArray(drMap) && drMap.length > 0) {
-        if (drMap[0].resolution?.length) modelParmas.value.resolution = drMap[0].resolution[0];
-        if (drMap[0].duration?.length) modelParmas.value.duration = clampDuration(modelParmas.value.duration);
+      const capability = normalizeVideoPromptTypeCapability(data?.videoPromptTypeCapability);
+      videoPromptTypeCapability.value = capability;
+      if (capability) {
+        const selected =
+          normalizeVideoPromptType(capability, data?.selectedVideoPromptType) ??
+          normalizeVideoPromptType(capability, capability.defaultValue) ??
+          null;
+        videoPromptType.value = selected;
+        confirmedVideoPromptTypes.set(val, selected);
       }
+      const nextResolutions = getSupportedResolutions(data);
+      if (nextResolutions.length && !nextResolutions.some((item) => item.toLowerCase() === String(modelParmas.value.resolution).toLowerCase())) {
+        modelParmas.value.resolution = nextResolutions[0];
+      }
+      if (data.audio === true || data.audio === "true") modelParmas.value.audio = true;
+      else if (data.audio === false || data.audio === "false") modelParmas.value.audio = false;
 
       const currentParsed = parseMode(modelParmas.value.mode);
       const modeMatched =
@@ -676,7 +808,7 @@ async function saveReferenceAudioClip(payload: { base64Data: string; name: strin
   try {
     const response = await axios.post("/production/editImage/uploadMedia", {
       projectId: project.value?.id,
-      scriptId: episodesId.value ?? 0,
+      scriptId: props.scriptId,
       type: "audio",
       base64Data: payload.base64Data,
       name: payload.name,
@@ -718,11 +850,15 @@ async function saveReferenceAudioClip(payload: { base64Data: string; name: strin
   }
 }
 
-async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: number | string; restoreReferencesTrackId?: number | string } = {}) {
+async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: number | string } = {}) {
+  const requestScriptId = props.scriptId;
+  if (!requestScriptId) return;
+  if (!options.forceCache) persistCurrentTrackReferences();
   const response = await axios.post("/production/workbench/getGenerateData", {
     projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
+    scriptId: requestScriptId,
   });
+  if (requestScriptId !== props.scriptId) return;
   const data = unwrapApiData(response) ?? {};
 
   storyboardList.value = (data.storyboardList ?? []).map((item: StoryboardItem) =>
@@ -735,12 +871,9 @@ async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: 
     ),
   ) as StoryboardItem[];
   data.trackList = mergePendingManualTracks((data.trackList ?? []).map((track: TrackItem) => normalizeTrackItem(track)));
-  const restoredTrackMedias = options.restoreReferencesTrackId == null
-    ? []
-    : (data.trackList.find((track: TrackItem) => Number(track.id) === Number(options.restoreReferencesTrackId))?.medias ?? []);
   // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
   const pid = project.value?.id;
-  const sid = episodesId.value;
+  const sid = requestScriptId;
   if (pid != null && sid != null) {
     // 先将没有缓存的轨道写入缓存（保留已有本地编辑）
     if (options.forceCache) {
@@ -751,6 +884,7 @@ async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: 
     }
     // 批量向后端请求文件路径对应的完整 URL
     await warmUpUrls(pid, sid);
+    if (requestScriptId !== props.scriptId) return;
     // 将本地缓存回写到 trackList，确保优先使用缓存数据（src 已解析为完整 URL）
     data.trackList.forEach((track: TrackItem) => {
       if (track.id == null) return;
@@ -767,31 +901,40 @@ async function getGenerateData(options: { forceCache?: boolean; selectTrackId?: 
       if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(trackList.value.length - 1, 0);
       restoreLastTrack();
     }
-    // Restore the remembered track before the first await. Otherwise the default
-    // first track watcher can overwrite lastTrackId while results are refreshing.
-    await refreshVideoResults(trackList.value.flatMap((track) => track.videoList));
-    if (options.restoreReferencesTrackId != null) {
-      const targetTrack = trackList.value.find((track) => Number(track.id) === Number(options.restoreReferencesTrackId));
-      if (targetTrack?.id != null) {
-        targetTrack.medias = mergeRetainedReferences(targetTrack.medias as UploadItem[], restoredTrackMedias as UploadItem[]) as any;
-        setCache(pid, sid, targetTrack.id, targetTrack.medias as unknown as UploadItem[]);
-      }
-    }
-    syncPromptTasks();
+    // Running-task lifecycle is restored by the project task snapshot. The
+    // business list only restores persisted tracks and candidate media.
+    bindVideoTaskSubscription();
   }
 
   const selectedDuration = trackList.value?.[activeTrackIndex.value]?.duration;
-  if (selectedDuration != null) modelParmas.value.duration = clampDuration(selectedDuration);
+  if (selectedDuration != null) modelParmas.value.duration = Number(selectedDuration);
 }
 
 async function restoreCurrentTrackReferences() {
   const trackId = currentTrack.value?.id;
   if (trackId == null) return;
+  const pid = project.value?.id;
+  const sid = props.scriptId;
+  if (pid == null || sid == null) return;
   try {
-    await getGenerateData({ selectTrackId: trackId, restoreReferencesTrackId: trackId });
-    window.$message.success("已恢复当前轨道可用的分镜与资产引用，并保留本地引用。");
+    const cached = await getCacheWithResolve(pid, sid, trackId);
+    if (cached?.length) {
+      currentTrack.value!.medias = cached as unknown as TrackMedia[];
+      setCache(pid, sid, trackId, cached);
+      window.$message.success("已恢复当前轨道的本地引用调整。");
+      return;
+    }
+    removeCache(pid, sid, trackId);
+    await getGenerateData({ selectTrackId: trackId });
+    window.$message.info("未找到本地引用调整，已加载后端初始引用。");
   } catch (error: any) {
-    window.$message.error(error?.message || "恢复引用失败，请稍后重试。");
+    try {
+      removeCache(pid, sid, trackId);
+      await getGenerateData({ selectTrackId: trackId });
+      window.$message.info("本地引用恢复失败，已加载后端初始引用。");
+    } catch (fallbackError: any) {
+      window.$message.error(fallbackError?.message || error?.message || "恢复引用失败，请稍后重试。");
+    }
   }
 }
 /** 提示词失焦时保存到后端 */
@@ -867,7 +1010,7 @@ async function mergeReferences(type: "storyboard" | "assets") {
     }));
     const response = await axios.post("/production/workbench/createMergedReference", {
       projectId: project.value?.id,
-      scriptId: episodesId.value,
+      scriptId: props.scriptId,
       trackId: currentTrack.value.id,
       mergeType: type,
       refs,
@@ -950,26 +1093,9 @@ async function genTextConfirmed() {
   if (!ensureCurrentTrackStoryboardReady()) return;
   if (currentTrack.value.id == null) return;
   taskCenter.removeTask(createTaskKey("videoPrompt", Number(project.value?.id), currentTrack.value.id));
-  let info: Array<{ id: number | string; sources: WorkbenchReferenceSource }> = [];
   const currentTrackId = currentTrack.value.id;
   const changeTrack = currentTrack.value;
-  if (modelParmas.value.mode !== "text") {
-    info =
-      (() => {
-        const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-        const preSliced = frameMode.includes(modelParmas.value.mode)
-          ? imageList.value.slice(0, 2)
-          : modelParmas.value.mode === "singleImage"
-            ? imageList.value.slice(0, 1)
-            : imageList.value;
-        const filtered = preSliced
-          .filter((item): item is UploadItem & { id: number | string; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.sources))
-          .map(({ id, sources }) => ({ id, sources }));
-        if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
-        if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
-        return filtered;
-      })();
-  }
+  const info = buildVideoReferencePayload(modelParmas.value.mode, imageList.value);
   currentTrack.value.state = "生成中";
   currentTrack.value.status = "processing";
   try {
@@ -981,12 +1107,13 @@ async function genTextConfirmed() {
       mode: modelParmas.value.mode,
       promptPrefix: promptPrefix.value,
       promptSuffix: promptSuffix.value,
+      videoPromptType: videoPromptType.value ?? undefined,
     });
     if (typeof data === "object" && data?.taskId) {
       changeTrack.taskId = data.taskId;
       changeTrack.state = "生成中";
       changeTrack.status = normalizeTaskStatus(data.status, "queued");
-      syncPromptTasks();
+      registerSubmittedPromptTask({ trackId: currentTrackId, taskId: data.taskId, status: data.status });
     } else {
       changeTrack.prompt = data;
       currentTrack.value.state = "已完成";
@@ -1004,14 +1131,14 @@ function trackChange(prevIndex?: number) {
   if (prevIndex != null) {
     const prevTrack = trackList.value[prevIndex];
     const pid = project.value?.id;
-    const sid = episodesId.value;
+    const sid = props.scriptId;
     if (pid != null && sid != null && prevTrack?.id != null) {
-      scheduleCacheWrite(pid, sid, prevTrack.id, prevTrack.medias as unknown as UploadItem[]);
+      persistTrackReferences(prevTrack);
     }
   }
   // 切换后：从缓存恢复当前轨道的 imageList
   const pid = project.value?.id;
-  const sid = episodesId.value;
+      const sid = props.scriptId;
   const curTrack = trackList.value[activeTrackIndex.value];
   if (pid != null && sid != null && curTrack?.id != null) {
     const cached = getCache(pid, sid, curTrack.id);
@@ -1019,8 +1146,7 @@ function trackChange(prevIndex?: number) {
       curTrack.medias = cached as unknown as TrackMedia[];
     }
   }
-  // The model limits what is submitted, never what a track is allowed to retain.
-  modelParmas.value.duration = clampDuration(trackList.value?.[activeTrackIndex.value]?.duration);
+  modelParmas.value.duration = Number(trackList.value?.[activeTrackIndex.value]?.duration || modelParmas.value.duration);
 }
 /** 监听当前轨道的 medias 变化，实时同步到缓存 */
 watch(
@@ -1028,7 +1154,7 @@ watch(
   (medias) => {
     if (!medias) return;
     const pid = project.value?.id;
-    const sid = episodesId.value;
+    const sid = props.scriptId;
     const trackId = currentTrack.value?.id;
     if (pid != null && sid != null && trackId != null) {
       scheduleCacheWrite(pid, sid, trackId, medias as unknown as UploadItem[]);
@@ -1040,25 +1166,7 @@ watch(
 onMounted(() => {
   modelParmas.value.model = project.value?.videoModel || "";
   modelParmas.value.mode = project.value?.mode || "";
-  void getGenerateData();
 });
-
-type VideoUploadDataItem = { id: number | string; sources: WorkbenchReferenceSource };
-
-function buildVideoUploadData(mode: string, items: UploadItem[]): VideoUploadDataItem[] {
-  const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-  const preSliced = frameMode.includes(mode)
-    ? items.slice(0, 2)
-    : mode === "singleImage"
-      ? items.slice(0, 1)
-      : items;
-  const filtered = preSliced
-    .filter((item): item is UploadItem & { id: number | string; sources: WorkbenchReferenceSource } => item.id != null && Boolean(item.src) && Boolean(item.sources))
-    .map(({ id, sources }) => ({ id, sources }));
-  if (frameMode.includes(mode)) return filtered.slice(0, 2);
-  if (mode === "singleImage") return filtered.slice(0, 1);
-  return filtered;
-}
 
 function createVideoGenerationSnapshot() {
   const track = currentTrack.value;
@@ -1066,17 +1174,18 @@ function createVideoGenerationSnapshot() {
   const mode = modelParmas.value.mode;
   return {
     projectId: project.value?.id,
-    scriptId: episodesId.value,
+    scriptId: props.scriptId,
     trackId: track.id,
     trackRef: track,
     rawPrompt: track.prompt,
     prompt: composePrompt(track.prompt),
-    uploadData: mode === "text" ? [] : buildVideoUploadData(mode, imageList.value),
+    uploadData: buildVideoReferencePayload(mode, imageList.value),
     model: modelParmas.value.model,
     mode,
     resolution: modelParmas.value.resolution,
     duration: modelParmas.value.duration,
     audio: modelParmas.value.audio,
+    videoPromptType: videoPromptType.value ?? undefined,
   };
 }
 
@@ -1089,9 +1198,14 @@ async function generateVideo() {
     window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
     return;
   }
+  if (!isCurrentDurationSupported(snapshot.duration)) {
+    const options = supportedDurations.value.length ? `，支持：${supportedDurations.value.join(", ")}s` : "";
+    window.$message.warning(`当前模型在 ${snapshot.resolution} 不支持 ${snapshot.duration}s${options}`);
+    return;
+  }
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.generateConfirm"),
-    body: $t("workbench.generate.generateConfirmBody"),
+    body: `${$t("workbench.generate.generateConfirmBody")}\n\n模型：${snapshot.model}\n模式：${snapshot.mode}\n参数：${snapshot.resolution} · ${snapshot.duration}s · ${snapshot.audio ? "生成音频" : "无音频"}\n引用：${snapshot.uploadData.length} 个`,
     onConfirm: async () => {
       dlg.destroy();
       try {
@@ -1105,6 +1219,7 @@ async function generateVideo() {
           resolution: snapshot.resolution,
           duration: snapshot.duration,
           audio: snapshot.audio,
+          videoPromptType: snapshot.videoPromptType,
           trackId: snapshot.trackId,
         });
         window.$message.success($t("workbench.generate.generateStarted"));
@@ -1114,7 +1229,13 @@ async function generateVideo() {
         const initialStatus = normalizeTaskStatus(typeof data === "object" ? data.status : undefined, "queued");
         const targetTrack = trackList.value.find((track) => track.id === snapshot.trackId);
         if (!targetTrack) {
-          registerSubmittedVideoTask(videoId, taskId, initialStatus);
+          registerSubmittedVideoTask({
+            videoId,
+            trackId: snapshot.trackId,
+            taskId,
+            queueTaskId: typeof data === "object" ? data.queueTaskId : undefined,
+            status: initialStatus,
+          });
           await getGenerateData();
           return;
         }
@@ -1126,7 +1247,13 @@ async function generateVideo() {
           taskId,
           queueTaskId: typeof data === "object" ? data.queueTaskId : undefined,
         });
-        registerSubmittedVideoTask(videoId, taskId, initialStatus);
+        registerSubmittedVideoTask({
+          videoId,
+          trackId: snapshot.trackId,
+          taskId,
+          queueTaskId: typeof data === "object" ? data.queueTaskId : undefined,
+          status: initialStatus,
+        });
       } catch (e) {
         window.$message.error(getReviewMessage(e) || "视频发起生成请求失败");
       } finally {
@@ -1135,31 +1262,6 @@ async function generateVideo() {
     onCancel: () => dlg.destroy(),
   });
 }
-const hasGenerateVideoIds = computed(() => {
-  return trackList.value
-    .map((track) => {
-      return track.videoList.filter((i) => isActiveRuntimeStatus(i)).map((i) => i.id);
-    })
-    .flatMap((i) => i);
-});
-const hasGeneratePromptIds = computed(() => {
-  const trackIds = trackList.value.filter((t) => isActiveRuntimeStatus(t)).map((t) => t.id);
-  return trackIds;
-});
-
-function releaseVideoTask(id: number) {
-  videoTaskBindings.get(id)?.();
-  videoTaskBindings.delete(id);
-  const reconcileTimer = videoTerminalReconcileTimers.get(id);
-  if (reconcileTimer) clearTimeout(reconcileTimer);
-  videoTerminalReconcileTimers.delete(id);
-}
-
-function releasePromptTask(id: number) {
-  promptTaskBindings.get(id)?.();
-  promptTaskBindings.delete(id);
-}
-
 function findVideoById(videoId: number) {
   for (const track of trackList.value) {
     const video = track.videoList.find((candidate) => Number(candidate.id) === videoId);
@@ -1168,32 +1270,77 @@ function findVideoById(videoId: number) {
   return undefined;
 }
 
-function registerSubmittedVideoTask(videoId: number, taskId: string | undefined, status: TaskStatus) {
+function findTrackById(trackId: number) {
+  return trackList.value.find((track) => Number(track.id) === Number(trackId));
+}
+
+function registerSubmittedVideoTask(payload: {
+  videoId: number;
+  trackId: number;
+  taskId?: string;
+  queueTaskId?: number;
+  status?: unknown;
+}) {
+  const taskId = typeof payload.taskId === "string" && payload.taskId.trim() ? payload.taskId : undefined;
   if (!taskId) return;
   const projectId = Number(project.value?.id);
   if (!projectId) return;
+  taskCenter.registerTask({
+    key: createTaskKey("video", projectId, payload.trackId, undefined, taskId),
+    domain: "video",
+    unifiedTaskId: taskId,
+    targetId: payload.trackId,
+    targetType: "videoTrack",
+    businessId: payload.videoId,
+    projectId,
+    scriptId: props.scriptId,
+    status: normalizeTaskStatus(payload.status, "queued"),
+  });
+}
 
-  releaseVideoTask(videoId);
-  const release = taskCenter.registerTask(
-    {
-      key: createTaskKey("video", projectId, videoId, undefined, taskId),
-      domain: "video",
-      unifiedTaskId: taskId,
-      targetId: videoId,
-      targetType: "video",
-      projectId,
-      scriptId: episodesId.value,
-      status,
-    },
-    (task) => applyVideoTask(videoId, task),
-  );
-  videoTaskBindings.set(videoId, release);
+function registerSubmittedPromptTask(payload: { trackId: number; taskId?: string; status?: unknown }) {
+  const taskId = typeof payload.taskId === "string" && payload.taskId.trim() ? payload.taskId : undefined;
+  if (!taskId) return;
+  const projectId = Number(project.value?.id);
+  if (!projectId) return;
+  taskCenter.registerTask({
+    key: createTaskKey("videoPrompt", projectId, payload.trackId, undefined, taskId),
+    domain: "videoPrompt",
+    unifiedTaskId: taskId,
+    targetId: payload.trackId,
+    targetType: "videoTrack",
+    businessId: payload.trackId,
+    projectId,
+    scriptId: props.scriptId,
+    status: normalizeTaskStatus(payload.status, "queued"),
+  });
+}
+
+function bindVideoTaskSubscription() {
+  releaseVideoTaskSubscription?.();
+  releaseVideoTaskSubscription = null;
+  const projectId = Number(project.value?.id);
+  const scriptId = Number(props.scriptId);
+  if (!projectId || !scriptId) return;
+  releaseVideoTaskSubscription = taskCenter.subscribeTasks({ projectId, replay: true }, (task) => {
+    if (Number(task.projectId) !== projectId || Number(task.scriptId) !== scriptId) return;
+    if (task.domain === "video") {
+      const videoId = Number(task.businessId);
+      if (Number.isFinite(videoId)) applyVideoTask(videoId, task);
+      return;
+    }
+    if (task.domain === "videoPrompt") {
+      const trackId = Number(task.businessId ?? task.targetId);
+      const track = Number.isFinite(trackId) ? findTrackById(trackId) : undefined;
+      if (track) applyPromptTask(track, task);
+    }
+  });
 }
 
 async function refreshCompletedPrompt(track: TrackItem) {
   if (!track.id || promptResultRefreshing.has(track.id)) return;
   const projectId = Number(project.value?.id);
-  const scriptId = Number(episodesId.value);
+  const scriptId = Number(props.scriptId);
   if (!projectId || !scriptId) return;
   promptResultRefreshing.add(track.id);
   try {
@@ -1205,7 +1352,6 @@ async function refreshCompletedPrompt(track: TrackItem) {
     const records = Array.isArray(data) ? data : data?.data;
     const record = Array.isArray(records) ? records.find((item: any) => Number(item.id) === Number(track.id)) : null;
     if (record?.prompt !== undefined) track.prompt = record.prompt;
-    if (record?.state) track.state = record.state;
     if (record?.reason !== undefined) track.reason = record.reason;
   } catch (e) {
     console.warn("[workbench-prompt] failed to refresh completed prompt", e);
@@ -1234,22 +1380,21 @@ function updateVideoState(video: VideoItem, nextStatusValue: unknown) {
 }
 
 function applyVideoResult(video: VideoItem, record: Record<string, any>) {
-  if (!updateVideoState(video, record.status ?? record.state)) return false;
   const media = normalizeMediaRef(record.media ?? record, "video");
   if (media) {
     video.media = media;
     video.src = getMediaOriginalUrl(media);
   }
   video.errorReason = record.reason ?? record.errorReason ?? video.errorReason ?? "";
-  return isTerminalVideoStatus(getRuntimeStatus(video, "processing"));
+  return true;
 }
 
 async function refreshVideoResults(videos: VideoItem[]) {
-  const confirmedVideoIds = new Set<number>();
+  const resolvedVideoIds = new Set<number>();
   const projectId = Number(project.value?.id);
-  const scriptId = Number(episodesId.value);
+  const scriptId = Number(props.scriptId);
   const pending = videos.filter((video) => video.id && !videoResultRefreshing.has(video.id));
-  if (!projectId || !scriptId || !pending.length) return confirmedVideoIds;
+  if (!projectId || !scriptId || !pending.length) return resolvedVideoIds;
   pending.forEach((video) => videoResultRefreshing.add(video.id));
   try {
     const { data } = await axios.post("/production/workbench/checkVideoStateList", {
@@ -1261,14 +1406,14 @@ async function refreshVideoResults(videos: VideoItem[]) {
     const recordMap = new Map(records.map((record) => [Number(record.id ?? record.videoId), record]));
     pending.forEach((video) => {
       const record = recordMap.get(Number(video.id));
-      if (record && applyVideoResult(video, record)) confirmedVideoIds.add(video.id);
+      if (record && applyVideoResult(video, record)) resolvedVideoIds.add(video.id);
     });
   } catch (error) {
     console.warn("[workbench-video] failed to refresh completed video", error);
   } finally {
     pending.forEach((video) => videoResultRefreshing.delete(video.id));
   }
-  return confirmedVideoIds;
+  return resolvedVideoIds;
 }
 
 function scheduleVideoTerminalReconcile(videoId: number, attempt = 1) {
@@ -1278,15 +1423,9 @@ function scheduleVideoTerminalReconcile(videoId: number, attempt = 1) {
   const timer = setTimeout(async () => {
     videoTerminalReconcileTimers.delete(videoId);
     const currentVideo = findVideoById(videoId);
-    if (!currentVideo) {
-      releaseVideoTask(videoId);
-      return;
-    }
-    const confirmedVideoIds = await refreshVideoResults([currentVideo]);
-    if (confirmedVideoIds.has(videoId)) {
-      releaseVideoTask(videoId);
-      return;
-    }
+    if (!currentVideo) return;
+    const resolvedVideoIds = await refreshVideoResults([currentVideo]);
+    if (resolvedVideoIds.has(videoId)) return;
     if (attempt < 2 && isTerminalVideoStatus(getRuntimeStatus(currentVideo, "processing"))) {
       scheduleVideoTerminalReconcile(videoId, attempt + 1);
     }
@@ -1296,10 +1435,7 @@ function scheduleVideoTerminalReconcile(videoId: number, attempt = 1) {
 
 function applyVideoTask(videoId: number, task: RuntimeTask) {
   const video = findVideoById(videoId);
-  if (!video) {
-    if (isTerminalVideoStatus(task.status)) queueMicrotask(() => releaseVideoTask(videoId));
-    return;
-  }
+  if (!video) return;
   const record = (task.result ?? {}) as any;
   if (!updateVideoState(video, task.status)) return;
   const media = normalizeMediaRef(record.media ?? record, "video");
@@ -1307,15 +1443,16 @@ function applyVideoTask(videoId: number, task: RuntimeTask) {
     video.media = media;
     video.src = getMediaOriginalUrl(media);
   }
+  video.phase = task.phase ?? null;
+  video.progress = task.progress ?? null;
   video.errorReason = task.reason ?? "";
   if (task.status === "failed" && !reportedFailures.has(task.key)) {
     reportedFailures.add(task.key);
     window.$message.error(task.reason || "视频生成失败");
   }
   if (isTerminalVideoStatus(task.status)) {
-    void refreshVideoResults([video]).then((confirmedVideoIds) => {
-      if (confirmedVideoIds.has(videoId)) releaseVideoTask(videoId);
-      else scheduleVideoTerminalReconcile(videoId);
+    void refreshVideoResults([video]).then((resolvedVideoIds) => {
+      if (!resolvedVideoIds.has(videoId) && task.status === "completed") scheduleVideoTerminalReconcile(videoId);
     });
   }
 }
@@ -1333,89 +1470,19 @@ function applyPromptTask(track: TrackItem, task: RuntimeTask) {
   if (prompt !== undefined) track.prompt = String(prompt);
   else if (task.status === "completed") void refreshCompletedPrompt(track);
   track.reason = task.reason ?? "";
+  track.phase = task.phase ?? null;
+  track.progress = task.progress ?? null;
   if (task.status === "failed" && !reportedFailures.has(task.key)) {
     reportedFailures.add(task.key);
     window.$message.error(`提示词生成失败，${task.reason || "未知原因"}`);
   }
-  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
-    queueMicrotask(() => releasePromptTask(track.id));
-  }
 }
-
-function stopVideoStatusPolling() {
-  if (videoStatusPollTimer) clearTimeout(videoStatusPollTimer);
-  videoStatusPollTimer = null;
-}
-
-function scheduleVideoStatusPolling(delay = 0) {
-  if (!hasGenerateVideoIds.value.length) {
-    stopVideoStatusPolling();
-    return;
-  }
-  if (videoStatusPollTimer || videoStatusPollInFlight) return;
-  videoStatusPollTimer = setTimeout(() => void pollActiveVideoResults(), delay);
-}
-
-async function pollActiveVideoResults() {
-  videoStatusPollTimer = null;
-  if (videoStatusPollInFlight || !hasGenerateVideoIds.value.length) return;
-  videoStatusPollInFlight = true;
-  try {
-    const activeVideos = trackList.value.flatMap((track) => track.videoList.filter((video) => isActiveRuntimeStatus(video)));
-    await refreshVideoResults(activeVideos);
-  } finally {
-    videoStatusPollInFlight = false;
-    if (hasGenerateVideoIds.value.length) scheduleVideoStatusPolling(3_000);
-  }
-}
-
-function syncPromptTasks() {
-  const projectId = Number(project.value?.id);
-  if (!projectId) return;
-  const activeIds = new Set<number>();
-  trackList.value.forEach((track) => {
-    if (!isActiveRuntimeStatus(track)) return;
-    activeIds.add(track.id);
-    const existingTask = taskCenter.getTask(createTaskKey("videoPrompt", projectId, track.id, undefined, track.taskId));
-    if (promptTaskBindings.has(track.id) && (!track.taskId || existingTask?.unifiedTaskId === track.taskId)) return;
-    if (promptTaskBindings.has(track.id)) releasePromptTask(track.id);
-    const release = taskCenter.registerTask(
-      {
-        key: createTaskKey("videoPrompt", projectId, track.id),
-        domain: "videoPrompt",
-        unifiedTaskId: track.taskId,
-        targetType: "videoPrompt",
-        targetId: track.id,
-        projectId,
-        scriptId: episodesId.value,
-        status: getRuntimeStatus(track, "processing"),
-      },
-      (task) => applyPromptTask(track, task),
-    );
-    promptTaskBindings.set(track.id, release);
-  });
-  Array.from(promptTaskBindings.keys()).forEach((id) => {
-    if (!activeIds.has(id)) releasePromptTask(id);
-  });
-}
-
-watch(
-  () => hasGenerateVideoIds.value.join(","),
-  () => scheduleVideoStatusPolling(),
-);
-watch(
-  () => hasGeneratePromptIds.value,
-  syncPromptTasks,
-);
 onUnmounted(() => {
   emit("track-context-visible-change", false);
-  videoTaskBindings.forEach((release) => release());
-  promptTaskBindings.forEach((release) => release());
-  videoTaskBindings.clear();
-  promptTaskBindings.clear();
+  releaseVideoTaskSubscription?.();
+  releaseVideoTaskSubscription = null;
   videoTerminalReconcileTimers.forEach((timer) => clearTimeout(timer));
   videoTerminalReconcileTimers.clear();
-  stopVideoStatusPolling();
   cacheWriteTimers.forEach((timer) => clearTimeout(timer));
   cacheWriteTimers.clear();
   if (promptAffixWriteTimer) clearTimeout(promptAffixWriteTimer);
@@ -1424,9 +1491,18 @@ onUnmounted(() => {
 
 <style lang="scss" scoped>
 .index {
-  height: calc(100vh - 120px);
-  gap: 16px;
-  overflow-y: auto;
+  height: 100%;
+  min-height: 0;
+  gap: 6px;
+  overflow: hidden;
+  .referenceImage,
+  .modelSelect,
+  .globalPromptAffix,
+  .trackContextSummary,
+  .storyboardFactGate,
+  .track {
+    flex: 0 0 auto;
+  }
   .referenceImage {
     .referenceToolbar {
       margin-bottom: 8px;
@@ -1520,6 +1596,7 @@ onUnmounted(() => {
     }
   }
   .track {
+    flex-shrink: 0;
   }
 }
 </style>
